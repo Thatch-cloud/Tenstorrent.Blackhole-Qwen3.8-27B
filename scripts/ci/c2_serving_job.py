@@ -36,7 +36,10 @@ Keys (every one optional but C2_IMAGE_TAG):
                       few real layers; the step mounts the hub read-only for it; SPLIT_PROBE verdict=IDENTICAL|DIFFERS|FAIL, exit 0/2/1;
                       docs/tp4-exact-resume.md 5.3) or split-attribute (the same probe with --attribute: each split again with both segments forced into
                       the 2048 bucket, so a difference is attributed to the segments' programs or to the store at the split; SPLIT_PROBE attribution
-                      lines, docs/tp4-exact-end.md 2); needs the fabric action
+                      lines, docs/tp4-exact-end.md 2) or p2p (tp4_p2p_probe.py, P3a: the cache drive's identity and R1's readings first, then the peer-to-peer
+                      restore NVMe -> the cards' staging buffers -> the KV caches, one card first, byte for byte, with a negative arm, the windows and the p2pmem
+                      pools released at the end; P3A verdict=PASS|FAIL|NOT-MEASURED, exit 0/1/2; docs/tp4-p2p-restore.md section 8. Which drive and which cards come from
+                      a PRIVATE file on the runner, never from the job or the repository); needs the fabric action
   C2_SUPERSEDED_BY    set on every template of a pack that a later pack replaced (references/tp4-w2-jobs); read_job REFUSES such a template
   C2_PROFILE          the C2 profile smoke and gate serve (default: general)
   C2_CARDS            the card set the hardware steps open: pair (cards M and A, the default) or quad (every
@@ -231,7 +234,7 @@ TP4_MESH_DEVICE = 'P150x4'
 PAIR_MESH_DEVICES = (None, 'P300')
 FABRIC_CONFIGS = ('FABRIC_1D', 'FABRIC_1D_RING')
 FABRIC_PROBES = ('fabric', 'rs-tile', 'mr', 'kvread', 'ccl-sweep', 'ccl-sweep-safe', 'ccl-sweep-core', 'ccl-sweep-p8192', 'ccl-sweep-quick',
-                 'split', 'split-attribute')
+                 'split', 'split-attribute', 'p2p')
 DRAFTER_ID = re.compile(r'[a-z0-9][a-z0-9.-]{2,63}')
 GATE_PLANS = ('bringup', 'matrix', 'memory', 'lifecycle')
 # S2 (s2-design.md 6.3), run on the S2 image (graft K64j) and its c2-packed profiles; c2_serving_gate.py says what

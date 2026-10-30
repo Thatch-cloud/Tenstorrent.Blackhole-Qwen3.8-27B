@@ -1102,8 +1102,6 @@ class NvmeTier(object):
                 kwargs['file_factory'] = file_factory
             store = NvmeStore.open(plan.device, **dict(kwargs, **options))
         self.store = store
-        if plan.p2p and backend is None:
-            self._start_p2p(p2p_engine)
         if plan.free_floor_bytes is None:
             self.store.free_floor_bytes = int(self.store.geometry.data_bytes * DEFAULT_FREE_FLOOR_FRACTION)
         else:
@@ -1112,6 +1110,8 @@ class NvmeTier(object):
             self.w['nvme_' + name] = self.store.stats[name]
         dropped = self.store.drop_where(lambda entry: entry.fp != self.fp)
         self.w['nvme_fp_drops'] += dropped
+        if plan.p2p and backend is None:
+            self._start_p2p(p2p_engine)                  # (last: the open line below names the backend, and nothing after it can fail with the windows taken)
         stats = self.store.snapshot_stats()
         self.log('nvme tier open device=%s backend=%s ttl_s=%d max_age_s=%d max_bytes=%d capacity_bytes=%d free_floor_bytes=%d entries=%d kv=%d ckpt=%d '
                  'recovered_records=%d recover_dropped=%d fp_drops=%d verify=%s queue_bytes=%d threads=%d audit=%d spill=%s retention_ack=1 at_rest=%s fingerprint=%s',

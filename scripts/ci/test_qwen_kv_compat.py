@@ -237,7 +237,7 @@ class FingerprintEnvTests(unittest.TestCase):
         on, on_components = self.components({}, QWEN_PREFIX_NVME_P2P='1')
         self.assertEqual((components['layout'], on_components['layout']), (kvnvme.LAYOUT, kvnvme.LAYOUT_CHIPMAJOR))
         self.assertNotEqual(on, base)
-        for knob in ({'QWEN_PREFIX_NVME_P2P_THREADS': '2'}, {'QWEN_PREFIX_NVME_P2P_STAGING_MIB': '64'}, {'QWEN_PREFIX_NVME_P2PMEM': '0000:88:00.0'}):
+        for knob in ({'QWEN_PREFIX_NVME_P2P_THREADS': '2'}, {'QWEN_PREFIX_NVME_P2P_STAGING_MIB': '64'}, {'QWEN_PREFIX_NVME_P2PMEM': '0000:41:00.0'}):
             self.assertEqual(self.fingerprint({}, QWEN_PREFIX_NVME_P2P='1', **knob), on, knob)
         # (the env the process runs under cannot move it either: the switch is read from the plan)
         self.assertEqual(self.fingerprint({'QWEN_PREFIX_NVME_P2P': '1'}), base)

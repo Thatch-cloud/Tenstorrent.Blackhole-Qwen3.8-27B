@@ -475,6 +475,8 @@ scripts/ci/idle_scratch.py
 scripts/ci/qwen_kv_nvme.py
 # NVME: the raw-namespace object store under it: superblocks, journal, snapshots, extent allocator, O_DIRECT IO
 scripts/ci/qwen_nvme_store.py
+# NVME: the peer-to-peer restore's host side (window aim, p2pmem read, p2p_checksum, engine and stream); qwen_kv_nvme imports it only when QWEN_PREFIX_NVME_P2P=1
+scripts/ci/qwen_p2p_restore.py
 # O3: packed_verifier imports it at module level (QWEN_FAST_AUDIT_FIRST / QWEN_FAST_AUDIT_EVERY: the sampled host read-back audits); inert while both are unset
 scripts/ci/audit_sampling.py
 # PF2: levern_route imports it at the attach once QWEN_FAST_PREFILL_HANDOFF or its audit flag is set (the device-side slot hand-off of the final step); an image without it refuses that boot

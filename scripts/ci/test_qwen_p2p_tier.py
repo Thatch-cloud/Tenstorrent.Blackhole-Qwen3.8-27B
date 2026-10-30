@@ -30,11 +30,10 @@ import qwen_p2p_restore as p2p  # noqa: E402
 import qwen_prefix_scheduler_patch as patch_module  # noqa: E402
 import serving_c2_contract as contract  # noqa: E402
 import test_qwen_prefix_tiers as tiers_module  # noqa: E402
-from qwen_prefix_registry import BLOCK, PrefixRegistry  # noqa: E402
 from test_qwen_kv_nvme import ACKED, NvmeCase, first_turn  # noqa: E402
 from test_qwen_p2p_restore import FakeMesh, make_links  # noqa: E402
 from test_qwen_prefix_scheduler_patch import FakeKvIO, Request, kv_content  # noqa: E402
-from test_qwen_prefix_tiers import SMALL_POOL, span  # noqa: E402
+from test_qwen_prefix_tiers import span  # noqa: E402
 
 P2P = {'QWEN_PREFIX_NVME_P2P': '1'}
 KV = store_module.KV
@@ -140,7 +139,7 @@ class FlagTests(unittest.TestCase):
         plan, problems = kvnvme.parse(ACKED)
         self.assertEqual((problems, plan.p2p, plan.p2pmem), ([], False, ()))
         for knob in ('QWEN_PREFIX_NVME_P2P_THREADS', 'QWEN_PREFIX_NVME_P2P_STAGING_MIB', 'QWEN_PREFIX_NVME_P2PMEM'):
-            plan, problems = kvnvme.parse(dict(ACKED, **{knob: '4' if 'MEM' not in knob else '0000:88:00.0'}))
+            plan, problems = kvnvme.parse(dict(ACKED, **{knob: '4' if 'MEM' not in knob else '0000:41:00.0'}))
             self.assertIsNone(plan)
             self.assertTrue(any(knob in problem and 'would ignore it' in problem for problem in problems), (knob, problems))
         plan, problems = kvnvme.parse(dict(ACKED, QWEN_PREFIX_NVME_P2P='0'))
@@ -150,11 +149,11 @@ class FlagTests(unittest.TestCase):
         plan, problems = kvnvme.parse(dict(ACKED, **P2P))
         self.assertEqual((problems, plan.p2p, plan.p2p_threads, plan.p2p_staging_bytes >> 20, plan.restore), ([], True, 8, 128, 'host'))
         plan, problems = kvnvme.parse(dict(ACKED, QWEN_PREFIX_NVME_P2P='1', QWEN_PREFIX_NVME_P2P_THREADS='16', QWEN_PREFIX_NVME_P2P_STAGING_MIB='256',
-                                           QWEN_PREFIX_NVME_P2PMEM='0000:92:00.0, 88:00.0'))
-        self.assertEqual((problems, plan.p2p_threads, plan.p2p_staging_bytes, plan.p2pmem), ([], 16, 256 << 20, ('0000:88:00.0', '0000:92:00.0')))
+                                           QWEN_PREFIX_NVME_P2PMEM='0000:42:00.0, 41:00.0'))
+        self.assertEqual((problems, plan.p2p_threads, plan.p2p_staging_bytes, plan.p2pmem), ([], 16, 256 << 20, ('0000:41:00.0', '0000:42:00.0')))
         for name, value in (('QWEN_PREFIX_NVME_P2P', '2'), ('QWEN_PREFIX_NVME_P2P_THREADS', '0'), ('QWEN_PREFIX_NVME_P2P_THREADS', '65'), ('QWEN_PREFIX_NVME_P2P_STAGING_MIB', '1'),
                             ('QWEN_PREFIX_NVME_P2P_STAGING_MIB', '5000'), ('QWEN_PREFIX_NVME_P2P_STAGING_MIB', '1e2'), ('QWEN_PREFIX_NVME_P2PMEM', 'nonsense'),
-                            ('QWEN_PREFIX_NVME_P2PMEM', '0000:88:00.0,')):
+                            ('QWEN_PREFIX_NVME_P2PMEM', '0000:41:00.0,')):
             plan, problems = kvnvme.parse(dict(ACKED, **dict(P2P, **{name: value})))
             self.assertIsNone(plan, (name, value))
             self.assertTrue(any(name in problem for problem in problems), (name, value, problems))
@@ -211,7 +210,7 @@ class FingerprintTests(unittest.TestCase):
 
     def test_the_knobs_do_not_move_it(self):
         base, _ = self.components(**P2P)
-        for knob in ({'QWEN_PREFIX_NVME_P2P_THREADS': '3'}, {'QWEN_PREFIX_NVME_P2P_STAGING_MIB': '64'}, {'QWEN_PREFIX_NVME_P2PMEM': '0000:88:00.0'}):
+        for knob in ({'QWEN_PREFIX_NVME_P2P_THREADS': '3'}, {'QWEN_PREFIX_NVME_P2P_STAGING_MIB': '64'}, {'QWEN_PREFIX_NVME_P2PMEM': '0000:41:00.0'}):
             self.assertEqual(self.components(**dict(P2P, **knob))[0], base, knob)
 
 
@@ -621,6 +620,9 @@ class SlicedP2PTests(P2PCase):
         stats = made.registry.snapshot()
         self.assertEqual(stats['nvme_p2p_blocks'], on_nvme)
         self.assertGreater(stats['nvme_p2p_restores'], 1, 'one per slice')
+        self.assertIn(('sync',), self.world.mesh.log, 'the device finished the copies before the blocks were published')
+        kinds = [entry[0] for entry in self.world.mesh.log]
+        self.assertEqual(kinds[-1], 'sync', 'the last thing the device was asked is the sync, after the last copy')
         start, grant = made.serve(again)
         self.assertEqual((start, grant.q), (4096, 4096))
         self.assertTrue(made.check_kv())

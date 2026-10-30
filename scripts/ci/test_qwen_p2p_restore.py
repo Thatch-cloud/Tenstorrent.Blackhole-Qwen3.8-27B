@@ -14,13 +14,13 @@ Run alone: python3 -B -m unittest test_qwen_p2p_restore (python 3.11+, numpy)
 import ctypes
 import importlib.util
 import json
-import mmap
 import os
 import shutil
 import struct
 import sys
 import tempfile
 import threading
+import time
 import types
 import unittest
 from pathlib import Path
@@ -57,8 +57,9 @@ class FakeMesh(object):
     """The device-op extension and `ttnn.synchronize_device`, in memory: a staging buffer per chip (bytearray), the ops the engine calls, and a log of them. `sink(tensor, chip, block, bytes)`
     is where a write op puts a row (the fake device's KV cache). `drift` makes the first checksum of a range answer wrongly (a posted write that has not landed yet)."""
 
-    def __init__(self, layout, sink=None, address=1 << 30, bad_checksum=None, missing=()):
+    def __init__(self, layout, sink=None, address=1 << 30, bad_checksum=None, missing=(), bdfs=None):
         self.layout = layout
+        self.bdfs = list(bdfs) if bdfs else ['0000:%02x:00.0' % (0x50 + chip) for chip in range(layout.chips)]
         self.sink = sink or (lambda tensor, chip, block, data: None)
         self.address = address
         self.log = []
@@ -82,7 +83,7 @@ class FakeMesh(object):
         return 'staging-handle'
 
     def qwen_p2p_staging_info(self, handle):
-        return [dict(device_id=chip, pci_bus_id='0000:%02x:00.0' % (0x80 + chip), dram_bank=0, noc_x=17, noc_y=12, address=self.address, size=self.size) for chip in range(self.layout.chips)]
+        return [dict(device_id=chip, pci_bus_id=self.bdfs[chip], dram_bank=0, noc_x=17, noc_y=12, address=self.address, size=self.size) for chip in range(self.layout.chips)]
 
     def qwen_staging_checksum(self, handle, byte_offset, length, count=1):
         self.log.append(('checksum', byte_offset, length, count))
@@ -424,39 +425,39 @@ def build_sysfs(root, cards, slice_size=16 << 20, available=None, with_p2pmem=Tr
 
 
 class SysfsTests(TmpCase):
-    CARDS = [(2, '0000:88:00.0'), (0, '0000:92:00.0'), (3, '0000:8e:00.0'), (1, '0000:96:00.0')]
+    CARDS = [(2, '0000:41:00.0'), (0, '0000:42:00.0'), (3, '0000:4a:00.0'), (1, '0000:4c:00.0')]
 
     def test_cards_are_found_by_their_pci_address_not_by_a_remembered_number(self):
         sysfs_class, _ = build_sysfs(self.directory, self.CARDS)
-        self.assertEqual(p2p.card_table(sysfs_class), {'0000:88:00.0': 2, '0000:92:00.0': 0, '0000:8e:00.0': 3, '0000:96:00.0': 1})
-        infos = [{'pci_bus_id': '0000:92:00.0'}, {'pci_bus_id': '96:00.0'}, {'pci_bus_id': '0000:88:00.0'}, {'pci_bus_id': '0000:8E:00.0'}]
-        self.assertEqual(p2p.locate_cards(infos, sysfs_class), [(0, '0000:92:00.0'), (1, '0000:96:00.0'), (2, '0000:88:00.0'), (3, '0000:8e:00.0')])
+        self.assertEqual(p2p.card_table(sysfs_class), {'0000:41:00.0': 2, '0000:42:00.0': 0, '0000:4a:00.0': 3, '0000:4c:00.0': 1})
+        infos = [{'pci_bus_id': '0000:42:00.0'}, {'pci_bus_id': '4c:00.0'}, {'pci_bus_id': '0000:41:00.0'}, {'pci_bus_id': '0000:4A:00.0'}]
+        self.assertEqual(p2p.locate_cards(infos, sysfs_class), [(0, '0000:42:00.0'), (1, '0000:4c:00.0'), (2, '0000:41:00.0'), (3, '0000:4a:00.0')])
 
     def test_a_record_may_name_the_device_number_instead(self):
         sysfs_class, _ = build_sysfs(self.directory, self.CARDS)
-        self.assertEqual(p2p.locate_cards([{'pcie_device_id': 3}, {'tt_device_index': 0}], sysfs_class), [(3, '0000:8e:00.0'), (0, '0000:92:00.0')])
+        self.assertEqual(p2p.locate_cards([{'pcie_device_id': 3}, {'tt_device_index': 0}], sysfs_class), [(3, '0000:4a:00.0'), (0, '0000:42:00.0')])
 
     def test_a_record_that_names_no_card_or_an_unknown_one_is_refused(self):
         sysfs_class, _ = build_sysfs(self.directory, self.CARDS)
         for infos, why in (([{'device_id': 0}], 'names neither'), ([{'pci_bus_id': '0000:aa:00.0'}], 'does not list'), ([{'pcie_device_id': 9}], 'does not list'),
-                           ([{'pci_bus_id': 'zz'}], 'not a PCI address'), ([{'pci_bus_id': '88:00.0'}, {'pcie_device_id': 2}], 'same card')):
+                           ([{'pci_bus_id': 'zz'}], 'not a PCI address'), ([{'pci_bus_id': '41:00.0'}, {'pcie_device_id': 2}], 'same card')):
             with self.assertRaisesRegex(p2p.P2PUnavailable, why):
                 p2p.locate_cards(infos, sysfs_class)
 
     def test_the_published_slice_is_read_from_both_sysfs_places(self):
         sysfs_class, sysfs_pci = build_sysfs(self.directory, self.CARDS[:1])
-        info = p2p.read_p2pmem(2, '0000:88:00.0', sysfs_class, sysfs_pci)
+        info = p2p.read_p2pmem(2, '0000:41:00.0', sysfs_class, sysfs_pci)
         self.assertEqual((info['bar'], info['offset'], info['size'], info['tlb_first'], info['tlb_last'], info['core_size'], info['core_available']), (4, 0, 16 << 20, 202, 202, 16 << 20, 16 << 20))
         self.assertEqual(info['bus_addr'], 0x38000000000)
 
     def test_a_card_without_the_patched_module_is_unavailable(self):
         sysfs_class, sysfs_pci = build_sysfs(self.directory, self.CARDS[:1], with_p2pmem=False)
         with self.assertRaisesRegex(p2p.P2PUnavailable, 'patched tt-kmd'):
-            p2p.read_p2pmem(2, '0000:88:00.0', sysfs_class, sysfs_pci)
+            p2p.read_p2pmem(2, '0000:41:00.0', sysfs_class, sysfs_pci)
 
     def test_pci_addresses_normalise(self):
-        self.assertEqual(p2p.normalise_bdf('88:00.0'), '0000:88:00.0')
-        self.assertEqual(p2p.normalise_bdf(' 0000:8E:00.0 '), '0000:8e:00.0')
+        self.assertEqual(p2p.normalise_bdf('41:00.0'), '0000:41:00.0')
+        self.assertEqual(p2p.normalise_bdf(' 0000:4A:00.0 '), '0000:4a:00.0')
         with self.assertRaises(ValueError):
             p2p.normalise_bdf('8:0.0')
 
@@ -513,7 +514,7 @@ class FakeDriver(object):
 
 
 class TtLinkTests(TmpCase):
-    BDF = '0000:88:00.0'
+    BDF = '0000:41:00.0'
     SLICE = 16 << 20
 
     def setUp(self):
@@ -905,6 +906,38 @@ class EngineTests(EngineCase):
         entries, ids = self.restore()
         self.assertTrue(self.exact(ids))
 
+    def test_close_does_not_wait_forever_for_a_read_the_drive_never_answers(self):
+        self.build(blocks=3, chunk_blocks=1)
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+        original = self.drive.reader
+        self.engine.reader = lambda offset, view: (gate.wait(30), original(offset, view))
+        self.engine.close_wait_s = 0.1
+        stream = self.engine.start(self.drive.entries)
+        began = time.monotonic()
+        self.engine.close()
+        self.assertLess(time.monotonic() - began, 5.0)
+        self.assertTrue(self.engine.closed)
+        self.assertTrue(all(link.closed for link in self.links))
+        gate.set()
+        stream.close(timeout=5)
+
+    def test_reads_queued_when_the_engine_closes_are_not_started(self):
+        self.build(blocks=8, chunk_blocks=4, threads=1)
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+        started = []
+        original = self.drive.reader
+        self.engine.reader = lambda offset, view: (started.append(offset), gate.wait(30), original(offset, view))
+        stream = self.engine.start(self.drive.entries)
+        time.sleep(0.05)
+        self.engine.close_wait_s = 0.05
+        self.engine.close()
+        gate.set()
+        time.sleep(0.1)
+        self.assertEqual(len(started), 1, 'one read was in flight; the rest were queued and did not start')
+        stream.close(timeout=5)
+
     def test_a_second_stream_shares_the_halves_with_the_first(self):
         self.build(blocks=4, chunk_blocks=2)
         first = self.engine.start(self.drive.entries[:2])
@@ -972,7 +1005,7 @@ class EngineTests(EngineCase):
         layout = p2p.ShardLayout(**SMALL)
         mesh = FakeMesh(layout)
         factory, links = make_links(mesh)
-        have = ['0000:%02x:00.0' % (0x80 + chip) for chip in range(4)]
+        have = ['0000:%02x:00.0' % (0x50 + chip) for chip in range(4)]
         engine = p2p.P2PEngine(p2p.StagingApi(mesh, 'mesh', [0, 1]), layout, lambda o, v: None, staging_bytes=layout.shard_bytes * 4, link_factory=factory, io_align=1, expected=have)
         engine.close()
         self.assertTrue(all(link.closed for link in links))

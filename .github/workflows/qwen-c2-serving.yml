@@ -12,6 +12,9 @@ name: Qwen C2 serving image
 #            64-row block against its one-tile calls, bit for bit, then the tile-split wrapper): rs-tile-spike.json
 #            C2_FABRIC_PROBE=kvread runs scripts/ci/tp4_kv_read_probe.py (the prefix audit's region read, ttnn.qwen_read_blocks, against the
 #            whole-cache read byte for byte on the pool-sized cache; KV_READ_PROBE verdict=PASS|FAIL): kv-read-probe.json
+#            C2_FABRIC_PROBE=p2p runs scripts/ci/tp4_p2p_probe.py, P3a (docs/tp4-p2p-restore.md section 8: the cache drive's identity and R1's readings, then NVMe ->
+#            the cards' staging buffers -> the KV caches, one card first, byte for byte, with a negative arm; P3A verdict=PASS|FAIL|NOT-MEASURED): p2p-p3a.json.
+#            The drive and the cards come from a private file on the runner (P2P_ENV_FILE), never from the repository.
 #   cardm  - a single-card qualification harness (C2_CARDM_HARNESS, e.g. optimisation/ttnn-op/k64j/run_card_b.sh)
 #            on card M alone, card B being reserved for another project: QUAL_CARD=card M, ALLOW_SERVING_CARD=1, after
 #            the same refusals as the gate (anything holding M or A, a platform serving container); never card
@@ -447,6 +450,7 @@ jobs:
             rs-tile) script=tp4_rs_tile_spike.py; report=rs-tile-spike.json ;;
             mr) script=tp4_mr_probe.py; report=mr-probe.json ;;
             kvread) script=tp4_kv_read_probe.py; report=kv-read-probe.json ;;
+            p2p) script=tp4_p2p_probe.py; report=p2p-p3a.json ;;
             ccl-sweep) script=tp4_ccl_sweep_probe.py; report=ccl-sweep.json ;;
             ccl-sweep-safe) script=tp4_ccl_sweep_probe.py; report=ccl-sweep.json; probe_args="--skip-probe-only" ;;
             ccl-sweep-core) script=tp4_ccl_sweep_probe.py; report=ccl-sweep.json; probe_args="--skip-probe-only --no-exotic" ;;
@@ -479,6 +483,47 @@ jobs:
           if [ "${PROBE:-fabric}" = kvread ] && [ -s /home/thatch/opgraft-KVR/qwen_kv_read.so ]; then
             kvmount=(-v /home/thatch/opgraft-KVR:/opt/qwen-c2/kvr-mount:ro -e QWEN_KVREAD_DIR=/opt/qwen-c2/kvr-mount)
           fi
+          # p2p is P3a (docs/tp4-p2p-restore.md section 8): the peer-to-peer restore against the cache drive, on the cards. WHICH drive and WHICH cards come from a private file on this
+          # runner, P2P_ENV_FILE (KEY=VALUE lines, only P2P_DRIVE_BY_ID, P2P_DRIVE_MODEL, P2P_DRIVE_SERIAL and P2P_CARDS), never from the repository, and never into this log (it is public
+          # when the repository is). The drive's identity is checked here before docker (the by-id name of the configured model and serial must resolve to a block device) and again
+          # inside by the probe (the by-id link and the kernel's own model and serial), before the first byte is written; the cards' p2pmem pools must be whole. The drive's node and the
+          # by-id links go into the container, and the p2pmem directory of each card read-write over the container's read-only sysfs; SYS_ADMIN lets the probe confirm where the pages are.
+          p2pargs=()
+          if [ "${PROBE:-fabric}" = p2p ]; then
+            p2p_env="${P2P_ENV_FILE:-$HOME/.config/qwen-p2p/p3a.env}"
+            [ -f "$p2p_env" ] || { echo 'refusing: the runner has no private P3a file (P2P_ENV_FILE)' >&2; exit 1; }
+            [ "$(stat -c %u "$p2p_env")" = "$(id -u)" ] && [ -z "$(find "$p2p_env" -perm /022)" ] || { echo 'refusing: the private P3a file is not the runner user'"'"'s alone' >&2; exit 1; }
+            declare -A p2p_val=()
+            while IFS= read -r line || [ -n "$line" ]; do
+              case "$line" in ''|'#'*) continue ;; esac
+              if [[ "$line" =~ ^(P2P_DRIVE_BY_ID|P2P_DRIVE_MODEL|P2P_DRIVE_SERIAL|P2P_CARDS)=([A-Za-z0-9._:/,+@\ -]+)$ ]]; then
+                p2p_val["${BASH_REMATCH[1]}"]="${BASH_REMATCH[2]}"
+              else
+                echo 'refusing: a line of the private P3a file is not one of its four names with a plain value' >&2; exit 1
+              fi
+            done < "$p2p_env"
+            for name in P2P_DRIVE_BY_ID P2P_DRIVE_MODEL P2P_DRIVE_SERIAL P2P_CARDS; do
+              [ -n "${p2p_val[$name]:-}" ] || { echo "refusing: $name is not set in the private P3a file" >&2; exit 1; }
+            done
+            link="${p2p_val[P2P_DRIVE_BY_ID]}"
+            case "$link" in /dev/disk/by-id/nvme-*) ;; *) echo 'refusing: the drive must be named by a /dev/disk/by-id/nvme-* path' >&2; exit 1 ;; esac
+            node=$(readlink -f "$link")
+            [ -b "$node" ] || { echo 'refusing: the drive'"'"'s by-id link does not resolve to a block device' >&2; exit 1; }
+            tok() { printf '%s' "$1" | sed -E 's/[^A-Za-z0-9]+/_/g; s/^_+//; s/_+$//'; }
+            want="nvme-$(tok "${p2p_val[P2P_DRIVE_MODEL]}")_$(tok "${p2p_val[P2P_DRIVE_SERIAL]}")"
+            case "$(basename "$link")" in "$want"|"$want"_[0-9]*) ;; *) echo 'refusing: the drive'"'"'s by-id name is not the configured model and serial' >&2; exit 1 ;; esac
+            p2p_mounts=()
+            IFS=',' read -r -a p2p_cards <<< "${p2p_val[P2P_CARDS]}"
+            for bdf in "${p2p_cards[@]}"; do
+              bdf="${bdf// /}"
+              [[ "$bdf" =~ ^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$ ]] || { echo 'refusing: P2P_CARDS names something that is not a PCI address' >&2; exit 1; }
+              pool="/sys/bus/pci/devices/$bdf/p2pmem"
+              [ -r "$pool/size" ] && [ "$(cat "$pool/size")" = "$(cat "$pool/available")" ] || { echo 'refusing: a card'"'"'s p2pmem pool is missing or not whole (the patched module is not loaded for it, or somebody holds it)' >&2; exit 1; }
+              p2p_mounts+=(-v "$pool:$pool")
+            done
+            p2pargs=(--device "$node" -v /dev/disk/by-id:/dev/disk/by-id:ro "${p2p_mounts[@]}" --cap-add SYS_ADMIN
+                     -e "P2P_DRIVE_BY_ID=$link" -e "P2P_DRIVE_MODEL=${p2p_val[P2P_DRIVE_MODEL]}" -e "P2P_DRIVE_SERIAL=${p2p_val[P2P_DRIVE_SERIAL]}" -e "P2P_CARDS=${p2p_val[P2P_CARDS]}")
+          fi
           # split builds the image's own model from its first few real layers (docs/tp4-exact-resume.md 5.3): the hub the prefix step mounts, read-only here.
           if [ "${PROBE:-fabric}" = split ] || [ "${PROBE:-fabric}" = split-attribute ]; then
             kvmount+=(-v "${C2_HUB_DIR:-/home/thatch/hf-cache/hub}:/models:ro" -e HF_HOME=/models -e HF_HUB_CACHE=/models -e HF_HUB_OFFLINE=1)
@@ -493,7 +538,7 @@ jobs:
             --tmpfs /root/.cache/ttnn:rw,exec,nosuid,size=1g --tmpfs /root/.cache/tt-metal-cache:rw,exec,nosuid,size=8g \
             --shm-size 4g --memory 80g --cpus 8 "${devices[@]}" \
             -v /dev/hugepages-1G:/dev/hugepages-1G --cap-add SYS_NICE \
-            -v "$PWD:/c2:ro" -v "$results:/probe-results" ${kvmount[@]+"${kvmount[@]}"} \
+            -v "$PWD:/c2:ro" -v "$results:/probe-results" ${kvmount[@]+"${kvmount[@]}"} ${p2pargs[@]+"${p2pargs[@]}"} \
             -e MESH_DEVICE=P150x4 -e PYTHONDONTWRITEBYTECODE=1 -e QWEN_C2_SERVING=0 \
             ${TT_GRID:+-e "TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE=$TT_GRID"} \
             -e TT_METAL_CACHE=/root/.cache/tt-metal-cache -e TT_CACHE_PATH=/tmp/tt-weights \
@@ -501,7 +546,7 @@ jobs:
             --entrypoint python3 "$image" -B "/c2/scripts/ci/$script" --fabric "$FABRIC" \
             --output "/probe-results/$report" ${probe_args} 2>&1 | tee "$RUNNER_TEMP/c2-results/fabric-probe.log" || status=$?
           sudo -n chown -R "$(id -u):$(id -g)" "$results" 2>/dev/null || true
-          grep -E 'FABRIC_PROBE|TP4_RS_TILE|MR_PROBE|KV_READ_PROBE|CCL_SWEEP|SPLIT_PROBE' "$RUNNER_TEMP/c2-results/fabric-probe.log" | tail -60 || true
+          grep -E 'FABRIC_PROBE|TP4_RS_TILE|MR_PROBE|KV_READ_PROBE|CCL_SWEEP|SPLIT_PROBE|P3A' "$RUNNER_TEMP/c2-results/fabric-probe.log" | tail -60 || true
           exit "$status"
       - name: Run a qualification harness on card M
         if: contains(steps.job.outputs.actions, 'cardm')

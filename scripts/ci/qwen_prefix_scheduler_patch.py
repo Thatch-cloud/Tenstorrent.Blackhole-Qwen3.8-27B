@@ -1655,6 +1655,13 @@ class TierHooks(object):
         graft.log('host tier restore slice req=%s blocks=%d done=%d of %d ms=%.1f p2p=%d', job.request_id, count, len(job.new), job.total, elapsed, len(chunk.pending))
         if len(job.new) < job.total:
             return 'more'
+        try:
+            stream.engine.api.sync()                   # the blocks are published only once the device has what was copied into them (ADR rule R2), whatever queue the model's rounds use
+        except Exception as error:
+            backend.note_error(nvme, error)
+            stats['tier_restore_failures'] += 1
+            self.abort(job, 'the device did not finish the copy')
+            return 'failed'
         self.finish(job)
         return 'done'
 

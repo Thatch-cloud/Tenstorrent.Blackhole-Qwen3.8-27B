@@ -21,6 +21,7 @@ Nothing here decides policy: qwen_kv_nvme.P2PBackend does (flags, fallbacks, cou
 
 import ctypes
 import fcntl
+import gc
 import glob
 import mmap
 import os
@@ -154,12 +155,14 @@ class ShardLayout(object):
     @classmethod
     def of_io(cls, io):
         """The layout of the model's tier IO (_QwenKvTierIO: caches, chips, slice_bytes); None when the IO does not say (a test double without a geometry)."""
-        caches = getattr(io, 'caches', None)
-        chips = getattr(io, 'chips', None)
-        slice_bytes = getattr(io, 'slice_bytes', None)
-        if caches is None or not chips or not slice_bytes:
+        inner = getattr(io, 'io', None)                # (a wrapper such as the threaded tier IO holds the model's IO as .io)
+        found = [source for source in (io, inner) if source is not None and getattr(source, 'caches', None) is not None and getattr(source, 'chips', None)
+                 and getattr(source, 'slice_bytes', None)]
+        if not found:
             return None
-        layout = cls(len(caches) if not isinstance(caches, int) else caches, chips, slice_bytes)
+        source = found[0]
+        caches = source.caches
+        layout = cls(len(caches) if not isinstance(caches, int) else caches, source.chips, source.slice_bytes)
         if getattr(io, 'block_bytes', layout.block_bytes) != layout.block_bytes:
             raise ValueError('the IO says a block is %d bytes, its geometry makes %d' % (io.block_bytes, layout.block_bytes))
         return layout
@@ -252,7 +255,7 @@ def _sysfs_text(path):
 
 
 def normalise_bdf(text):
-    """'0000:88:00.0' from '88:00.0' or an upper-case form; ValueError otherwise."""
+    """'0000:41:00.0' from '41:00.0' or an upper-case form; ValueError otherwise."""
     value = str(text).strip().lower()
     if re.fullmatch(r'[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]', value):
         value = '0000:' + value
@@ -523,10 +526,14 @@ class TtLink(object):
         for what in ('p2p_map', 'cpu'):
             mapped = getattr(self, what)
             if mapped is not None:
-                try:
-                    mapped.close()
-                except (BufferError, OSError, ValueError):
-                    pass
+                for _attempt in (0, 1):
+                    try:
+                        mapped.close()
+                        break
+                    except BufferError:
+                        gc.collect()                    # (a view of a finished read that has not been collected yet still exports the mapping)
+                    except (OSError, ValueError):
+                        break
         if self.p2p_fd is not None:
             os.close(self.p2p_fd)
         if self.pin_fd is not None:
@@ -645,9 +652,12 @@ class Stream(object):
     pool. `take` hands out the next chunk whose reads all returned; `verify` and `write` run the device ops for it; `release` gives its half back; `close` waits for the reads still in
     flight (they cannot be cancelled and they write into the staging buffer)."""
 
-    def __init__(self, engine, items, chunk_blocks=None):
+    def __init__(self, engine, items, chunk_blocks=None, chips=None):
         self.engine = engine
         self.items = list(items)
+        self.chips = tuple(range(engine.layout.chips)) if chips is None else tuple(sorted(set(chips)))
+        if not self.chips or not set(self.chips) <= set(range(engine.layout.chips)):
+            raise ValueError('chips %s are not among the engine\'s %d' % (list(self.chips), engine.layout.chips))
         step = max(1, min(engine.chunk_blocks, int(chunk_blocks or engine.chunk_blocks)))
         self.chunks = []
         for first in range(0, len(self.items), step):
@@ -685,12 +695,12 @@ class Stream(object):
         engine = self.engine
         chunk.half = half
         chunk.offset = half * engine.half_bytes
-        chunk.todo = len(chunk.pending) * engine.layout.chips
+        chunk.todo = len(chunk.pending) * len(self.chips)
         chunk.began = time.perf_counter()
         with engine.inflight_lock:
             engine.inflight += chunk.todo
         for slot, (_position, entry) in enumerate(chunk.pending):
-            for chip in range(engine.layout.chips):
+            for chip in self.chips:
                 engine.pool.submit(engine.read_task, chunk, slot, chip, entry)
 
     def ready(self):
@@ -749,7 +759,7 @@ class Stream(object):
     def _compare(self, chunk, wanted):
         engine = self.engine
         got = engine.api.checksums(chunk.offset, engine.layout.shard_bytes, len(chunk.pending), engine.layout.chips)
-        return [(slot, chip) for slot in range(len(chunk.pending)) for chip in range(engine.layout.chips) if got[chip][slot] != wanted[slot][chip]]
+        return [(slot, chip) for slot in range(len(chunk.pending)) for chip in self.chips if got[chip][slot] != wanted[slot][chip]]
 
     def write(self, chunk, block_ids):
         """Enqueue the copy of the chunk's staged shards into the KV cache: one op per cache tensor, `block_ids` the device block of each pending position in order."""
@@ -758,6 +768,8 @@ class Stream(object):
         engine = self.engine
         if len(block_ids) != len(chunk.pending):
             raise ValueError('%d device blocks for %d staged blocks' % (len(block_ids), len(chunk.pending)))
+        if len(self.chips) != engine.layout.chips:
+            raise P2PError('a stream over chips %s staged only part of each block: the copy op writes every chip' % list(self.chips))
         layout = engine.layout
         began = time.perf_counter()
         chunk.ops = True
@@ -798,6 +810,7 @@ class P2PEngine(object):
         self.log = logger or (lambda message, *values: None)
         self.sleep, self.recheck_s, self.io_align = sleep, recheck_s, io_align
         self.stats = dict.fromkeys(STAT_NAMES, 0)
+        self.close_wait_s = 3.0
         self.inflight = 0                      # shard reads submitted and not yet returned
         self.inflight_lock = threading.Lock()
         self.links = []
@@ -849,7 +862,7 @@ class P2PEngine(object):
         error = None
         view = None
         try:
-            if chunk.error is None:
+            if chunk.error is None and not self.closed:
                 view = self.links[chip].view(chunk.offset + slot * self.layout.shard_bytes, self.layout.shard_bytes)
                 self.reader(entry.offset + chip * self.layout.shard_bytes, view)
         except BaseException as caught:         # (the chunk records it; the scheduler thread raises)
@@ -882,12 +895,13 @@ class P2PEngine(object):
             self.free_halves.append(half)
 
     # -- use ---------------------------------------------------------------------------------------
-    def start(self, items, chunk_blocks=None):
+    def start(self, items, chunk_blocks=None, chips=None):
         """A Stream over `items`: one stored entry (or None, for a position that needs no read) per position of the restore, in position order. `chunk_blocks` shrinks the chunks
-        (the sliced restore's block cap); it cannot enlarge them past what a half of the staging buffer holds."""
+        (the sliced restore's block cap); it cannot enlarge them past what a half of the staging buffer holds. `chips` reads and checks only those cards' shares (the first DMA of
+        a bring-up on one card; such a stream cannot write)."""
         if self.closed:
             raise P2PError('the peer-to-peer engine is closed')
-        return Stream(self, items, chunk_blocks)
+        return Stream(self, items, chunk_blocks, chips)
 
     def restore(self, entries, block_ids):
         """The whole restore, synchronously: every entry read, checked and copied into block_ids[i]. Raises P2PMismatch (nothing was written for the failing chunk), P2PReadError or
@@ -919,15 +933,23 @@ class P2PEngine(object):
         return dict(cards=len(self.links), threads=self.threads, staging_bytes=self.staging_bytes, chunk_blocks=self.chunk_blocks, shard_bytes=self.layout.shard_bytes,
                     mapping_verified=int(all(getattr(item, 'map_verified', False) for item in self.links)) if self.links else 0, window=getattr(link, 'window_id', None))
 
-    def close(self):
+    def close(self, wait_s=None):
+        """Stop the pool, wait (at most `wait_s`, close_wait_s by default) for the shard reads in flight to return, then give the cards back. A read that does not return in that time
+        is left: the process is going away, and a bio in flight holds its pages until the drive answers."""
         if self.closed:
             return
         self.closed = True
         if self.pool is not None:
-            self.pool.shutdown(wait=True)
+            self.pool.shutdown(wait=False)                  # (tasks still queued run as no-ops once `closed` is set: read_task checks it)
+            end = time.monotonic() + (self.close_wait_s if wait_s is None else wait_s)
+            while self.inflight > 0 and time.monotonic() < end:
+                time.sleep(0.005)
+            if self.inflight > 0:
+                self.log('p2p engine closed with %d shard read(s) still in flight', self.inflight)
         for link in self.links:
             try:
-                link.close()
+                if link is not None:
+                    link.close()
             except Exception:
                 pass
 

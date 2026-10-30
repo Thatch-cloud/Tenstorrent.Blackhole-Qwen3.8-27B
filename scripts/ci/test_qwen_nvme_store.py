@@ -342,6 +342,43 @@ class RoundTripTests(StoreCase):
         again = self.reopen(store)
         self.assertEqual(again.lookup(KV, key_of('a')).digest, hashlib.sha256(payload_of('a')).digest())
 
+    def test_auxiliary_bytes_beside_the_digest_survive_a_reopen_a_snapshot_and_a_journal_replay(self):
+        store = self.open()
+        aux = bytes(range(32))
+        plain = item('plain')
+        carrying = item('carrying')
+        carrying.aux = aux
+        self.assertTrue(all(store.put_batch([plain, carrying])))
+        self.assertEqual((store.lookup(KV, key_of('plain')).aux, store.lookup(KV, key_of('carrying')).aux), (b'', aux))
+        again = self.reopen(store)                                             # (journal replay)
+        self.assertEqual((again.lookup(KV, key_of('plain')).aux, again.lookup(KV, key_of('carrying')).aux), (b'', aux))
+        again.snapshot()
+        third = self.reopen(again)                                             # (snapshot)
+        self.assertEqual((third.lookup(KV, key_of('plain')).aux, third.lookup(KV, key_of('carrying')).aux), (b'', aux))
+        self.assertEqual(self.read(third, 'carrying'), payload_of('carrying'))
+
+    def test_an_entry_without_auxiliary_bytes_packs_exactly_as_it_always_did(self):
+        store = self.open()
+        self.put(store, 'a')
+        entry = store.lookup(KV, key_of('a'))
+        packed = nvme.pack_entry(entry)
+        self.assertEqual(packed[3], 0, 'the flags byte is clear')
+        self.assertEqual(len(packed), nvme._ENTRY.size + len(entry.key) + len(entry.chain) + 8 + 32 + 8)
+        back, position = nvme.unpack_entry(packed, 0)
+        self.assertEqual((position, back.aux), (len(packed), b''))
+        entry.aux = b'x' * 32
+        carrying = nvme.pack_entry(entry)
+        self.assertEqual((carrying[3], len(carrying)), (nvme.FLAG_AUX, len(packed) + 1 + 32))
+        back, position = nvme.unpack_entry(carrying, 0)
+        self.assertEqual((position, back.aux), (len(carrying), b'x' * 32))
+        for cut in (len(carrying) - 1, len(packed), len(packed) + 1):
+            with self.assertRaises(ValueError):
+                nvme.unpack_entry(carrying[:cut], 0)
+
+    def test_too_many_auxiliary_bytes_are_refused(self):
+        with self.assertRaises(ValueError):
+            PutItem(KV, key_of('a'), [payload_of('a')], 'alpha', b'c', 0, FP, aux=bytes(nvme.MAX_AUX + 1))
+
     def test_read_many_runs_are_merged_and_a_verify_failure_is_reported_per_entry(self):
         store = self.open()
         self.put(store, *['b%d' % n for n in range(6)])

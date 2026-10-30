@@ -295,7 +295,7 @@ jobs:
           # NP9
           python -B -m unittest test_np9_answer32k test_np9_pack
           # NVME
-          python -B -m unittest test_qwen_nvme_store test_qwen_kv_nvme test_qwen_kv_compat
+          python -B -m unittest test_qwen_nvme_store test_qwen_kv_nvme test_qwen_kv_compat test_qwen_p2p_restore test_qwen_p2p_tier test_tp4_p2p_probe
           # O3
           python -B -m unittest test_audit_sampling test_octo3_contract test_octo3_profiles test_octo3_judge test_octo3_pack test_octo3_ship test_block_warm_capture test_capture_trackers
           # PF2
@@ -341,6 +341,9 @@ jobs:
           # XE
           python -B -m unittest test_exact_end test_xe_profiles test_xe_pack
           # fusion-wp end
+          # p2p-nvme: the peer-to-peer restore probe (mock card and drive) and the shard layout / bandwidth model
+          python -B -m unittest discover -s scripts/p2p -p 'test_*.py'
+          bash -n patches/tt-kmd-p2pmem/build-check.sh
           bash -n scripts/ci/run-simulator.sh
           bash -n scripts/ci/simulator-suite.sh
           bash -n scripts/ci/mlp-clock-hardware-suite.sh
