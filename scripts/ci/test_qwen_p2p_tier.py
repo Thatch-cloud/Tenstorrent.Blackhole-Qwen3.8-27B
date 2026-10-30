@@ -69,7 +69,7 @@ class P2PWorld(object):
         if self.fail is not None:
             raise self.fail
         layout = tier.shards
-        mesh = FakeMesh(layout, tier.io.sink)
+        mesh = FakeMesh(layout, tier.io.sink, deferred=True)
         link_factory, links = make_links(mesh)
         # (the fake world's blocks are 32 bytes: shards are not 4 KiB-aligned there, so the reads go straight at the store's device file; the real alignment is test_qwen_p2p_restore's)
         reader = self.reader or (lambda offset, view: os.preadv(tier.store.bf.fd, [view], offset))
@@ -138,8 +138,8 @@ class FlagTests(unittest.TestCase):
     def test_it_is_off_unless_named_and_its_knobs_are_inert_without_it(self):
         plan, problems = kvnvme.parse(ACKED)
         self.assertEqual((problems, plan.p2p, plan.p2pmem), ([], False, ()))
-        for knob in ('QWEN_PREFIX_NVME_P2P_THREADS', 'QWEN_PREFIX_NVME_P2P_STAGING_MIB', 'QWEN_PREFIX_NVME_P2PMEM'):
-            plan, problems = kvnvme.parse(dict(ACKED, **{knob: '4' if 'MEM' not in knob else '0000:41:00.0'}))
+        for knob in ('QWEN_PREFIX_NVME_P2P_THREADS', 'QWEN_PREFIX_NVME_P2P_STAGING_MIB', 'QWEN_PREFIX_NVME_P2PMEM', 'QWEN_PREFIX_NVME_P2P_ALLOW_UNVERIFIED_MAP'):
+            plan, problems = kvnvme.parse(dict(ACKED, **{knob: '4' if 'MEM' not in knob else '0000:41:00.0'}) if 'UNVERIFIED' not in knob else dict(ACKED, **{knob: '1'}))
             self.assertIsNone(plan)
             self.assertTrue(any(knob in problem and 'would ignore it' in problem for problem in problems), (knob, problems))
         plan, problems = kvnvme.parse(dict(ACKED, QWEN_PREFIX_NVME_P2P='0'))
@@ -166,13 +166,20 @@ class FlagTests(unittest.TestCase):
     def test_the_names_are_in_the_registrys_and_the_contracts_lists(self):
         import qwen_prefix_registry as registry_module
 
-        new = {'QWEN_PREFIX_NVME_P2P', 'QWEN_PREFIX_NVME_P2P_THREADS', 'QWEN_PREFIX_NVME_P2P_STAGING_MIB', 'QWEN_PREFIX_NVME_P2PMEM'}
+        new = {'QWEN_PREFIX_NVME_P2P', 'QWEN_PREFIX_NVME_P2P_THREADS', 'QWEN_PREFIX_NVME_P2P_STAGING_MIB', 'QWEN_PREFIX_NVME_P2PMEM', 'QWEN_PREFIX_NVME_P2P_ALLOW_UNVERIFIED_MAP'}
         self.assertTrue(new <= set(kvnvme.NAMES))
         self.assertEqual(registry_module.ENV_NVME_NAMES, kvnvme.NAMES)
         self.assertEqual(contract.PREFIX_NVME_NAMES, kvnvme.NAMES)
         self.assertEqual(contract.PREFIX_NVME_GATE_ONLY, kvnvme.GATE_ONLY)
         self.assertIn('QWEN_PREFIX_NVME_P2P', kvnvme.GATE_ONLY)
+        self.assertIn('QWEN_PREFIX_NVME_P2P_ALLOW_UNVERIFIED_MAP', kvnvme.GATE_ONLY)
         self.assertNotIn('QWEN_PREFIX_NVME_P2P_THREADS', kvnvme.GATE_ONLY)
+
+    def test_the_unverified_mapping_override_is_a_gates_and_off_by_default(self):
+        plan, problems = kvnvme.parse(dict(ACKED, **P2P))
+        self.assertEqual((problems, plan.p2p_unverified_map), ([], False))
+        plan, problems = kvnvme.parse(dict(ACKED, QWEN_PREFIX_NVME_P2P='1', QWEN_PREFIX_NVME_P2P_ALLOW_UNVERIFIED_MAP='1'))
+        self.assertEqual((problems, plan.p2p_unverified_map), ([], True))
 
     def test_a_traffic_profile_cannot_carry_it_even_under_the_waiver_and_a_gate_profile_can(self):
         env = {'QWEN_PREFIX_REUSE': '1', 'QWEN_PREFIX_HOST_TIER_GIB': '32', 'QWEN_PREFIX_NVME': '1', 'QWEN_PREFIX_NVME_DEVICE': '/dev/nvme1n1', 'QWEN_PREFIX_NVME_RETENTION_ACK': '1',
@@ -448,6 +455,30 @@ class RestoreTests(P2PCase):
         self.assertGreater(len(made.registry.tier.records), 0)
         self.assertTrue(made.registry.tier_on, 'the host tier did not latch: a mismatch is a miss, not three restore failures')
 
+    def test_a_restore_refreshes_the_ttl_clock_of_the_blocks_it_used(self):
+        made = self.p2p_rig()
+        a = self.push_out(made, first_turn())
+        keys = [key for key in a.block_hashes[:64] if made.nvme.store.lookup(KV, key) is not None]
+        before = {key: made.nvme.store.lookup(KV, key).last_used for key in keys}
+        time.sleep(0.02)
+        again, start, grant = self.returning_exact(made, a)
+        self.assertEqual(start, 4096)
+        self.assertTrue(all(made.nvme.store.lookup(KV, key).last_used > before[key] for key in keys), 'every restored block starts its day over')
+
+    def test_a_restore_that_finds_the_staging_halves_held_comes_the_old_way_and_costs_the_path_nothing(self):
+        made = self.p2p_rig()
+        a = self.push_out(made, first_turn())
+        engine = self.world.engines[-1]
+        held = engine.start(made.nvme.pin_kv([key for key in a.block_hashes[:64] if made.nvme.store.lookup(KV, key) is not None][:12]))
+        first = held.take(wait=True)
+        again, start, grant = self.returning_exact(made, a)
+        self.assertEqual(start, 4096)
+        self.assertTrue(made.check_kv())
+        snapshot = made.registry.snapshot()
+        self.assertEqual((snapshot['nvme_p2p_fallbacks'], snapshot['nvme_p2p_errors'], made.nvme.backend.strikes), (1, 0, 0))
+        self.assertTrue(first)
+        held.close()
+
     def test_a_read_error_restores_the_same_blocks_through_the_host_path(self):
         made = self.p2p_rig()
         a = self.push_all_the_way(made, first_turn())
@@ -707,6 +738,19 @@ class SlicedP2PTests(P2PCase):
         self.assertEqual(made.registry.snapshot()['nvme_p2p_errors'], 1)
         self.assertEqual(made.registry.tier.pinned, set())
         self.assertEqual(engine.inflight, 0)
+
+    def test_blocks_are_not_published_when_the_device_cannot_confirm_the_copies(self):
+        made = self.p2p_rig(tier_env=SLICE_ENV)
+        a = self.push_out(made, first_turn())
+        again = self.returning(a)
+        hooks = made.graft.tier_hooks
+        with mock.patch.object(hooks, 'sync_p2p', return_value=False):
+            hooks, held, steps = self.sliced(made, again)
+        self.assertTrue(any('slice aborted req=again-a1' in line and 'did not finish the copy' in line for line in made.lines), made.lines[-6:])
+        start, grant = made.serve(again)
+        self.assertEqual(start, 0, 'nothing was published: the turn prefilled cold')
+        self.assertTrue(made.check_kv())
+        self.assertEqual(made.registry.tier.pinned, set())
 
     def test_a_path_that_latches_under_a_job_finishes_it_through_the_host_path(self):
         made = self.p2p_rig(tier_env=SLICE_ENV)

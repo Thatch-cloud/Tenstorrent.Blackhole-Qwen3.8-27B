@@ -624,7 +624,7 @@ class RestoreJob(object):
     (`protected`, touched for the job's length so no allocation of the job can take it), the blocks written so far (`new`, held by the job, not yet hashed), and the cost so far."""
 
     __slots__ = ('request', 'request_id', 'first', 'need', 'records', 'keys', 'protected', 'new', 'tenant', 'work_ms', 'slices', 'max_ms', 'held', 'step', 'bytes',
-                 'stream', 'stream_base', 'nvme_entries', 'progress_at', 'host_only')
+                 'stream', 'stream_base', 'nvme_entries', 'progress_at', 'host_only', 'p2p_written')
 
     def __init__(self, request, first, need, records, protected, tenant):
         self.request, self.request_id = request, request.request_id
@@ -644,6 +644,7 @@ class RestoreJob(object):
         self.nvme_entries = []        # their pinned store entries, given back when the job is released
         self.progress_at = None       # (monotonic) when the last peer-to-peer chunk was taken, or the stream began
         self.host_only = False        # the peer-to-peer reads failed for this job: the rest of it comes through the host path
+        self.p2p_written = False      # copy ops from the staging buffers are enqueued for this job and the device has not been synced since
 
     @property
     def total(self):
@@ -1510,8 +1511,28 @@ class TierHooks(object):
         graft.log('host tier restore slice req=%s blocks=%d done=%d of %d ms=%.1f', job.request_id, count, len(job.new), job.total, elapsed)
         if len(job.new) < job.total:
             return 'more'
+        if not self.sync_p2p(job):
+            stats['tier_restore_failures'] += 1
+            self.abort(job, 'the device did not finish the copy')
+            return 'failed'
         self.finish(job)
         return 'done'
+
+    def sync_p2p(self, job):
+        """True when the device has finished every copy the job enqueued from the staging buffers (nothing to wait for otherwise). A block is published only after this, whatever queue the
+        model's rounds run on (ADR rule R2); a job that is abandoned waits for it too before its blocks are freed."""
+        if not job.p2p_written:
+            return True
+        engine = getattr(self.nvme.backend, 'engine', None) if self.nvme is not None else None
+        if engine is None:
+            return True
+        try:
+            engine.api.sync()
+        except Exception as error:
+            self.graft.log('nvme tier p2p: the device sync after the copies failed for req=%s: %s: %s', job.request_id, type(error).__name__, error)
+            return False
+        job.p2p_written = False
+        return True
 
     def begin_stream(self, job):
         """A direct backend that slices: pin the job's NVMe blocks and start their reads (chunks of at most the slice cap), in the background. -> None on success (the first slice then runs
@@ -1544,7 +1565,7 @@ class TierHooks(object):
         """Stop the job's peer-to-peer reads (they cannot be cancelled: wait for the ones in flight, a moment only when the job is being abandoned) and give back the pins."""
         stream, job.stream = job.stream, None
         if stream is not None:
-            stream.close(timeout=60.0 if wait else 1.0)
+            stream.close(timeout=5.0 if wait else 1.0)
         if job.nvme_entries:
             self.nvme.unpin(job.nvme_entries)
             job.nvme_entries = []
@@ -1564,7 +1585,7 @@ class TierHooks(object):
         chunk = None
         allocated = False
         try:
-            chunk = stream.take(wait=whole)
+            chunk = stream.take(wait=whole, timeout=P2P_STALL_S if whole else None)
             if chunk is None:
                 if stream.finished:
                     raise SliceRefused('the peer-to-peer stream ended before the job did')
@@ -1603,8 +1624,10 @@ class TierHooks(object):
             held = [offset for offset, record in enumerate(records) if not isinstance(record, Pending)]
             if held:
                 self.io.write_blocks([ids[offset] for offset in held], [records[offset].payload for offset in held])
+            job.p2p_written = True
             stream.write(chunk, [ids[position - chunk.first] for position, _entry in chunk.pending])
             stream.release(chunk)
+            nvme.touch_kv([entry.key for _position, entry in chunk.pending])
             if self.config.audit:
                 self.audit_direct(job.request, [ids[position - chunk.first] for position, _entry in chunk.pending], [entry for _position, entry in chunk.pending])
                 held_payloads = [records[offset].payload for offset in held]
@@ -1623,8 +1646,9 @@ class TierHooks(object):
             self.abort(job, 'the audit failed', refuse=False)
             raise
         except Exception as error:
-            backend.note_error(nvme, error)
-            if not allocated and isinstance(error, (p2p.P2PReadError, p2p.P2PDeviceError)):
+            if isinstance(error, p2p.P2PError) and not isinstance(error, p2p.P2PBusy):
+                backend.note_error(nvme, error)                # (a pool, quota or flush error is not the path's fault: no strike for it)
+            if not allocated and isinstance(error, p2p.P2PError):
                 # Nothing of the chunk reached a block: the host path (fill) takes the job from here.
                 if chunk is not None:
                     stream.release(chunk)
@@ -1655,10 +1679,7 @@ class TierHooks(object):
         graft.log('host tier restore slice req=%s blocks=%d done=%d of %d ms=%.1f p2p=%d', job.request_id, count, len(job.new), job.total, elapsed, len(chunk.pending))
         if len(job.new) < job.total:
             return 'more'
-        try:
-            stream.engine.api.sync()                   # the blocks are published only once the device has what was copied into them (ADR rule R2), whatever queue the model's rounds use
-        except Exception as error:
-            backend.note_error(nvme, error)
+        if not self.sync_p2p(job):                     # the blocks are published only once the device has what was copied into them (ADR rule R2), whatever queue the model's rounds use
             stats['tier_restore_failures'] += 1
             self.abort(job, 'the device did not finish the copy')
             return 'failed'
@@ -1693,6 +1714,8 @@ class TierHooks(object):
         self.tier.unpin(job.keys)
         if job.stream is not None or job.nvme_entries:
             self.end_stream(job, wait=bool(job.stream is not None and job.stream.finished))
+        if job.p2p_written:
+            self.sync_p2p(job)                      # (copies may still be enqueued into blocks that are about to be freed)
         try:
             if job.new:
                 pool.free_blocks(reversed(job.new))

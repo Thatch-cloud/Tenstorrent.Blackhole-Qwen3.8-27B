@@ -185,7 +185,7 @@ class EnvClassTests(unittest.TestCase):
     def test_the_peer_to_peer_names_are_the_tiers_own_and_the_layout_component_carries_the_switch(self):
         # QWEN_PREFIX_NVME_P2P changes the stored bytes' ORDER (chip-major), so it is not a 'kv' env switch (those are read from the process environment by value): it is the plan's
         # `p2p`, and the fingerprint's 'layout' component says so. Its knobs (threads, staging size, the card list) change nothing stored.
-        for name in ('QWEN_PREFIX_NVME_P2P', 'QWEN_PREFIX_NVME_P2P_THREADS', 'QWEN_PREFIX_NVME_P2P_STAGING_MIB', 'QWEN_PREFIX_NVME_P2PMEM'):
+        for name in ('QWEN_PREFIX_NVME_P2P', 'QWEN_PREFIX_NVME_P2P_THREADS', 'QWEN_PREFIX_NVME_P2P_STAGING_MIB', 'QWEN_PREFIX_NVME_P2PMEM', 'QWEN_PREFIX_NVME_P2P_ALLOW_UNVERIFIED_MAP'):
             self.assertIn(name, kvnvme.NAMES)
             self.assertNotIn(name, classified())
             self.assertEqual(unclassified([name]), [])

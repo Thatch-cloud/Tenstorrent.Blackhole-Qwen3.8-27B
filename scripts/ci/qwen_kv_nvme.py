@@ -90,12 +90,13 @@ ENV_P2P = 'QWEN_PREFIX_NVME_P2P'
 ENV_P2P_THREADS = 'QWEN_PREFIX_NVME_P2P_THREADS'
 ENV_P2P_STAGING_MIB = 'QWEN_PREFIX_NVME_P2P_STAGING_MIB'
 ENV_P2PMEM = 'QWEN_PREFIX_NVME_P2PMEM'
+ENV_P2P_UNVERIFIED = 'QWEN_PREFIX_NVME_P2P_ALLOW_UNVERIFIED_MAP'
 NAMES = (ENV_SWITCH, ENV_DEVICE, ENV_TTL_S, ENV_MAX_AGE_S, ENV_MAX_BYTES, ENV_VERIFY, ENV_RESTORE, ENV_FREE_FLOOR, ENV_QUEUE, ENV_THREADS, ENV_FORMAT, ENV_DISCARD,
          ENV_COMPAT, ENV_CMD_DIR, ENV_AUDIT, ENV_SPILL, ENV_THROUGH_BLOCKS, ENV_THROUGH_IDLE_S, ENV_RETENTION_ACK, ENV_ALLOW_ZERO_RETENTION, ENV_DRAIN_S, ENV_REQUIRE_SED, ENV_SED_STATUS,
-         ENV_P2P, ENV_P2P_THREADS, ENV_P2P_STAGING_MIB, ENV_P2PMEM)
+         ENV_P2P, ENV_P2P_THREADS, ENV_P2P_STAGING_MIB, ENV_P2PMEM, ENV_P2P_UNVERIFIED)
 # What only a gate sets (the contract refuses them on a traffic profile even under the owner's waiver). The peer-to-peer restore is a gate's until a card has qualified it (docs/tp4-p2p-restore.md);
 # its three knobs are refused as inert unless it is on, so they cannot reach a traffic profile without it.
-GATE_ONLY = (ENV_AUDIT, ENV_FORMAT, ENV_CMD_DIR, ENV_ALLOW_ZERO_RETENTION, ENV_P2P)
+GATE_ONLY = (ENV_AUDIT, ENV_FORMAT, ENV_CMD_DIR, ENV_ALLOW_ZERO_RETENTION, ENV_P2P, ENV_P2P_UNVERIFIED)
 # Names whose OFF value is the gate's own: a traffic profile may carry the name (at 1, or by default) but never 0. The encryption check is on unless a gate turns it off.
 GATE_ONLY_VALUES = ((ENV_REQUIRE_SED, '0'),)
 VERIFY_MODES = ('sample', 'all', 'off')
@@ -212,7 +213,7 @@ class NvmePlan(object):
 
     __slots__ = ('device', 'ttl_s', 'max_age_s', 'max_bytes', 'verify', 'restore', 'free_floor_bytes', 'queue_bytes', 'threads', 'format', 'discard', 'compat',
                  'cmd_dir', 'audit', 'direct', 'snap_bytes', 'journal_bytes', 'spill', 'through_blocks', 'through_idle_s', 'allow_zero_retention', 'drain_s', 'require_sed', 'sed_status',
-                 'p2p', 'p2p_threads', 'p2p_staging_bytes', 'p2pmem')
+                 'p2p', 'p2p_threads', 'p2p_staging_bytes', 'p2pmem', 'p2p_unverified_map')
 
     @property
     def through(self):
@@ -331,6 +332,7 @@ def parse(env):
     plan.p2p = _switch(env, ENV_P2P, problems)
     plan.p2p_threads = _digits(env, ENV_P2P_THREADS, DEFAULT_P2P_THREADS, 1, 64, problems)
     plan.p2p_staging_bytes = _digits(env, ENV_P2P_STAGING_MIB, DEFAULT_P2P_STAGING_MIB, 2, 4096, problems) << 20
+    plan.p2p_unverified_map = _switch(env, ENV_P2P_UNVERIFIED, problems)
     plan.p2pmem = ()
     listed = env.get(ENV_P2PMEM)
     if listed not in (None, ''):
@@ -340,7 +342,7 @@ def parse(env):
         else:
             plan.p2pmem = tuple(sorted(name.lower() if name.count(':') == 2 else '0000:' + name.lower() for name in names))
     if not plan.p2p:
-        knobs = [name for name in (ENV_P2P_THREADS, ENV_P2P_STAGING_MIB, ENV_P2PMEM) if env.get(name) not in (None, '')]
+        knobs = [name for name in (ENV_P2P_THREADS, ENV_P2P_STAGING_MIB, ENV_P2PMEM, ENV_P2P_UNVERIFIED) if env.get(name) not in (None, '')]
         if knobs:
             problems.append('%s set without %s=1: the peer-to-peer restore would ignore it' % (', '.join(knobs), ENV_P2P))
     return (None if problems else plan), problems
@@ -921,13 +923,20 @@ class P2PBackend(HostBounceBackend):
         except p2p.P2PMismatch as error:
             self.note_mismatch(tier, error)
             raise
+        except p2p.P2PBusy:
+            tier._restore_via_host(entries, block_ids)          # another restore holds the staging halves: these blocks come the old way, and the path takes no strike
+            tier.touch_kv([entry.key for entry in entries])
+            c['nvme_p2p_fallbacks'] += 1
+            return
         except Exception as error:
             self.note_error(tier, error)
             tier._restore_via_host(entries, block_ids)
+            tier.touch_kv([entry.key for entry in entries])
             c['nvme_p2p_fallbacks'] += 1
             c['nvme_p2p_restores'] += 1
             return
         self.strikes = 0
+        tier.touch_kv([entry.key for entry in entries])
         c['nvme_p2p_restores'] += 1
         tier.log('nvme tier p2p restore blocks=%d bytes=%d ms=%.1f', len(entries), sum(entry.nbytes for entry in entries), (time.perf_counter() - began) * 1000.0)
 
@@ -995,7 +1004,7 @@ def default_p2p_engine(tier):
         raise p2p.P2PUnavailable('ttnn is not importable: %s' % error)
     api = p2p.StagingApi(ttnn, mesh, caches)
     return p2p.P2PEngine(api, tier.shards, tier.p2p_reader, threads=tier.plan.p2p_threads, staging_bytes=tier.plan.p2p_staging_bytes, expected=tier.plan.p2pmem, logger=tier.log,
-                         io_align=tier.store.bf.align)
+                         io_align=tier.store.bf.align, allow_unverified_map=tier.plan.p2p_unverified_map)
 
 
 def make_backend(name):

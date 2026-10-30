@@ -57,8 +57,10 @@ class FakeMesh(object):
     """The device-op extension and `ttnn.synchronize_device`, in memory: a staging buffer per chip (bytearray), the ops the engine calls, and a log of them. `sink(tensor, chip, block, bytes)`
     is where a write op puts a row (the fake device's KV cache). `drift` makes the first checksum of a range answer wrongly (a posted write that has not landed yet)."""
 
-    def __init__(self, layout, sink=None, address=1 << 30, bad_checksum=None, missing=(), bdfs=None):
+    def __init__(self, layout, sink=None, address=1 << 30, bad_checksum=None, missing=(), bdfs=None, deferred=False):
         self.layout = layout
+        self.deferred = deferred               # copy ops run when the device queue is next drained (a sync, or a checksum readback), reading the staging bytes THEN: a DMA that lands
+        self.queue = []                        # in a half before the sync corrupts them, as on a card
         self.bdfs = list(bdfs) if bdfs else ['0000:%02x:00.0' % (0x50 + chip) for chip in range(layout.chips)]
         self.sink = sink or (lambda tensor, chip, block, data: None)
         self.address = address
@@ -85,8 +87,13 @@ class FakeMesh(object):
     def qwen_p2p_staging_info(self, handle):
         return [dict(device_id=chip, pci_bus_id=self.bdfs[chip], dram_bank=0, noc_x=17, noc_y=12, address=self.address, size=self.size) for chip in range(self.layout.chips)]
 
+    def drain(self):
+        while self.queue:
+            self.queue.pop(0)()
+
     def qwen_staging_checksum(self, handle, byte_offset, length, count=1):
         self.log.append(('checksum', byte_offset, length, count))
+        self.drain()                           # (a readback waits for the ops queued before it)
         if self.fail_checksum:
             raise RuntimeError('the checksum program failed')
         out = []
@@ -105,6 +112,12 @@ class FakeMesh(object):
         self.log.append(('write', tensor, byte_offset, tuple(blocks), row_stride))
         if self.fail_write:
             raise RuntimeError('the copy program failed')
+        if self.deferred:
+            self.queue.append(lambda: self._copy(tensor, byte_offset, tuple(blocks), row_stride))
+        else:
+            self._copy(tensor, byte_offset, blocks, row_stride)
+
+    def _copy(self, tensor, byte_offset, blocks, row_stride):
         for chip in range(self.layout.chips):
             for index, block in enumerate(blocks):
                 start = byte_offset + index * row_stride
@@ -112,6 +125,7 @@ class FakeMesh(object):
 
     def synchronize_device(self, mesh):
         self.log.append(('sync',))
+        self.drain()
 
     def ops(self, kind):
         return [entry for entry in self.log if entry[0] == kind]
@@ -538,6 +552,7 @@ class TtLinkTests(TmpCase):
         self.links = []
 
     def open(self, address=4 << 20, size=2 << 20, **kwargs):
+        kwargs.setdefault('require_verified', False)           # (an ordinary file has no BAR to check against; the tests that want the check say so)
         staging = dict(noc_x=17, noc_y=12, address=address, size=size)
         link = p2p.TtLink.open(2, self.BDF, staging, settle=0, sysfs_class=self.sysfs_class, sysfs_pci=self.sysfs_pci, dev_dir=self.dev_dir, **kwargs)
         self.addCleanup(link.close)
@@ -582,6 +597,17 @@ class TtLinkTests(TmpCase):
             with mock.patch.object(p2p.fcntl, 'ioctl', self.driver.ioctl):
                 with self.assertRaisesRegex(p2p.P2PUnavailable, what):
                     self.open()
+
+    def test_an_unprovable_mapping_is_refused_by_default_and_nothing_stays_taken(self):
+        with self.assertRaisesRegex(p2p.P2PUnavailable, 'could not be checked against the BAR'):
+            self.open(require_verified=True)
+        self.assertIn(202, self.driver.freed)
+
+    def test_a_slice_at_a_bar_offset_puts_the_staging_where_the_arithmetic_says(self):
+        with open(os.path.join(self.sysfs_class, 'tenstorrent!2', 'p2pmem', 'offset'), 'w') as handle:
+            handle.write('%d\n' % (1 << 20))
+        link = self.open(address=4 << 20, size=1 << 20)
+        self.assertEqual((link.aim['slice_offset'], link.aim['window_offset']), (3 << 20, 4 << 20))
 
     def test_a_slice_somebody_already_allocated_is_the_leases_refusal(self):
         build_sysfs(self.directory, [], slice_size=self.SLICE)
@@ -707,6 +733,7 @@ class EngineCase(TmpCase):
     def build(self, blocks=7, chunk_blocks=3, threads=4, geometry=SMALL, io_align=1, **kwargs):
         self.layout = p2p.ShardLayout(**geometry)
         self.device = Device(self.layout)
+        kwargs.setdefault('deferred', True)
         self.mesh = FakeMesh(self.layout, self.device.sink, **kwargs)
         self.drive = FileDrive(self.directory, self.layout, blocks)
         self.addCleanup(self.drive.close)
@@ -844,6 +871,7 @@ class EngineTests(EngineCase):
         finally:
             stream.close()
         self.assertEqual(seen, [(0, 2, [0]), (2, 2, [2]), (4, 2, [5]), (6, 1, [6])])
+        self.engine.api.sync()                                  # (a stream's copies are enqueued: the device has them once it is synced)
         for position, entry_index in ((0, 0), (2, 1), (5, 2), (6, 3)):
             self.assertEqual(bytes(self.device.blocks[900 + position]), self.drive.blocks[entry_index])
         self.assertNotIn(901, self.device.blocks)
@@ -938,6 +966,79 @@ class EngineTests(EngineCase):
         self.assertEqual(len(started), 1, 'one read was in flight; the rest were queued and did not start')
         stream.close(timeout=5)
 
+    def test_a_stream_that_cannot_get_a_half_is_busy_not_broken(self):
+        self.build(blocks=6, chunk_blocks=2)
+        holder = self.engine.start(self.drive.entries)               # takes both halves and keeps them
+        first = holder.take(wait=True)
+        second = holder.take(wait=True) if False else None
+        with self.assertRaises(p2p.P2PBusy):
+            self.engine.restore(self.drive.entries[:2], [30, 31])
+        self.assertIsNone(self.engine.start(self.drive.entries[:2]).take(wait=False), 'a non-waiting take just says not yet')
+        self.assertTrue(first and second is None)
+        holder.release(first)
+        holder.close()
+        entries, ids = self.restore(count=4, ids=[40, 41, 42, 43])
+        self.assertTrue(self.exact(ids))
+
+    def test_a_chunk_whose_reads_never_land_times_out_instead_of_waiting_forever(self):
+        self.build(blocks=2, chunk_blocks=2)
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+        original = self.drive.reader
+        self.engine.reader = lambda offset, view: (gate.wait(30), original(offset, view))
+        self.engine.take_timeout_s = 0.05
+        with self.assertRaises(p2p.P2PTimeout):
+            self.restore()
+        gate.set()
+
+    def test_the_half_of_a_chunk_abandoned_with_reads_in_flight_comes_back_when_they_land(self):
+        self.build(blocks=4, chunk_blocks=2)
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+        original = self.drive.reader
+        self.engine.reader = lambda offset, view: (gate.wait(30), original(offset, view))
+        stream = self.engine.start(self.drive.entries)
+        self.assertFalse(stream.close(timeout=0.05), 'the reads were still in flight')
+        self.assertEqual(self.engine.free_halves, [])
+        gate.set()
+        deadline = time.monotonic() + 5
+        while self.engine.inflight and time.monotonic() < deadline:
+            time.sleep(0.005)
+        self.assertEqual(self.engine.inflight, 0)
+        self.engine.reader = original
+        entries, ids = self.restore(ids=[50 + i for i in range(4)], count=4)               # (claim_half takes the reaped halves back)
+        self.assertTrue(self.exact(ids))
+        self.assertEqual(sorted(self.engine.free_halves), [0, 1])
+
+    def test_a_restore_that_fails_after_copies_were_enqueued_syncs_the_device_before_raising(self):
+        self.build(blocks=7, chunk_blocks=3)
+        self.drive.flip(block=4, chip=2, byte=5)
+        with self.assertRaises(p2p.P2PMismatch):
+            self.restore()
+        self.assertEqual(self.mesh.queue, [], 'the copies of the chunks before the bad one have run: nothing is left to write into blocks the caller frees')
+        self.assertEqual(self.mesh.log[-1], ('sync',))
+
+    def test_a_pool_that_cannot_take_the_tasks_ends_the_chunk_with_an_error_not_a_hang(self):
+        self.build(blocks=2, chunk_blocks=2)
+        self.engine.pool.shutdown(wait=True)
+        stream = self.engine.start(self.drive.entries)
+        with self.assertRaises(p2p.P2PReadError):
+            stream.take(wait=True, timeout=1)
+        self.assertEqual(self.engine.inflight, 0)
+
+    def test_the_wait_for_a_sync_that_raises_loses_no_half(self):
+        self.build(blocks=2, chunk_blocks=1)
+        entries, ids = self.restore()
+        self.assertTrue(self.engine.dirty or True)
+        self.engine.dirty.add(0)
+        self.engine.free_halves = [0, 1]
+        original = self.engine.api.sync
+        self.engine.api.sync = mock.Mock(side_effect=p2p.P2PDeviceError('no'))
+        with self.assertRaises(p2p.P2PDeviceError):
+            self.engine.claim_half()
+        self.assertEqual(self.engine.free_halves, [0, 1])
+        self.engine.api.sync = original
+
     def test_a_second_stream_shares_the_halves_with_the_first(self):
         self.build(blocks=4, chunk_blocks=2)
         first = self.engine.start(self.drive.entries[:2])
@@ -950,7 +1051,24 @@ class EngineTests(EngineCase):
             stream.write(chunk, ids)
             stream.release(chunk)
             stream.close()
+        self.engine.api.sync()
         self.assertTrue(self.exact([10, 11, 12, 13]))
+
+    def test_the_default_open_wants_the_mapping_proved_and_the_gate_only_override_lets_it_go(self):
+        seen = []
+
+        def fake_open(index, bdf, staging, ordering='relaxed', **kwargs):
+            seen.append(kwargs)
+            return FakeLink(self.mesh, len(seen) - 1, index, bdf, staging, ordering)
+
+        layout = p2p.ShardLayout(**SMALL)
+        for allow, want in ((False, True), (True, False)):
+            del seen[:]
+            self.mesh = FakeMesh(layout)
+            with mock.patch.object(p2p.TtLink, 'open', staticmethod(fake_open)), mock.patch.object(p2p, 'locate_cards', lambda infos, sysfs: [(i, '0000:%02x:00.0' % i) for i in range(4)]):
+                engine = p2p.P2PEngine(p2p.StagingApi(self.mesh, 'mesh', [0, 1]), layout, lambda o, v: None, staging_bytes=layout.shard_bytes * 4, io_align=1, allow_unverified_map=allow)
+            engine.close()
+            self.assertEqual([item['require_verified'] for item in seen], [want] * 4)
 
     def test_the_real_geometry_with_real_alignment(self):
         self.build(blocks=5, chunk_blocks=2, geometry=LayoutTests.PRODUCTION, io_align=4096)

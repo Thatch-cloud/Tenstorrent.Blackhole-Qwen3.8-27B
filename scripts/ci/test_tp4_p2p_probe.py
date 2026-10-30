@@ -184,7 +184,7 @@ class IdentityTests(ProbeCase):
     def test_the_by_id_link_and_the_kernel_agree(self):
         result = self.check()
         self.assertEqual(result['proof'], ['by-id', 'sysfs'])
-        self.assertEqual(len(result['fingerprint']), 8)
+        self.assertEqual(len(result['fingerprint']), 6)
 
     def test_the_by_id_link_alone_is_enough_when_the_kernel_cannot_say(self):
         self.has_sysfs = False
@@ -359,6 +359,65 @@ class FlowTests(ProbeCase):
         self.assertIn('negative arm', ' '.join(report['reasons']))
         self.assertFalse(report['negative']['refused'])
 
+    def test_the_windows_are_taken_before_the_first_byte_is_written_and_an_error_names_no_drive_serial_or_card(self):
+        before = open(self.device, 'rb').read(8 << 20)
+
+        def refusing(api, lay, drive, opts):
+            raise p2p.P2PUnavailable('TLB window 202 of 0000:41:00.0 is held by another process; node %s serial %s (%s)' % (
+                opts.drive, SERIAL, os.path.basename(opts.drive)))
+
+        report = self.run_flow(engine_factory=refusing)
+        self.assertEqual(report['verdict'], 'NOT-MEASURED')
+        self.assertEqual(open(self.device, 'rb').read(8 << 20), before, 'not a byte of the object was written')
+        text = json.dumps(report, default=str) + '\n'.join(self.logs)
+        for secret in (SERIAL, MODEL, 'Fake_NVMe_Model', '0000:41:00.0', self.by_id, os.path.basename(self.options().drive)):
+            self.assertNotIn(secret, text)
+        self.assertIn('<pci>', report['error'])
+        self.assertIn('<redacted>', report['error'])
+        self.assertNotIn('write', report)
+
+    def test_an_os_error_for_the_drive_path_is_scrubbed_too(self):
+        def failing(path):
+            raise OSError(13, 'Permission denied', path)
+
+        report = self.run_flow(drive_factory=failing)
+        self.assertEqual(report['verdict'], 'NOT-MEASURED')
+        text = json.dumps(report, default=str) + '\n'.join(self.logs)
+        self.assertNotIn(self.by_id, text)
+        self.assertNotIn('FAKESERIAL123', text)
+
+    def test_the_scrubber_takes_out_drive_names_serials_and_pci_addresses_of_any_form(self):
+        scrub = probe.scrubber(self.options())
+        text = scrub('x /dev/disk/by-id/nvme-Whatever_123456_1 nvme-eui.0025385a12345678 %s at 41:00.0 and 0000:4A:00.3 model %s' % (SERIAL, MODEL))
+        for gone in ('Whatever', 'eui.00253', SERIAL, MODEL, '41:00.0', '4A:00.3'):
+            self.assertNotIn(gone, text)
+
+    def test_a_mapping_the_kernel_could_not_confirm_is_a_fail_unless_a_gate_allows_it(self):
+        layout = p2p.ShardLayout(4, 4, SLICE_BYTES)
+
+        def unverified(api, lay, drive, opts):
+            ttnn = api.ttnn
+            link_factory, links = make_links(ttnn)
+
+            def make(position, index, bdf, staging, ordering):
+                link = link_factory(position, index, bdf, staging, ordering)
+                link.map_verified = False
+                return link
+
+            return p2p.P2PEngine(api, lay, drive.reader, threads=opts.threads, staging_bytes=opts.staging_mib << 20, link_factory=make, io_align=4096, sleep=lambda s: None)
+
+        report = self.run_flow(ttnn=ProbeTtnn(layout), engine_factory=unverified)
+        self.assertEqual(report['verdict'], 'FAIL')
+        self.assertIn('not confirmed against the BAR', ' '.join(report['reasons']))
+        report = self.run_flow(self.options(allow_unverified_map=True), ttnn=ProbeTtnn(layout), engine_factory=unverified)
+        self.assertEqual(report['verdict'], 'PASS', report.get('reasons'))
+
+    def test_the_default_object_is_several_chunks_so_the_halves_rotate(self):
+        options = probe.parse_options(['--output', 'x'])
+        layout = p2p.ShardLayout(options.caches, 4, SLICE_BYTES)
+        chunk_blocks = ((options.staging_mib << 20) // 2) // layout.shard_bytes
+        self.assertGreater(options.blocks, 3 * chunk_blocks)
+
     def test_a_pool_left_allocated_is_a_fail(self):
         def leaky(engine, options):
             return dict(links_closed=True, available_equals_size=False)
@@ -514,6 +573,43 @@ class JobWiringTests(unittest.TestCase):
         self.assertNotIn('source ', step)
         self.assertNotIn('. "$', step)
         self.assertLess(step.index('readlink -f'), step.index('p2pargs=(--device'))
+
+    def test_the_shell_block_refuses_what_it_should_before_docker_is_reached(self):
+        import subprocess
+
+        block = self.WORKFLOW[self.WORKFLOW.index('          p2pargs=()'):self.WORKFLOW.index('          # split builds the image')]
+        import textwrap
+        script = 'set -euo pipefail\nPROBE=p2p\n' + textwrap.dedent(block) + '\necho BLOCK-PASSED\n'
+        directory = tempfile.mkdtemp(prefix='p3a-shell-')
+        self.addCleanup(shutil.rmtree, directory, True)
+        path = os.path.join(directory, 'step.sh')
+        with open(path, 'w') as handle:
+            handle.write(script)
+        env_file = os.path.join(directory, 'private.env')
+
+        def run(content=None, mode=0o600):
+            if content is not None:
+                with open(env_file, 'w') as handle:
+                    handle.write(content)
+                os.chmod(env_file, mode)
+            result = subprocess.run(['bash', path], env={'PATH': os.environ['PATH'], 'HOME': directory, 'P2P_ENV_FILE': env_file}, capture_output=True, text=True, timeout=60)
+            return result.returncode, result.stderr.strip()
+
+        good = 'P2P_DRIVE_BY_ID=/dev/disk/by-id/nvme-Some_Model_SER1\nP2P_DRIVE_MODEL=Some Model\nP2P_DRIVE_SERIAL=SER1\nP2P_CARDS=0000:41:00.0\n'
+        cases = [
+            (None, 0o600, 'no private P3a file'),                                         # (the file does not exist yet)
+            (good, 0o666, 'not the runner user'),
+            (good.replace('SER1\nP2P_CARDS', 'SER1\nEVIL=$(touch pwned)\nP2P_CARDS'), 0o600, 'not one of its four names'),
+            (good.replace('P2P_DRIVE_SERIAL=SER1\n', ''), 0o600, 'P2P_DRIVE_SERIAL is not set'),
+            (good.replace('/dev/disk/by-id/nvme-Some_Model_SER1', '/dev/sda'), 0o600, 'must be named by a /dev/disk/by-id'),
+            (good.replace('P2P_DRIVE_BY_ID=/dev/disk/by-id/nvme-Some_Model_SER1', 'P2P_DRIVE_BY_ID=/dev/disk/by-id/nvme-Not_There_SER1'), 0o600, 'does not resolve to a block device'),
+        ]
+        for content, mode, why in cases:
+            code, err = run(content, mode)
+            self.assertEqual(code, 1, (why, err))
+            self.assertIn(why, err)
+        self.assertFalse(os.path.exists(os.path.join(directory, 'pwned')))
+        self.assertNotIn('BLOCK-PASSED', run(good)[1])
 
     def test_the_script_is_in_the_image_free_checkout_mount(self):
         # the fabric step mounts the checkout read-only at /c2 and runs /c2/scripts/ci/<script>: the probe needs no image rebuild, only an image with the device-op extension

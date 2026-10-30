@@ -511,7 +511,13 @@ jobs:
             [ -b "$node" ] || { echo 'refusing: the drive'"'"'s by-id link does not resolve to a block device' >&2; exit 1; }
             tok() { printf '%s' "$1" | sed -E 's/[^A-Za-z0-9]+/_/g; s/^_+//; s/_+$//'; }
             want="nvme-$(tok "${p2p_val[P2P_DRIVE_MODEL]}")_$(tok "${p2p_val[P2P_DRIVE_SERIAL]}")"
-            case "$(basename "$link")" in "$want"|"$want"_[0-9]*) ;; *) echo 'refusing: the drive'"'"'s by-id name is not the configured model and serial' >&2; exit 1 ;; esac
+            [[ "$(basename "$link")" =~ ^"$want"(_[0-9]+)?$ ]] || { echo 'refusing: the drive'"'"'s by-id name is not the configured model and serial' >&2; exit 1; }
+            # the probe writes a scratch region of the drive: it must not be a mounted filesystem, swap, an array member or held by device-mapper
+            nodename=$(basename "$node")
+            if [ -n "$(lsblk -nro MOUNTPOINTS "$node" 2>/dev/null | tr -d '[:space:]')" ] || grep -q "^$node " /proc/swaps \
+               || grep -q "\b$nodename" /proc/mdstat 2>/dev/null || [ -n "$(ls -A "/sys/block/$nodename/holders" 2>/dev/null)" ]; then
+              echo 'refusing: the drive is mounted, in use as swap, in an array or held by another block device' >&2; exit 1
+            fi
             p2p_mounts=()
             IFS=',' read -r -a p2p_cards <<< "${p2p_val[P2P_CARDS]}"
             for bdf in "${p2p_cards[@]}"; do

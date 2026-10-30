@@ -67,7 +67,7 @@ prestage_diff write_packed_lean batched_reads_tp hostgap_instr
 grid13_tp
 tap_window_aligned
 prefix_window_carry
-qwen_kv_nvme qwen_nvme_store
+qwen_kv_nvme qwen_nvme_store qwen_p2p_restore
 '''.split())      # (the op-fusion programme's levers, docs/tp4-fusion.md: each imported lazily and flag-guarded by the twin that owns it, so a flags-off process never loads it)
 
 # Modules the four-card profiles never run their pair code from, and why. The closure does not follow into them.

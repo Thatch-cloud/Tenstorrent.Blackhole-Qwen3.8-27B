@@ -62,6 +62,30 @@ class Refusal(Exception):
     """The probe will not go on, and nothing was written. The message says why (it never carries the drive's model, serial or a PCI address)."""
 
 
+PCI_ADDRESS = re.compile(r'(?:[0-9a-fA-F]{4}:)?[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7]')
+
+
+def scrubber(options):
+    """A function that takes the drive's path, by-id name, model and serial and every PCI address out of a text: the Actions log of a public repository is public, and an exception message
+    (a path in an OSError, a card in a refusal) is how they would get there."""
+    secrets = []
+    for value in (options.drive, os.path.basename(options.drive or ''), options.drive_model, options.drive_serial,
+                  model_token(options.drive_model or ''), model_token(options.drive_serial or '')):
+        if value and len(str(value)) >= 3:
+            secrets.append(str(value))
+    secrets.sort(key=len, reverse=True)
+
+    def scrub(text):
+        text = str(text)
+        for secret in secrets:
+            text = text.replace(secret, '<redacted>')
+        text = re.sub(r'/dev/disk/by-id/\S+', '/dev/disk/by-id/<redacted>', text)
+        text = re.sub(r'nvme-[A-Za-z0-9_.:+-]{6,}', 'nvme-<redacted>', text)
+        return PCI_ADDRESS.sub('<pci>', text)
+
+    return scrub
+
+
 def log_line(log, message, *values):
     log('P3A ' + (message % values if values else message))
 
@@ -152,7 +176,7 @@ def identity_check(device, model, serial, by_id_dir='/dev/disk/by-id', sysfs='/s
         raise Refusal('the drive is not the one configured: %s' % '; '.join(sorted(set(why))))
     if not positive:
         raise Refusal('the drive cannot be shown to be the one configured: no /dev/disk/by-id link of its model and serial resolves to the node, and the kernel\'s identity for it is unreadable')
-    return {'proof': sorted(set(positive)), 'fingerprint': hashlib.sha256(('%s|%s' % (model_token(model), model_token(serial))).encode()).hexdigest()[:8]}
+    return {'proof': sorted(set(positive)), 'fingerprint': hashlib.sha256(('%s|%s' % (model_token(model), model_token(serial))).encode()).hexdigest()[:6]}
 
 
 def r1_readings(device, sysfs='/sys'):
@@ -354,19 +378,20 @@ def run_data_plane(ttnn, mesh, options, drive_info, report, log, alloc=alloc_cac
     drive = drive_factory(options.drive)
     report['bytes'] = total
     try:
-        # 2. the known object, written after the identity was proved
-        began = time.perf_counter()
-        drive.write_at(options.scratch_offset, arena)
-        report['write'] = dict(seconds=time.perf_counter() - began, gbps=total / max(time.perf_counter() - began, 1e-9) / 1e9)
-        log_line(log, 'wrote %d blocks (%d bytes) chip-major at offset %d: %.2f GB/s', blocks, total, options.scratch_offset, report['write']['gbps'])
-        entries = [Entry(options.scratch_offset + index * layout.block_bytes, layout.block_bytes, layout.pack_checksums(sums[index])) for index in range(blocks)]
-        # 3. the windows
+        # 3. the windows, BEFORE a byte of the object is written: the cards named, the staging buffer allocated, every window taken, aimed, pinned and proved, the mappings checked
         api = p2p.StagingApi(ttnn, mesh, caches)
         make_engine = engine_factory or (lambda api, layout, drive, options: p2p.P2PEngine(api, layout, drive.reader, threads=options.threads, staging_bytes=options.staging_mib << 20,
-                                                                                            expected=options.cards or None, logger=lambda m, *v: log_line(log, m, *v)))
+                                                                                            expected=options.cards or None, allow_unverified_map=options.allow_unverified_map,
+                                                                                            logger=lambda m, *v: log_line(log, '%s', scrubber(options)(m % v if v else m))))
         engine = make_engine(api, layout, drive, options)
         try:
             describe_engine(engine, report, log, options.sysfs_pci)
+            # 2. the known object, written after the identity was proved and the windows were
+            began = time.perf_counter()
+            drive.write_at(options.scratch_offset, arena)
+            report['write'] = dict(seconds=time.perf_counter() - began, gbps=total / max(time.perf_counter() - began, 1e-9) / 1e9)
+            log_line(log, 'wrote %d blocks (%d bytes) chip-major at offset %d: %.2f GB/s', blocks, total, options.scratch_offset, report['write']['gbps'])
+            entries = [Entry(options.scratch_offset + index * layout.block_bytes, layout.block_bytes, layout.pack_checksums(sums[index])) for index in range(blocks)]
             ids = list(range(blocks))
             # 4. one card first: the widest link among the published cards
             widths = [(link_width(bdf, options.sysfs_pci), position) for position, (_index, bdf) in enumerate(engine.cards)]
@@ -517,6 +542,8 @@ def verdict_of(report):
         reasons.append('the windows or the p2pmem pools were not released: %s' % released)
     if not report.get('restore'):
         reasons.append('no restore was timed')
+    if not (report.get('engine') or {}).get('mapping_verified') and not report.get('allow_unverified_map'):
+        reasons.append('the p2pmem mappings were not confirmed against the BAR (/proc/self/pagemap needs CAP_SYS_ADMIN)')
     return ('FAIL' if reasons else 'PASS'), reasons
 
 
@@ -536,7 +563,8 @@ def required_ops(ttnn):
 
 def run(options, ttnn=None, environ=None, log=print, alloc=alloc_cache, drive_factory=Drive, engine_factory=None, mesh_opener=None):
     environ = os.environ if environ is None else environ
-    report = dict(kind=KIND, fabric=options.fabric, blocks=options.blocks, opened=False, serving_contract=environ.get('QWEN_C2_SERVING'))
+    report = dict(kind=KIND, fabric=options.fabric, blocks=options.blocks, opened=False, serving_contract=environ.get('QWEN_C2_SERVING'),
+                  allow_unverified_map=bool(options.allow_unverified_map))
     try:
         report['drive'] = check_drive(options, log)
     except Refusal as refusal:
@@ -572,8 +600,9 @@ def run(options, ttnn=None, environ=None, log=print, alloc=alloc_cache, drive_fa
         report['refusal'] = str(refusal)
         log_line(log, 'REFUSED: %s', refusal)
     except Exception as error:  # noqa: BLE001
-        report['error'] = '%s: %s' % (type(error).__name__, str(error)[:500])
-        report['traceback'] = traceback.format_exc()[-3000:]
+        scrub = scrubber(options)
+        report['error'] = '%s: %s' % (type(error).__name__, scrub(error)[:500])
+        report['traceback'] = scrub(traceback.format_exc())[-3000:]
         log_line(log, 'error: %s', report['error'])
     finally:
         if mesh is not None:
@@ -608,7 +637,8 @@ def build_parser():
     parser.add_argument('--caches', type=int, default=32, help='scratch cache tensors (default 32 = the production count; a multiple of 4 so a shard is whole pages)')
     parser.add_argument('--heads-per-chip', type=int, default=1)
     parser.add_argument('--threads', type=int, default=p2p.DEFAULT_THREADS)
-    parser.add_argument('--staging-mib', type=int, default=p2p.DEFAULT_STAGING_BYTES >> 20)
+    parser.add_argument('--staging-mib', type=int, default=32, help='staging buffer per card (default 32: halves of 29 blocks, so the default object is several chunks and the halves rotate)')
+    parser.add_argument('--allow-unverified-map', action='store_true', help='go on although /proc/self/pagemap cannot confirm where the p2pmem mapping is (no CAP_SYS_ADMIN): the DMA then trusts the pool\'s order')
     parser.add_argument('--scratch-offset', type=int, default=DEFAULT_SCRATCH_OFFSET, help='where on the drive the object is written (default 1 GiB)')
     parser.add_argument('--allow-store-overwrite', action='store_true', help='go on although the drive carries the NVMe tier\'s superblock (a gate\'s drive to destroy)')
     parser.add_argument('--by-id-dir', default='/dev/disk/by-id')

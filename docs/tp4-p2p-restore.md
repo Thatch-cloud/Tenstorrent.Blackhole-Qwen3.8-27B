@@ -82,7 +82,7 @@ otherwise) as PCI peer-to-peer memory. It programs no TLB: **whoever uses the me
 | aim it | `CONFIGURE_TLB` (`_IO(0xFA, 13)`): `addr` = the staging address rounded down to 4 GiB, `x_end, y_end` = the staging bank's NOC tile, `noc` 0, `ordering` relaxed | byte x of the slice is at BAR4 `offset + x`, window offset `offset + x - window_base`, NOC address `addr + that` |
 | pin it | `EXPORT_TLB_DMABUF` (`_IO(0xFA, 16)`), nothing imports the export | keeps the window past `FREE_TLB`/`close()` and makes the driver refuse a destructive `RESET_DEVICE` |
 | prove it | `mmap(fd, 4 GiB, offset = mmap_offset_wc)`: write a pattern at both ends of the staging buffer through the window, read it back | the canary; before any DMA; the CPU path is slow (the kernel maps p2pmem uncached) but it touches 8 KiB |
-| map the slice | `open(/sys/bus/pci/devices/<bdf>/p2pmem/allocate, O_RDWR)` + `mmap` of the **whole** slice | one allocation: a second mapper gets ENOMEM (the lease); mapping from the pool's start puts byte x of the mapping at byte x of the slice; if `/proc/self/pagemap` can say (CAP_SYS_ADMIN) the first page, the staging start and its last page are checked against the BAR |
+| map the slice | `open(/sys/bus/pci/devices/<bdf>/p2pmem/allocate, O_RDWR)` + `mmap` of the **whole** slice | one allocation: a second mapper gets ENOMEM (the lease); the pool hands out its pages lowest first, so a mapping of the whole slice should put byte x of the mapping at byte x of the slice. **Not taken on trust:** `/proc/self/pagemap` (CAP_SYS_ADMIN) must confirm the first page, the staging start and its last page against the BAR, else the link is `UNAVAILABLE` (the DMA writes wherever the pages are: a wrong guess is a write into live KV or weights, and the staging checksum cannot see writes outside staging). The gate-only `QWEN_PREFIX_NVME_P2P_ALLOW_UNVERIFIED_MAP=1` goes on without; P3a, which has CAP_SYS_ADMIN, says whether the order holds on the real kernel |
 
 The staging buffer's place in the slice is arithmetic (`plan_aim`, equal to the probe's `make_plan` in a test): staging address A, slice at BAR4 offset S in window W (window_base = (W - 202) x 4 GiB):
 window offset = A mod 4 GiB, slice offset = that - (S - window_base), which must be >= 0, 4096-aligned and inside the slice.
@@ -124,8 +124,9 @@ comparison that failed and the retry passed.
 
 `QWEN_PREFIX_NVME_P2P=1` (with the tier's usual names; **gate-only** in `serving_c2_contract`: a traffic profile cannot carry it even under the owner waiver; promoting it is a contract change). Knobs, refused as
 inert unless the switch is on: `QWEN_PREFIX_NVME_P2P_THREADS` (reads in flight over all cards, default 8, 1-64), `QWEN_PREFIX_NVME_P2P_STAGING_MIB` (per card, default 128 = two halves of 64, 2-4096),
-`QWEN_PREFIX_NVME_P2PMEM` (the PCI addresses of the cards whose p2pmem is published; optional: when given the mesh must run on exactly these cards). `QWEN_PREFIX_NVME_RESTORE=p2p` is refused with a pointer to the
-flag. All four cards need the slice published; fewer is `UNAVAILABLE` (the copy op writes every chip).
+`QWEN_PREFIX_NVME_P2PMEM` (the PCI addresses of the cards whose p2pmem is published; optional: when given the mesh must run on exactly these cards), `QWEN_PREFIX_NVME_P2P_ALLOW_UNVERIFIED_MAP` (gate-only, see section 2).
+`QWEN_PREFIX_NVME_RESTORE=p2p` is refused with a pointer to the flag. `QWEN_PREFIX_NVME_VERIFY` governs the host path's sha256 only: **the P2P path checks every shard on the card whatever it says** (the log line still prints it).
+Every successful restore, P2P or fallback, refreshes the blocks' TTL and LRU clock (`touch_kv`) as the host path does. All four cards need the slice published; fewer is `UNAVAILABLE` (the copy op writes every chip).
 
 | situation | what happens |
 |---|---|
@@ -133,6 +134,7 @@ flag. All four cards need the slice published; fewer is `UNAVAILABLE` (the copy 
 | the IO has no chip geometry (`caches`, `chips`, `slice_bytes`) | the tier does not open (`UNAVAILABLE`, `needs the tier IO's geometry`) |
 | restore, checksums match | the blocks are in the cache; `nvme_p2p_restores`, `_blocks`, `_bytes`, `_read_ms`, `_check_ms`, `_write_ms` |
 | **checksum mismatch after the retry** | **a miss**: nothing written for the chunk, the turn prefills cold, `nvme_p2p_mismatch` += shards. The first 8 blocks are re-read through the host path: bytes whose sha256 fail are bad on the drive (the entry is dropped, `nvme_digest_failures`); bytes that verify mean the path delivered them wrong (a strike; three latch the path off). It does not count toward the host tier's three-failures latch |
+| another restore holds the staging halves (`P2PBusy`) | these blocks come through the host path, `nvme_p2p_fallbacks`; **no strike** |
 | any other failure (a read error, a device op that raises, a stalled drive) | counted (`nvme_p2p_errors`), a strike, and the same blocks come through the host path (`nvme_p2p_fallbacks`); if the host path fails too the restore is a miss |
 | three strikes in a row, a device-op error (at once), a stalled drive (no chunk for 20 s) | the path latches off: `nvme tier p2p latched off`, `nvme_p2p_latched` = 1, `direct` turns False and `TierHooks` goes back to host records; until a restart |
 | audit (`QWEN_PREFIX_HOST_TIER_AUDIT=1`, gates) | the restored blocks are read back through the model's own IO, converted chip-major and compared with the drive's sha256 (`TierHooks.audit_direct`): the end-to-end drive -> card -> cache -> host check |
@@ -140,8 +142,7 @@ flag. All four cards need the slice published; fewer is `UNAVAILABLE` (the copy 
 Log lines (read by `prefix_markers`): `nvme tier p2p on cards= threads= staging_bytes= chunk_blocks= shard_bytes= mapping_verified= window=`, `nvme tier p2p restore blocks= bytes= ms=`, and the trouble lines `p2p
 UNAVAILABLE`, `p2p latched off`, `p2p restore failed`, `p2p CHECKSUM MISMATCH`. The open line carries `backend=p2p`. The smoke table (`c2_smoke_check`) wants the `p2p on` line when a profile sets the flag.
 
-`nvme_p2p_map_verified` is 1 when `/proc/self/pagemap` confirmed the mapping (needs CAP_SYS_ADMIN). Without it the guard is the whole-slice mapping: it succeeds only if every page of the pool was free, so the
-mapping is the pool in order and the offset arithmetic holds.
+`nvme_p2p_map_verified` is 1 when `/proc/self/pagemap` confirmed the mapping (needs CAP_SYS_ADMIN). The path does not start without it (`UNAVAILABLE`) unless the gate-only override is set, and then the gauge is 0.
 
 ## 6. Async restore: the answer
 
@@ -158,6 +159,8 @@ inside `load_direct` it would stall just as long. **The minimal change that lets
 * the only work left on the scheduler thread per step is the checksum op with its readback, the block allocation (with the existing `flush` of what it evicts), and the copy enqueue: estimated **ms to tens of ms
   per 120-block chunk** (the copy is 67 MB per card of DRAM-to-DRAM), against ~40 ms of drive read per chunk that is now off-thread. **UNTESTED/UNMEASURED**: P3a prints the check and copy times per chunk and
   the restore's end-to-end rate; G-C3 judges the disturbance.
+* a block is **published only after** the device has been synced past the job's last copy (`sync_p2p`; also before an abandoned job's blocks are freed): whatever queue the model's rounds use, a published block is a
+  written block (ADR rule R2). A stream that is closed with reads still in flight hands its staging half back when the last of them lands (`reap`); a synchronous restore waits for a chunk at most 60 s;
 * failures: a mismatch abandons the job (a miss; the request's tier hit is ignored); a read or device error before any block was taken hands the rest of the job to the host `fill` path
   (`job.host_only`); a path that latches under a job finishes it through the host path; a drive that lands nothing for 20 s abandons the job and latches the path; the trim reaching an unfinished job finishes
   it whole and **waits** for the reads (`advance(whole=True)`), as before.
@@ -197,10 +200,11 @@ commit. Order, and what it refuses before it does anything:
    **a private file on the runner** (`P2P_ENV_FILE`, owned by the runner user, not group- or world-writable, a strict `KEY=VALUE` parser, never sourced). The step checks the by-id name against the model and serial
    before `docker run`; the probe checks again inside. Then **R1's readings, printed**: `P3A R1 controller_state=live namespace_bytes=N`. **Anything but `live` (or an empty namespace) refuses, nothing written.**
    A drive carrying the NVMe tier's superblock refuses unless `--allow-store-overwrite`. The model, serial and PCI addresses are never printed (the Actions log of a public repository is public): the report has an
-   8-hex fingerprint of model and serial.
+   6-hex fingerprint of model and serial. Exception messages (a path in an `OSError`, a card in a refusal) are scrubbed of the drive's path and by-id name, its model, serial and every PCI address before they reach the report or the log.
 1. The (1, 4) mesh as the kv-read probe opens it; the ops must exist (refusal otherwise); scratch KV caches allocated as production allocates its own.
-2. N blocks (default 96, ~214 MB) of random bytes in the host tier's layout, laid out chip-major, written `O_DIRECT` at `--scratch-offset` (default 1 GiB), with their per-chip checksums.
-3. Every published card's window taken, aimed, pinned, proved (engine construction; the staging description is printed without PCI addresses).
+2. N blocks (default 96, ~214 MB) of random bytes in the host tier's layout, laid out chip-major, with their per-chip checksums, **written `O_DIRECT` at `--scratch-offset` (default 1 GiB) only after step 3**.
+3. Every published card's window taken, aimed, pinned, proved and its mapping confirmed against the BAR (engine construction, staging 32 MiB per card by default so the object is four chunks and the halves
+   rotate; the staging description is printed without PCI addresses). Without CAP_SYS_ADMIN this refuses (`--allow-unverified-map` to go on).
 4. **One card first**: the widest link among the published cards (the x16 card), alone: its shards of the first blocks read into its staging buffer, its device checksums compared with the host's.
 5. **Every published card**: the read on its own (GB/s drive -> cards), then the whole restore (checksum ops, `qwen_write_blocks_from_staging` into the scratch caches), then `qwen_read_blocks_raw` back and a
    byte-for-byte comparison with what was written to the drive. Printed: read GB/s, end-to-end GB/s, checksum and copy ms per chunk.
@@ -219,8 +223,9 @@ stop grace; `docs/tp4-kv-nvme.md` section 9):
 2. **sysfs, writable where it must be.** The container's `/sys` is read-only. For **each card with a published slice**, the directory `/sys/bus/pci/devices/<bdf>/p2pmem` must be bind-mounted **read-write**
    (the engine opens `allocate` `O_RDWR` and maps it shared). `/sys/class/tenstorrent` (the `p2pmem` attributes are root-readable) and `/sys/bus/pci/devices/<bdf>/resource` must stay readable. The agent finds
    `<bdf>` at launch from the same table the engine uses (`/sys/class/tenstorrent/tenstorrent!N/device`); the nodes renumber on every reset.
-3. **Capabilities.** None are needed for the data path (the ioctls need only the open fd; `O_DIRECT` and the mapping need root in the container). **Recommended on the first deployments: `CAP_SYS_ADMIN`**, so
-   `/proc/self/pagemap` shows physical addresses and the engine can confirm where the mapping sits (`nvme_p2p_map_verified`); without it the whole-slice mapping is the guard.
+3. **Capabilities.** The ioctls need only the open fd, and `O_DIRECT` and the mapping need root in the container; but **`CAP_SYS_ADMIN` is required**: `/proc/self/pagemap` shows physical addresses only with it,
+   and the engine refuses to start (`UNAVAILABLE`) unless it can confirm where the p2pmem mapping sits (`nvme_p2p_map_verified` = 1). A gate that cannot grant it may set the gate-only
+   `QWEN_PREFIX_NVME_P2P_ALLOW_UNVERIFIED_MAP=1`; production should not.
 4. **Environment.** `QWEN_PREFIX_NVME_P2P=1` (a gate profile today), optionally `QWEN_PREFIX_NVME_P2PMEM=<bdf>,<bdf>,...` (the runner's `C2_P2PMEM`) and the staging and thread knobs; plus the tier's existing
    names (`C2_NVME_DEVICE` -> `QWEN_PREFIX_NVME_DEVICE`).
 5. **The kernel module.** The patched tt-kmd (`p2pmem_devices` naming **all four cards**; today two are published and a reboot returns the stock module) installed through DKMS or a boot unit, with

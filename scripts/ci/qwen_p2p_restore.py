@@ -19,6 +19,7 @@ device-op branch's; the kernel side is the tt-kmd p2pmem patch (patches/tt-kmd-p
 Nothing here decides policy: qwen_kv_nvme.P2PBackend does (flags, fallbacks, counters).
 """
 
+import collections
 import ctypes
 import fcntl
 import gc
@@ -78,6 +79,14 @@ class P2PUnavailable(P2PError):
 
 class P2PReadError(P2PError):
     """A read from the drive into a card failed."""
+
+
+class P2PBusy(P2PError):
+    """Another restore holds the staging halves. Not a fault of the path: the caller restores these blocks another way (the host path) and the path takes no strike."""
+
+
+class P2PTimeout(P2PReadError):
+    """A chunk's reads did not all return in the time allowed: a drive that stopped answering."""
 
 
 class P2PDeviceError(P2PError):
@@ -366,16 +375,16 @@ class TtLink(object):
         self.closed = False
 
     @classmethod
-    def open(cls, index, bdf, staging, ordering='relaxed', settle=0.5, logger=None, sysfs_class=SYSFS_CLASS, sysfs_pci=SYSFS_PCI, dev_dir=DEV_DIR, power=True):
+    def open(cls, index, bdf, staging, ordering='relaxed', settle=1.0, logger=None, sysfs_class=SYSFS_CLASS, sysfs_pci=SYSFS_PCI, dev_dir=DEV_DIR, power=True, require_verified=True):
         link = cls(index, bdf, logger, sysfs_class, sysfs_pci, dev_dir)
         try:
-            link._open(staging, ordering, settle, power)
+            link._open(staging, ordering, settle, power, require_verified)
         except BaseException:
             link.close()
             raise
         return link
 
-    def _open(self, staging, ordering, settle, power):
+    def _open(self, staging, ordering, settle, power, require_verified=True):
         try:
             self.fd = os.open(os.path.join(self.dev_dir, str(self.index)), os.O_RDWR | getattr(os, 'O_CLOEXEC', 0))
         except OSError as error:
@@ -395,6 +404,10 @@ class TtLink(object):
         self._map_cpu_window()
         self.selftest()
         self._map_p2pmem()
+        if require_verified and not self.map_verified:
+            raise P2PUnavailable('the p2pmem mapping of %s could not be checked against the BAR (/proc/self/pagemap shows no physical addresses without CAP_SYS_ADMIN): the DMA writes wherever the '
+                                 'pages are, and nothing else proves they are where the window points; give the container CAP_SYS_ADMIN, or accept the risk with the gate-only '
+                                 'QWEN_PREFIX_NVME_P2P_ALLOW_UNVERIFIED_MAP=1' % self.bdf)
 
     # -- the driver's ioctls -----------------------------------------------------------------------
     def _ioctl(self, request, buffer, what):
@@ -615,7 +628,7 @@ class Chunk(object):
     """Up to chunk_blocks consecutive positions of a restore: the ones with a stored object (`pending`: [(position, entry)]) are read into one half of the staging buffer, slot j
     at half + j * shard_bytes on every card."""
 
-    __slots__ = ('index', 'first', 'count', 'pending', 'half', 'offset', 'todo', 'error', 'done', 'lock', 'began', 'ended', 'ops')
+    __slots__ = ('index', 'first', 'count', 'pending', 'half', 'offset', 'todo', 'error', 'done', 'lock', 'began', 'ended', 'ops', 'abandoned', 'reap')
 
     def __init__(self, index, first, count, pending):
         self.index, self.first, self.count, self.pending = index, first, count, pending
@@ -627,6 +640,8 @@ class Chunk(object):
         self.lock = threading.Lock()
         self.began = self.ended = None
         self.ops = False                       # a device op has been issued over this chunk's half
+        self.abandoned = False                 # its stream was closed with reads still in flight: the last read hands the half to the engine's reap list
+        self.reap = None
 
     @property
     def positions(self):
@@ -640,8 +655,12 @@ class Chunk(object):
             last = self.todo <= 0
             if last:
                 self.ended = time.perf_counter()
+            reap = last and self.abandoned and self.half is not None and self.reap is not None
         if last:
             self.done.set()
+        if reap:
+            half, self.half = self.half, None
+            self.reap(half, self.ops)
 
 
 STAT_NAMES = ('restores', 'chunks', 'blocks', 'bytes', 'read_ms', 'check_ms', 'write_ms', 'mismatch_retries', 'mismatches', 'read_errors', 'device_errors')
@@ -667,7 +686,11 @@ class Stream(object):
         self.taken = 0                         # chunks handed out
         self.closed = False
         engine.stats['restores'] += 1
-        self.pump()
+        try:
+            self.pump()
+        except BaseException:
+            self.close(timeout=5.0)
+            raise
 
     def __len__(self):
         return len(self.chunks)
@@ -695,13 +718,23 @@ class Stream(object):
         engine = self.engine
         chunk.half = half
         chunk.offset = half * engine.half_bytes
-        chunk.todo = len(chunk.pending) * len(self.chips)
+        total = len(chunk.pending) * len(self.chips)
+        chunk.todo = total
+        chunk.reap = engine.reap
         chunk.began = time.perf_counter()
         with engine.inflight_lock:
-            engine.inflight += chunk.todo
-        for slot, (_position, entry) in enumerate(chunk.pending):
-            for chip in self.chips:
-                engine.pool.submit(engine.read_task, chunk, slot, chip, entry)
+            engine.inflight += total
+        sent = 0
+        try:
+            for slot, (_position, entry) in enumerate(chunk.pending):
+                for chip in self.chips:
+                    engine.pool.submit(engine.read_task, chunk, slot, chip, entry)
+                    sent += 1
+        except BaseException as error:                  # (a pool that was shut down: the tasks never sent count as failed reads, so the chunk ends and take() says why)
+            for _unsent in range(total - sent):
+                with engine.inflight_lock:
+                    engine.inflight -= 1
+                chunk.finish_task(error)
 
     def ready(self):
         """Whether the next chunk's reads have all returned (no wait)."""
@@ -716,10 +749,12 @@ class Stream(object):
         if chunk.index >= self.submitted:
             if not wait:
                 return None
-            raise P2PError('the stream has no free half to read the next chunk into')       # (cannot happen: a taken chunk is released before the next take)
+            raise P2PBusy('the staging halves are held by another restore: no room to read the next chunk into')
         if not chunk.done.is_set():
-            if not wait or not chunk.done.wait(timeout):
+            if not wait:
                 return None
+            if not chunk.done.wait(timeout):
+                raise P2PTimeout('chunk %d (blocks %d..%d) has not landed in %s s' % (chunk.index, chunk.first, chunk.first + chunk.count - 1, timeout))
         self.taken += 1
         if chunk.error is not None:
             self.engine.stats['read_errors'] += 1
@@ -786,7 +821,7 @@ class Stream(object):
             self.engine.return_half(chunk.half, dirty=chunk.ops)
             chunk.half = None
 
-    def close(self, timeout=60.0):
+    def close(self, timeout=10.0):
         """Wait for the reads in flight (the drive's DMA into the staging buffer cannot be taken back), then stop. True when they all returned in time."""
         self.closed = True
         ok = True
@@ -795,8 +830,13 @@ class Stream(object):
             if chunk.pending and not chunk.done.wait(max(0.0, end - time.monotonic())):
                 ok = False
         for chunk in self.chunks[:self.submitted]:
-            if chunk.half is not None and chunk.done.is_set():
-                self.release(chunk)             # (a chunk read but never taken, or taken and not released: its half goes back)
+            if chunk.half is None:
+                continue
+            with chunk.lock:
+                if chunk.todo > 0:
+                    chunk.abandoned = True      # reads still in flight: the last of them hands the half to the engine (reap), the scheduler thread takes it back at its next claim
+                    continue
+            self.release(chunk)                 # (a chunk read but never taken, or taken and not released: its half goes back)
         return ok
 
 
@@ -805,12 +845,13 @@ class P2PEngine(object):
     the host backend). `reader(offset, view)` fills a writable view from the drive at an aligned offset (qwen_nvme_store's BlockFile.pread_into)."""
 
     def __init__(self, api, layout, reader, threads=DEFAULT_THREADS, staging_bytes=DEFAULT_STAGING_BYTES, ordering='relaxed', link_factory=None, expected=None, logger=None,
-                 sleep=time.sleep, recheck_s=0.002, io_align=PAGE, sysfs_class=SYSFS_CLASS, settle=0.5):
+                 sleep=time.sleep, recheck_s=0.002, io_align=PAGE, sysfs_class=SYSFS_CLASS, settle=1.0, allow_unverified_map=False):
         self.api, self.layout, self.reader = api, layout, reader
         self.log = logger or (lambda message, *values: None)
         self.sleep, self.recheck_s, self.io_align = sleep, recheck_s, io_align
         self.stats = dict.fromkeys(STAT_NAMES, 0)
         self.close_wait_s = 3.0
+        self.take_timeout_s = 60.0             # the longest a synchronous restore waits for one chunk's reads
         self.inflight = 0                      # shard reads submitted and not yet returned
         self.inflight_lock = threading.Lock()
         self.links = []
@@ -822,6 +863,7 @@ class P2PEngine(object):
         self.halves = 2
         self.free_halves = list(range(self.halves))
         self.dirty = set()                     # halves a device op may still be reading (the drive's DMA must not overwrite them before a sync)
+        self.reaped = collections.deque()      # (half, dirty) handed back by the last read of an abandoned chunk (appended on a reader thread, drained on the scheduler's)
         self.chunk_blocks = (int(staging_bytes) // self.halves) // layout.shard_bytes
         if self.chunk_blocks < 1:
             raise P2PUnavailable('a staging buffer of %d bytes cannot hold two shards of %d' % (staging_bytes, layout.shard_bytes))
@@ -849,7 +891,7 @@ class P2PEngine(object):
                 if link_factory is not None:
                     link = link_factory(position, index, bdf, staging, ordering)
                 else:
-                    link = TtLink.open(index, bdf, staging, ordering, settle=settle, logger=self.log, sysfs_class=sysfs_class)
+                    link = TtLink.open(index, bdf, staging, ordering, settle=settle, logger=self.log, sysfs_class=sysfs_class, require_verified=not allow_unverified_map)
                 self.links.append(link)
             self.pool = _make_pool(self.threads)
         except BaseException:
@@ -880,13 +922,21 @@ class P2PEngine(object):
     # -- the halves of the staging buffer ----------------------------------------------------------
     def claim_half(self):
         """A free half for the next chunk's reads, or None. A half a device op was reading is synced first (the drive's DMA ignores the device's queue)."""
+        while self.reaped:
+            half, dirty = self.reaped.popleft()
+            self.return_half(half, dirty)
         if not self.free_halves:
             return None
-        half = self.free_halves.pop(0)
+        half = self.free_halves[0]
         if half in self.dirty:
-            self.api.sync()
+            self.api.sync()                     # (before the half leaves the list: a sync that raises loses nothing)
             self.dirty.clear()
+        self.free_halves.pop(0)
         return half
+
+    def reap(self, half, dirty):
+        """Called on a reader thread by the last read of an abandoned chunk."""
+        self.reaped.append((half, dirty))
 
     def return_half(self, half, dirty):
         if dirty:
@@ -911,7 +961,7 @@ class P2PEngine(object):
         stream = self.start(entries)
         try:
             while True:
-                chunk = stream.take(wait=True)
+                chunk = stream.take(wait=True, timeout=self.take_timeout_s)
                 if chunk is None:
                     break
                 try:
@@ -919,8 +969,16 @@ class P2PEngine(object):
                     stream.write(chunk, [block_ids[position] for position, _entry in chunk.pending])
                 finally:
                     stream.release(chunk)
+        except BaseException:
+            if self.dirty:                      # (copies may be enqueued: the blocks about to be freed must not be written by them later)
+                try:
+                    self.api.sync()
+                    self.dirty.clear()
+                except Exception:
+                    pass
+            raise
         finally:
-            stream.close()
+            stream.close(timeout=self.close_wait_s)     # (reads still in flight after that hand their halves back when they land: Stream.close, reap)
         self.api.sync()
         self.dirty.clear()
 
