@@ -1,4 +1,4 @@
-"""The host side of the peer-to-peer KV restore (qwen_p2p_restore; docs/tp4-p2p-restore.md), on fakes: a regular file for the drive, ordinary memory for the cards' staging buffers and
+"""The host side of the peer-to-peer KV restore (qwen_p2p_restore; docs/tp4-p2p-host.md), on fakes: a regular file for the drive, ordinary memory for the cards' staging buffers and
 their p2pmem mappings, a fake driver behind the ioctls, a fake ttnn for the device ops. No card, no drive, no root.
 
 Held:
@@ -79,10 +79,12 @@ class FakeMesh(object):
             raise AttributeError(name)
         raise AttributeError(name)
 
-    def qwen_p2p_staging_alloc(self, mesh, size):
+    def qwen_p2p_staging_alloc(self, mesh, size, bank=0):
         self.size = size
         self.memory = [bytearray(size) for _ in range(self.layout.chips)]
-        return 'staging-handle'
+        self.handle = types.SimpleNamespace(released=False, release=None)
+        self.handle.release = lambda: setattr(self.handle, 'released', True)
+        return self.handle
 
     def qwen_p2p_staging_info(self, handle):
         return [dict(device_id=chip, pci_bus_id=self.bdfs[chip], dram_bank=0, noc_x=17, noc_y=12, address=self.address, size=self.size) for chip in range(self.layout.chips)]
@@ -138,6 +140,9 @@ class FakeLink(object):
 
     def __init__(self, mesh, position, index, bdf, staging, ordering):
         self.memory = mesh.memory[position]
+        self.mesh = mesh
+        self.base = staging['address'] - mesh.address          # the card's mapping starts at the staging range's first 4096-aligned byte
+        self.flushes = []
         self.position, self.index, self.bdf, self.staging, self.ordering = position, index, bdf, staging, ordering
         self.map_verified = True
         self.window_id = 202
@@ -145,13 +150,41 @@ class FakeLink(object):
         self.selftests = 0
 
     def view(self, staging_offset, length):
-        return memoryview(self.memory)[staging_offset:staging_offset + length]
+        start = self.base + staging_offset
+        return memoryview(self.memory)[start:start + length]
+
+    def flush(self, staging_offset=0):
+        self.flushes.append(staging_offset)
+        self.mesh.log.append(('flush', self.position, staging_offset))
+        return bytes(8)
 
     def selftest(self):
         self.selftests += 1
 
     def close(self):
         self.closed = True
+
+
+class AsBuiltMesh(FakeMesh):
+    """The device-op extension AS BUILT (qwen_kv_read version 3): the copy op takes contiguous rows only (no row_stride), the checksum op ONE range (a 4th positional argument is `bank`, not a
+    count), and the info record has the as-built fields. The host must work with these: StagingApi's compat mode."""
+
+    def qwen_staging_checksum(self, handle, byte_offset, length, bank=None, cores=64):
+        assert bank is None, 'the host passed something as `bank`: a count meant for an op that has none'
+        return FakeMesh.qwen_staging_checksum(self, handle, byte_offset, length, 1)
+
+    def qwen_write_blocks_from_staging(self, tensor, handle, byte_offset, blocks, bank=None):
+        assert bank is None
+        return FakeMesh.qwen_write_blocks_from_staging(self, tensor, handle, byte_offset, blocks, self.layout.slice_bytes)
+
+    def qwen_p2p_staging_info(self, handle):
+        out = []
+        for chip, record in enumerate(FakeMesh.qwen_p2p_staging_info(self, handle)):
+            lead = (-record['address']) % 4096
+            record.update(pcie_device=chip, mmio_chip_id=chip, noc_endpoints=[[record['noc_x'], record['noc_y']], [record['noc_x'], record['noc_y'] + 1], [record['noc_x'], record['noc_y'] + 2]],
+                          endpoint_index=0, aligned_4k_offset=lead, aligned_4k_address=record['address'] + lead, aligned_4k_size=(record['size'] - lead) // 4096 * 4096)
+            out.append(record)
+        return out
 
 
 def make_links(mesh):
@@ -664,6 +697,36 @@ class TtLinkTests(TmpCase):
             link = self.open()
         self.assertTrue(link.map_verified)
 
+    def test_a_window_that_does_not_store_at_the_first_endpoint_is_tried_at_the_next(self):
+        results = []
+
+        def selftest(link):
+            results.append((link.aim['noc']['x'], link.aim['noc']['y']))
+            if len(results) < 3:
+                raise p2p.P2PUnavailable('the window does not read back')
+
+        staging = dict(noc_x=17, noc_y=12, address=4 << 20, size=2 << 20, noc_endpoints=[[17, 12], [17, 13], [17, 14]])
+        with mock.patch.object(p2p.TtLink, 'selftest', selftest):
+            link = p2p.TtLink.open(2, self.BDF, staging, settle=0, sysfs_class=self.sysfs_class, sysfs_pci=self.sysfs_pci, dev_dir=self.dev_dir, require_verified=False)
+        self.addCleanup(link.close)
+        self.assertEqual(results, [(17, 12), (17, 13), (17, 14)])
+        self.assertEqual((link.aim['noc']['x'], link.aim['noc']['y'], link.endpoint_tried), (17, 14, 3))
+        self.assertEqual(self.driver.configured[202]['y'], 14, 'the window was left aimed at the endpoint that stored')
+
+    def test_a_window_that_stores_at_no_endpoint_is_unavailable_and_says_how_many_were_tried(self):
+        staging = dict(noc_x=17, noc_y=12, address=4 << 20, size=2 << 20, noc_endpoints=[[17, 12], [17, 13], {'x': 17, 'y': 14}, [99, 1]])
+        with mock.patch.object(p2p.TtLink, 'selftest', side_effect=p2p.P2PUnavailable('dead')):
+            with self.assertRaisesRegex(p2p.P2PUnavailable, r'tried 3 NOC endpoint'):
+                p2p.TtLink.open(2, self.BDF, staging, settle=0, sysfs_class=self.sysfs_class, sysfs_pci=self.sysfs_pci, dev_dir=self.dev_dir, require_verified=False)
+        self.assertIn(202, self.driver.freed)
+
+    def test_flush_reads_a_word_through_the_window(self):
+        link = self.open(address=4 << 20, size=1 << 20)
+        view = link.view(4096, 8)
+        view[:] = b'12345678'
+        view.release()
+        self.assertEqual(link.flush(4096), b'12345678')
+
     def test_close_gives_back_everything_and_is_idempotent(self):
         link = self.open()
         link.close()
@@ -699,14 +762,14 @@ class StagingApiTests(unittest.TestCase):
         api = p2p.StagingApi(mesh, 'mesh', [1, 2])
         api.alloc(1 << 16)
         for returned in ([[1, 2], [3, 4], [5, 6], [7, 8]], np.array([[1, 2], [3, 4], [5, 6], [7, 8]], dtype=np.uint64), ((1, 2), (3, 4), (5, 6), (7, 8))):
-            mesh.qwen_staging_checksum = lambda *a, returned=returned: returned
+            mesh.qwen_staging_checksum = lambda *a, returned=returned, **k: returned
             self.assertEqual(api.checksums(0, 2048, 2, 4), [[1, 2], [3, 4], [5, 6], [7, 8]])
-        mesh.qwen_staging_checksum = lambda *a: [1, 2, 3, 4]
+        mesh.qwen_staging_checksum = lambda *a, **k: [1, 2, 3, 4]
         self.assertEqual(api.checksums(0, 2048, 1, 4), [[1], [2], [3], [4]])
-        mesh.qwen_staging_checksum = lambda *a: [[1, 2]] * 3
+        mesh.qwen_staging_checksum = lambda *a, **k: [[1, 2]] * 3
         with self.assertRaisesRegex(p2p.P2PDeviceError, 'wanted 4 devices'):
             api.checksums(0, 2048, 2, 4)
-        mesh.qwen_staging_checksum = lambda *a: 'nope'
+        mesh.qwen_staging_checksum = lambda *a, **k: 'nope'
         with self.assertRaises(p2p.P2PDeviceError):
             api.checksums(0, 2048, 1, 4)
 
@@ -730,11 +793,13 @@ class StagingApiTests(unittest.TestCase):
 # The engine and its stream
 # ================================================================================================
 class EngineCase(TmpCase):
+    MESH = FakeMesh
+
     def build(self, blocks=7, chunk_blocks=3, threads=4, geometry=SMALL, io_align=1, **kwargs):
         self.layout = p2p.ShardLayout(**geometry)
         self.device = Device(self.layout)
         kwargs.setdefault('deferred', True)
-        self.mesh = FakeMesh(self.layout, self.device.sink, **kwargs)
+        self.mesh = self.MESH(self.layout, self.device.sink, **kwargs)
         self.drive = FileDrive(self.directory, self.layout, blocks)
         self.addCleanup(self.drive.close)
         factory, self.links = make_links(self.mesh)
@@ -1144,6 +1209,127 @@ class EngineTests(EngineCase):
         self.build()
         info = self.engine.describe()
         self.assertEqual((info['cards'], info['chunk_blocks'], info['shard_bytes'], info['mapping_verified'], info['window']), (4, 3, 2048, 1, 202))
+
+
+class AsBuiltOpsTests(EngineCase):
+    """The device-op extension as it was built (no row_stride, no count): the host works with it, in compat mode."""
+
+    MESH = AsBuiltMesh
+
+    def test_the_mode_is_found_from_the_signatures_and_a_restore_is_exact_in_compat_mode(self):
+        self.build(blocks=7, chunk_blocks=3)
+        self.assertEqual((self.api.strided, self.api.ranged, self.api.mode), (False, False, 'compat'))
+        entries, ids = self.restore()
+        self.assertTrue(self.exact(ids))
+        self.assertEqual(self.engine.describe()['device_ops'], 'compat')
+
+    def test_compat_mode_launches_one_copy_per_block_and_tensor_and_one_checksum_per_block(self):
+        self.build(blocks=7, chunk_blocks=3)
+        self.restore()
+        self.assertEqual(len(self.mesh.ops('write')), 7 * self.layout.caches)
+        self.assertTrue(all(len(entry[3]) == 1 and entry[4] == self.layout.slice_bytes for entry in self.mesh.ops('write')))
+        self.assertEqual(len(self.mesh.ops('checksum')), 7)
+        self.assertTrue(all(entry[2] == self.layout.shard_bytes and entry[3] == 1 for entry in self.mesh.ops('checksum')))
+
+    def test_a_flipped_byte_is_still_a_mismatch_and_nothing_is_written_for_its_chunk(self):
+        self.build(blocks=7, chunk_blocks=3)
+        self.drive.flip(block=4, chip=1, byte=9)
+        with self.assertRaises(p2p.P2PMismatch) as caught:
+            self.restore()
+        self.assertEqual(caught.exception.bad, [(4, 1)])
+        self.assertEqual({block for entry in self.mesh.ops('write') for block in entry[3]}, {500, 501, 502})
+
+    def test_the_extended_ops_are_used_when_the_extension_has_them(self):
+        self.MESH = FakeMesh
+        try:
+            self.build(blocks=7, chunk_blocks=3)
+        finally:
+            del self.MESH
+        self.assertEqual((self.api.strided, self.api.ranged, self.api.mode), (True, True, 'strided'))
+        self.restore()
+        self.assertEqual(len(self.mesh.ops('write')), 3 * self.layout.caches)
+        self.assertEqual(len(self.mesh.ops('checksum')), 3)
+
+    def test_the_info_record_of_the_extension_names_the_card_the_aligned_start_and_the_endpoints(self):
+        self.build(blocks=2, chunk_blocks=2)
+        info = self.mesh.qwen_p2p_staging_info(self.mesh.handle)[1]
+        self.assertEqual((info['pcie_device'], len(info['noc_endpoints']), info['aligned_4k_offset']), (1, 3, 0))
+
+
+class AlignedStagingTests(EngineCase):
+    def test_a_staging_range_that_is_only_64_byte_aligned_is_used_from_its_first_aligned_byte(self):
+        self.build(blocks=7, chunk_blocks=3, address=(1 << 30) + 64, geometry=dict(caches=2, chips=4, slice_bytes=2048), io_align=4096)
+        self.assertEqual(self.engine.base, 4096 - 64)
+        entries, ids = self.restore()
+        self.assertTrue(self.exact(ids))
+        offsets = [entry[1] for entry in self.mesh.ops('checksum')]
+        self.assertTrue(all(offset % 64 == 0 and (offset - self.engine.base) % 4096 == 0 for offset in offsets), offsets)
+        self.assertTrue(all(link.staging['address'] % 4096 == 0 for link in self.links))
+        self.assertTrue(all(offset - link.base >= 0 for link in self.links for offset in offsets))
+
+    def test_the_reads_start_where_the_cards_mapping_starts_not_at_the_range(self):
+        self.build(blocks=2, chunk_blocks=2, address=(1 << 30) + 128)
+        self.restore()
+        self.assertTrue(all(link.base == 4096 - 128 for link in self.links))
+
+    def test_a_range_too_small_for_its_aligned_halves_is_unavailable(self):
+        layout = p2p.ShardLayout(**SMALL)
+        mesh = FakeMesh(layout, address=(1 << 30) + 64)
+        original = mesh.qwen_p2p_staging_info
+        mesh.qwen_p2p_staging_info = lambda handle: [dict(info, size=info['size'] - 8192) for info in original(handle)]
+        factory, links = make_links(mesh)
+        with self.assertRaisesRegex(p2p.P2PUnavailable, 'usable'):
+            p2p.P2PEngine(p2p.StagingApi(mesh, 'mesh', [0, 1]), layout, lambda o, v: None, staging_bytes=layout.shard_bytes * 4, link_factory=factory, io_align=1)
+
+    def test_the_devices_must_agree_on_where_the_range_starts(self):
+        layout = p2p.ShardLayout(**SMALL)
+        mesh = FakeMesh(layout)
+        original = mesh.qwen_p2p_staging_info
+        mesh.qwen_p2p_staging_info = lambda handle: [dict(info, address=info['address'] + (64 if info['device_id'] == 2 else 0)) for info in original(handle)]
+        factory, links = make_links(mesh)
+        with self.assertRaisesRegex(p2p.P2PUnavailable, 'different offsets'):
+            p2p.P2PEngine(p2p.StagingApi(mesh, 'mesh', [0, 1]), layout, lambda o, v: None, staging_bytes=layout.shard_bytes * 4, link_factory=factory, io_align=1)
+
+
+class FlushAndReleaseTests(EngineCase):
+    def test_one_non_posted_read_per_card_comes_before_the_first_device_op_over_a_chunk(self):
+        self.build(blocks=3, chunk_blocks=3)
+        self.restore()
+        kinds = [entry[0] for entry in self.mesh.log]
+        self.assertEqual(kinds[:self.layout.chips], ['flush'] * self.layout.chips)
+        self.assertEqual(sorted(entry[1] for entry in self.mesh.log[:self.layout.chips]), [0, 1, 2, 3])
+        self.assertEqual(kinds[self.layout.chips], 'checksum')
+
+    def test_a_retry_after_a_late_checksum_does_not_flush_again_but_the_next_chunk_does(self):
+        self.build(blocks=6, chunk_blocks=3)
+        self.mesh.drift = 1
+        self.restore()
+        flushes = [entry for entry in self.mesh.log if entry[0] == 'flush']
+        self.assertEqual(len(flushes), 2 * self.layout.chips)
+
+    def test_close_releases_the_staging_handle_after_the_cards(self):
+        self.build(blocks=2, chunk_blocks=2)
+        self.assertFalse(self.mesh.handle.released)
+        self.engine.close()
+        self.assertTrue(self.mesh.handle.released)
+        self.assertTrue(all(link.closed for link in self.links))
+
+
+class CardIdentityTests(TmpCase):
+    def test_a_record_that_gives_both_must_agree_with_the_drivers_numbering(self):
+        sysfs_class, _ = build_sysfs(self.directory, [(2, '0000:41:00.0'), (0, '0000:42:00.0')])
+        self.assertEqual(p2p.locate_cards([{'pci_bus_id': '0000:41:00.0', 'pcie_device': 2}], sysfs_class), [(2, '0000:41:00.0')])
+        with self.assertRaisesRegex(p2p.P2PUnavailable, 'the driver says that address is /dev/tenstorrent/2'):
+            p2p.locate_cards([{'pci_bus_id': '0000:41:00.0', 'pcie_device': 0}], sysfs_class)
+        self.assertEqual(p2p.locate_cards([{'pcie_device': 0, 'pci_bus_id': None}], sysfs_class), [(0, '0000:42:00.0')])
+
+    def test_a_link_refuses_a_card_the_staging_record_does_not_describe(self):
+        sysfs_class, sysfs_pci = build_sysfs(self.directory, [(2, '0000:41:00.0'), (3, '0000:42:00.0')])
+        dev_dir = os.path.join(self.directory, 'dev')
+        os.makedirs(dev_dir)
+        open(os.path.join(dev_dir, '3'), 'wb').close()
+        with self.assertRaisesRegex(p2p.P2PUnavailable, 'a different card'):
+            p2p.TtLink.open(3, '0000:41:00.0', dict(noc_x=17, noc_y=12, address=4 << 20, size=1 << 20), settle=0, sysfs_class=sysfs_class, sysfs_pci=sysfs_pci, dev_dir=dev_dir)
 
 
 class ThroughTheRealPoolTests(EngineCase):

@@ -21,7 +21,7 @@
 #   Optional env: C2_DRAFTER_MANIFEST (the drafter checkpoint the image serves: a name under
 #   scripts/ci/references/drafter-manifests, default dedf8df6 = the served drafter; any other name needs its fixtures staged by
 #   drafter_stage.py under $fixtures and lays a DRAFTER_MANIFEST marker beside them),
-#   Optional env: C2_KVREAD_DIR (the region-read extension's build directory, default /home/thatch/opgraft-KVR2: version 2, pinned below),
+#   Optional env: C2_KVREAD_DIR (the region-read extension's build directory, default /home/thatch/opgraft-KVR3: version 3, pinned below),
 #   Optional env: C2_CHECKOUT (a checkout to compare the image's trees with, informational),
 #   C2_PROVENANCE_REPORT (where to write the provenance JSON).
 #   The graft is K64j (S2, design W9): its _ttnncpp.so must be $graft_sha, and G1 holds every
@@ -51,10 +51,13 @@ case "${C2_BAKE_GRAFT:-}" in
     ;;
   *) echo "C2_BAKE_GRAFT=${C2_BAKE_GRAFT} is neither empty (K64j) nor K64j-OQ" >&2; exit 2 ;;
 esac
-# The region-read extension, version 2 (the raw block ops of the host KV tier): its build directory on the rig is opgraft-KVR2, beside the version 1 build
-# (opgraft-KVR) that other branches still pin and mount, which this script neither reads nor writes. C2_KVREAD_DIR names another directory under /home/thatch.
-# Inside the image and the context the directory is still called opgraft-KVR (kvread_name): that is where the Dockerfile and the provenance check look.
-kvread=${C2_KVREAD_DIR:-/home/thatch/opgraft-KVR2}
+# The region-read extension, version 3 (version 2's raw block ops of the host KV tier, plus the device side of the peer-to-peer restore: the P2P staging
+# buffer, qwen_write_blocks_from_staging and qwen_staging_checksum, with the two device kernels shipped beside the .so, docs/tp4-p2p-restore.md): its build
+# directory on the rig is opgraft-KVR3 (build_kv_read.sh ~/opgraft-KVR3, then the host-side pin tool moves the four pin sites to it), beside the version 2 build
+# (opgraft-KVR2) and the version 1 build (opgraft-KVR) that other branches still pin and mount, which this script neither reads nor writes. C2_KVREAD_DIR names another
+# directory under /home/thatch. Inside the image and the context the directory is still called opgraft-KVR (kvread_name): that is where the Dockerfile and the provenance
+# check look, and the whole directory is copied, so the kernels reach the image with the .so.
+kvread=${C2_KVREAD_DIR:-/home/thatch/opgraft-KVR3}
 kvread_name=opgraft-KVR
 kvread_sha=a80db6d93587e70a3214e58b30683f61782d50204e04c58f90cf5c7c1664ec4c
 previous_graft=/home/thatch/opgraft-K64i

@@ -308,7 +308,7 @@ COUNTERS = {
     'nvme_unavailable': '1 when the NVMe tier could not open its device and the engine serves without it',
     'nvme_refused_not_encrypted': '1 when the NVMe tier refused to open the drive because it is not an Opal self-encrypting drive with locking enabled and unlocked (QWEN_PREFIX_NVME_REQUIRE_SED=0 is a gate\'s override)',
     'nvme_device_lost': '1 when the drive disappeared at run time (its node or controller went away, the namespace read 0 bytes) and the tier latched off; a restart with a live device brings it back',
-    # the peer-to-peer restore (QWEN_PREFIX_NVME_P2P; docs/tp4-p2p-restore.md)
+    # the peer-to-peer restore (QWEN_PREFIX_NVME_P2P; docs/tp4-p2p-host.md)
     'nvme_p2p_restores': 'peer-to-peer restore calls (a whole restore, or one slice of a sliced one) whose NVMe blocks were read into the cards\' staging buffers; the ones that fell back to the host path count here and in nvme_p2p_fallbacks',
     'nvme_p2p_blocks': 'KV blocks copied from the staging buffers into the cache after their checksums matched',
     'nvme_p2p_bytes': 'bytes of those blocks',

@@ -1,248 +1,168 @@
-# tp4/p2p-host: the peer-to-peer KV restore, host side
+# P2P KV restore, the device side: staging buffer, scatter op, checksum op
 
-Status: **built and tested on CPU against fakes, never run on a card, default off** (`QWEN_PREFIX_NVME_P2P`, a gate's name in the contract until a card has qualified it). Branched from `tp4/kv-nvme-1`
-(`0f644692`); the kernel patch and the P1 probe come from `tp4/p2p-nvme` (`patches/tt-kmd-p2pmem`, `scripts/p2p`). The device ops (the staging buffer, the checksum, the copy into the cache) are another branch's
-(`ttnn.qwen_p2p_staging_alloc` ...); this branch is everything the host does around them.
+Branch `tp4/p2p-devop` (from `tp4/kv-nvme-1`). Scope: the device ops the host side needs to restore KV blocks from an NVMe drive that DMAs straight into card
+DRAM (peer to peer, no host bounce). The drive writes into a **staging range** in one DRAM bank; a device op then copies the staged bytes into the paged KV
+cache; a second op checksums the staged bytes so a mis-aimed or truncated DMA is a miss. This document is the record of how the staging range is placed (and what it
+costs), what was built, what is checked on a CPU and what only a card can settle. **Nothing here has run on a card.**
 
-Owner, 2026-10-30: "with nvme we want the p2p working". The path:
+## 0. Status
 
-```
- raw NVMe namespace --O_DIRECT read--> p2pmem (the card's BAR4 window) ---> staging buffer in card DRAM --device op--> paged KV cache
-        (the drive's PCIe DMA, no host RAM)        (TLB window aimed at the staging bytes)        (checksum first, then the copy)
-```
-
-Everything that is not a CPU measurement is labelled **UNTESTED** and listed in section 10. P1 (2026-10-21, outside this repository) proved the first two arrows: 6.95 GB/s from the drive into a card's DRAM at
-Gen4, byte-exact, to an x16 card and to an x4 card behind the switch, no AER, no NVMe timeouts.
-
-## 1. The object: what the contract said, what the host tier really holds, and the layout this branch defines
-
-The contract (INTERFACE.md section 1) assumed that "the P2P object for card d is data_t[d] (len(blocks) x slice_bytes) concatenated over the cache tensors, the same bytes the host tier already holds". **That is
-not what the host tier holds.**
-
-* **The host tier's record** (`_QwenKvTierIO.read_blocks`, `qwen_prefix_model_patch.py`) is **one payload per block**: `[cache tensor][chip][slice]`, all four chips interleaved, `slice_bytes` = 17,408 per
-  (tensor, chip) at one KV head per chip (16 bf8 tiles of 1,088 bytes), 32 tensors, 4 chips: **2,228,224 bytes** a block. The NVMe tier (`qwen_kv_nvme`, layout `packed-v1`) stores exactly that payload,
-  one object per block, keyed by the block hash, with the sha256 of the payload.
-* **Why a card cannot read its own share of it.** Chip d's bytes of cache tensor t sit at `(t * 4 + d) * 17,408` inside the object. 17,408 = 4.25 pages: no chip's slice starts or ends on the 4 KiB boundary
-  that `O_DIRECT` needs, and a slice is interleaved with three others. A read of the whole object into one card's staging buffer would put all four chips' bytes in one card and read every byte four times from
-  the drive.
-* **The contract's per-run, tensor-major object cannot be read in one aligned run either**, and the store's unit is the block (entries come and go one block at a time: write-through, eviction, TTL, a
-  partial prefix restored).
-
-So this branch changes what the drive holds, behind the flag, as the contract allowed ("if the per-card object layout changes the stored bytes, give it a new `layout` in the fingerprint"):
-
-**The P2P layout `chipmajor-v1`** (`QWEN_PREFIX_NVME_P2P=1`): the same block, the same bytes, with the chip axis first: `[chip][cache tensor][slice]`.
-
-```
- object (one KV block)      = shard 0 | shard 1 | shard 2 | shard 3                 2,228,224 bytes = 544 x 4,096
- shard d (chip d's share)   = cache tensor 0's slice | tensor 1's slice | ... | tensor 31's slice    32 x 17,408 = 557,056 bytes = 136 x 4,096
- chip d's share of block b  = bytes [d * 557,056, +557,056) of block b's object
-```
-
-* Every shard starts and ends on a 4 KiB boundary of the object, and the object starts on one (the store's extents are 4 KiB-aligned): **one `O_DIRECT` read per card per block**, each landing in that card's
-  staging buffer. A restore of n blocks is 4 n reads of 557,056 bytes.
-* The store entry keeps the **sha256 of the stored bytes** (what the host path checks) and now carries, beside it, `aux` = **four little-endian u64, one `p2p_checksum` per shard** (section 3), recorded by the
-  spill thread. `qwen_nvme_store` entries gained an optional auxiliary field (a flag bit and a length byte after the fingerprint; an entry without it packs byte for byte as before; at most 64 bytes).
-* The **fingerprint's `layout` component** is `chipmajor-v1` instead of `packed-v1` when the flag is on, so a drive written one way is dropped (never restored) by an engine of the other: **switching the flag
-  clears the warm tier**. The knobs (`..._P2P_THREADS`, `..._P2P_STAGING_MIB`, `..._P2PMEM`) are not in the fingerprint. Chip-major is chosen by the flag alone, not by whether the path started at boot: an
-  engine whose P2P path cannot start (say, a reboot returned the stock module) keeps reading and writing the same layout through the host backend instead of discarding a day of warm cache.
-* **The host backend reads chip-major objects too** (it is the fallback): `NvmeTier._read_many` reads a few blocks at a time into aligned scratch, checks the sha256 of the stored bytes, and converts to the
-  host tier's `[cache][chip][slice]` with `ShardLayout.from_chipmajor`. The spill thread converts the other way (`_chipmajor`, into one page-aligned arena per batch, so the device write needs no bounce); batches
-  are capped at 128 MiB in this layout because the conversion needs a second buffer. GDN checkpoints are not touched.
-
-**What the device ops must therefore do (changes to INTERFACE.md sections 3 and 4; the host adapter, `qwen_p2p_restore.StagingApi`, is written to this):**
-
-1. **Staging layout.** A chunk of m blocks lands in a half of the staging buffer **block-major**: `staging[block j][cache tensor t][slice]`, block j at `j * shard_bytes`, tensor t at `+ t * slice_bytes`.
-2. `ttnn.qwen_write_blocks_from_staging(device_tensor, staging_handle, byte_offset, blocks, row_stride)` takes a new `row_stride`: row i of device d's `[len(blocks), slice_bytes]` is
-   `staging_d[byte_offset + i * row_stride : + slice_bytes]`. The host calls it once per cache tensor t with `byte_offset = half + t * slice_bytes` and `row_stride = shard_bytes` (557,056 = 512 pages of 1,088
-   bytes; `slice_bytes` = 16 pages, so every row starts on a tile page). With `row_stride = slice_bytes` it is the contract's op.
-3. `ttnn.qwen_staging_checksum(staging_handle, byte_offset, length, count)` returns, per device, **`count` uint64**: the checksums of the consecutive ranges `[byte_offset + i * length, + length)`, each with k
-   counted from its own first byte. The host calls it with `length = shard_bytes` and `count = blocks in the chunk`. (The checksum is not combinable from sub-ranges, so one value per block is the only way to
-   check blocks individually; the per-block value is what the store holds.) `count = 1` is the contract's op. The return value is read as a (devices, count) matrix of integers (lists, a numpy array, a torch
-   tensor).
-4. `ttnn.qwen_p2p_staging_info(handle)` must name the card of each mesh device: `pci_bus_id` (a PCI address) **or** `pcie_device_id` (the N of `/dev/tenstorrent/N`), besides `noc_x`, `noc_y`
-   (**the translated NOC coordinates a TLB register takes**: P1 aimed bank 0 at (17, 12); a logical or physical coordinate would aim the window at another tile, and the canary cannot tell which),
-   `address` (**4096-aligned**, the byte address inside the bank), `size`. The host resolves the card against the driver's own table at run time (the nodes renumber on every reset).
-5. The staging buffer is **bank-contiguous inside one 4 GiB window and inside the published slice** (the host refuses anything else, `plan_aim`), 2 halves of `chunk_blocks x 557,056` bytes. P1 found the top of
-   a 4 GiB window at bank 0 unusable (a 3 GiB transfer from the 1 GiB mark failed its canary): the staging address comes from the allocator and the canary checks both ends of it.
-
-`qwen_staging_checksum` for a range of 557,056 bytes is the only per-block device cost besides the copy; both are streaming passes over DRAM.
-
-## 2. The window: how a process takes it and aims it
-
-The patched tt-kmd (`patches/tt-kmd-p2pmem`, module parameter `p2pmem_devices=<cards>`) publishes the first 4 GiB TLB window of the card's BAR4 (window id 202, BAR4 offset 0 unless `p2pmem_offset_mb` says
-otherwise) as PCI peer-to-peer memory. It programs no TLB: **whoever uses the memory takes and aims the window with the driver's ordinary ioctls on `/dev/tenstorrent/<N>`**, and keeps the fd. The host side
-(`qwen_p2p_restore.TtLink`, the P1 probe's calls with the engine's lifetime) does, per card, in this order:
-
-| step | call | notes |
-|---|---|---|
-| find the card | `/sys/class/tenstorrent/tenstorrent!N/device` -> the PCI address | at run time, from the staging record's `pci_bus_id` / `pcie_device_id` |
-| read the slice | `.../tenstorrent!N/p2pmem/{bar,offset,size,bus_addr,tlb_first,tlb_last}` (root) and `/sys/bus/pci/devices/<bdf>/p2pmem/{size,available}` | refuse unless `available == size` (nobody holds the pool), BAR 4, one window |
-| power | `SET_POWER_STATE` (`_IO(0xFA, 15)`), busy flags `MRISC_PHY_WAKEUP \| TENSIX_ENABLE \| L2CPU_ENABLE`, validity 4 | the DRAM PHY is asleep when no client has the card open; the state is this fd's and ends with it |
-| take the window | `ALLOCATE_TLB` (`_IO(0xFA, 11)`, size 4 GiB) until the id equals `tlb_first`; `FREE_TLB` (12) the ones taken on the way | the driver hands out the lowest free window; if another process (the UMD) holds it, the path is unavailable |
-| aim it | `CONFIGURE_TLB` (`_IO(0xFA, 13)`): `addr` = the staging address rounded down to 4 GiB, `x_end, y_end` = the staging bank's NOC tile, `noc` 0, `ordering` relaxed | byte x of the slice is at BAR4 `offset + x`, window offset `offset + x - window_base`, NOC address `addr + that` |
-| pin it | `EXPORT_TLB_DMABUF` (`_IO(0xFA, 16)`), nothing imports the export | keeps the window past `FREE_TLB`/`close()` and makes the driver refuse a destructive `RESET_DEVICE` |
-| prove it | `mmap(fd, 4 GiB, offset = mmap_offset_wc)`: write a pattern at both ends of the staging buffer through the window, read it back | the canary; before any DMA; the CPU path is slow (the kernel maps p2pmem uncached) but it touches 8 KiB |
-| map the slice | `open(/sys/bus/pci/devices/<bdf>/p2pmem/allocate, O_RDWR)` + `mmap` of the **whole** slice | one allocation: a second mapper gets ENOMEM (the lease); the pool hands out its pages lowest first, so a mapping of the whole slice should put byte x of the mapping at byte x of the slice. **Not taken on trust:** `/proc/self/pagemap` (CAP_SYS_ADMIN) must confirm the first page, the staging start and its last page against the BAR, else the link is `UNAVAILABLE` (the DMA writes wherever the pages are: a wrong guess is a write into live KV or weights, and the staging checksum cannot see writes outside staging). The gate-only `QWEN_PREFIX_NVME_P2P_ALLOW_UNVERIFIED_MAP=1` goes on without; P3a, which has CAP_SYS_ADMIN, says whether the order holds on the real kernel |
-
-The staging buffer's place in the slice is arithmetic (`plan_aim`, equal to the probe's `make_plan` in a test): staging address A, slice at BAR4 offset S in window W (window_base = (W - 202) x 4 GiB):
-window offset = A mod 4 GiB, slice offset = that - (S - window_base), which must be >= 0, 4096-aligned and inside the slice.
-
-While the engine lives, `p2pmem/available` is 0 for each card, a destructive `RESET_DEVICE` returns EBUSY, and system suspend is refused (the patch's guards): **the card-reset flow must stop the engine first**, as
-it already must.
-
-## 3. The checksum
-
-`p2p_checksum(bytes) -> int` (`qwen_p2p_restore.py`): words `x_k` = little-endian uint32 at byte `4k`; `w_k = (k * 2654435761 + 1) mod 2^32`; `S = sum(w_k * x_k) mod 2^64`, k from the first byte of the range.
-numpy: weights cached per length, 1 Mi words a pass (the products are below 2^64, the sum wraps). Three shared vectors (INTERFACE section 4) with their values in `scripts/ci/p2p_checksum_vectors.json`
-(also pinned in the test against a plain-python reference):
-
-| vector | definition | S |
-|---|---|---|
-| `zero_4096` | 4096 zero bytes | 0 |
-| `mod251_4096` | byte i = i mod 251, 4096 bytes | 17453227578024978262 |
-| `prng_1mib` | `numpy.random.default_rng(20261030).integers(0, 256, 1 << 20, dtype=numpy.uint8)` | 4942361704597259676 |
-
-It is a weighted sum, not a cryptographic digest: it catches a flipped byte, a truncated or misrouted DMA, a stale staging buffer. The spill thread computes it for every shard of every block it writes (measured on a CPU host:
-0.5 ms for the four shards of a block, and 0.07 ms for the chip-major conversion, numpy, off the scheduler thread; ~2 s of one core for a 254k session); the sha256 stays the integrity check of the host path, the audit and the scrubbers.
-
-## 4. The read
-
-`P2PEngine` (one per mesh) owns the staging buffer (`StagingApi.alloc`, once, for the engine's life), a `TtLink` per card, and a pool of `threads` reader threads. A restore is a `Stream`:
-
-* chunks of up to `chunk_blocks` positions (half the staging buffer / 557,056 = 120 at the default 2 x 64 MiB; the sliced restore's block cap shrinks it);
-* for every stored block in a chunk and every card, one task: `pread` (the store's `BlockFile.pread_into`: alignment checks, short-read loop, test hooks) of that card's shard, `entry.offset + d x 557,056`,
-  straight into the card's p2pmem mapping at the staging slot; positions that need no read (a block the host tier holds) are gaps and keep their place;
-* two halves: chunk k+1 is on the wire while chunk k is checked and copied; **a half the device has read is synced (`ttnn.synchronize_device`) before the drive's DMA writes into it again** (the drive ignores the
-  device's queue); the dirty state is the engine's, not the stream's;
-* a chunk is ready when all its tasks returned; a read error names the chunk; `close()` waits for the reads in flight (they cannot be taken back, and they write into the staging buffer).
-
-Then, per chunk, on the scheduler thread: `verify` (one checksum op, the comparison, one retry after a device sync and 2 ms if it differs, because a posted write can trail the drive's completion; a second
-difference raises `P2PMismatch` with the (block, chip) pairs) and `write` (one copy op per cache tensor). **Nothing is written for a chunk that failed.** Counters: `nvme_p2p_late_data` is a first
-comparison that failed and the retry passed.
-
-## 5. The backend: flags, fallbacks, counters
-
-`QWEN_PREFIX_NVME_P2P=1` (with the tier's usual names; **gate-only** in `serving_c2_contract`: a traffic profile cannot carry it even under the owner waiver; promoting it is a contract change). Knobs, refused as
-inert unless the switch is on: `QWEN_PREFIX_NVME_P2P_THREADS` (reads in flight over all cards, default 8, 1-64), `QWEN_PREFIX_NVME_P2P_STAGING_MIB` (per card, default 128 = two halves of 64, 2-4096),
-`QWEN_PREFIX_NVME_P2PMEM` (the PCI addresses of the cards whose p2pmem is published; optional: when given the mesh must run on exactly these cards), `QWEN_PREFIX_NVME_P2P_ALLOW_UNVERIFIED_MAP` (gate-only, see section 2).
-`QWEN_PREFIX_NVME_RESTORE=p2p` is refused with a pointer to the flag. `QWEN_PREFIX_NVME_VERIFY` governs the host path's sha256 only: **the P2P path checks every shard on the card whatever it says** (the log line still prints it).
-Every successful restore, P2P or fallback, refreshes the blocks' TTL and LRU clock (`touch_kv`) as the host path does. All four cards need the slice published; fewer is `UNAVAILABLE` (the copy op writes every chip).
-
-| situation | what happens |
+| | |
 |---|---|
-| start: no staging op, no published window, a held TLB window, a failed canary, a staging buffer outside the slice, a card not found | one line `nvme tier p2p UNAVAILABLE, the host backend serves the restores ...`, `nvme_p2p_unavailable` = 1, the host backend; the engine is never stopped by it |
-| the IO has no chip geometry (`caches`, `chips`, `slice_bytes`) | the tier does not open (`UNAVAILABLE`, `needs the tier IO's geometry`) |
-| restore, checksums match | the blocks are in the cache; `nvme_p2p_restores`, `_blocks`, `_bytes`, `_read_ms`, `_check_ms`, `_write_ms` |
-| **checksum mismatch after the retry** | **a miss**: nothing written for the chunk, the turn prefills cold, `nvme_p2p_mismatch` += shards. The first 8 blocks are re-read through the host path: bytes whose sha256 fail are bad on the drive (the entry is dropped, `nvme_digest_failures`); bytes that verify mean the path delivered them wrong (a strike; three latch the path off). It does not count toward the host tier's three-failures latch |
-| another restore holds the staging halves (`P2PBusy`) | these blocks come through the host path, `nvme_p2p_fallbacks`; **no strike** |
-| any other failure (a read error, a device op that raises, a stalled drive) | counted (`nvme_p2p_errors`), a strike, and the same blocks come through the host path (`nvme_p2p_fallbacks`); if the host path fails too the restore is a miss |
-| three strikes in a row, a device-op error (at once), a stalled drive (no chunk for 20 s) | the path latches off: `nvme tier p2p latched off`, `nvme_p2p_latched` = 1, `direct` turns False and `TierHooks` goes back to host records; until a restart |
-| audit (`QWEN_PREFIX_HOST_TIER_AUDIT=1`, gates) | the restored blocks are read back through the model's own IO, converted chip-major and compared with the drive's sha256 (`TierHooks.audit_direct`): the end-to-end drive -> card -> cache -> host check |
+| Built | `qwen_kv_read.so` version 3 (the existing extension, grown): compiles and links against the serving tt-metal tree (9f9cd4fd), every non-Python symbol resolves |
+| Checked on a CPU | the arithmetic, the argument checks, **both device kernels executed against a host stand-in of the dataflow API** (random block sets, page sizes, banks, offsets incl. the end of the ring, launch splits), a mutation check of that harness, the card test against an in-memory fake extension |
+| Compiled with the real RISC-V toolchain | both kernels, front end only (`rv_kernel_check.sh`: the build container's sfpi g++ with the JIT's flags, `-Wall -Werror -ftt-no-dyninit`, behind the firmware's include prelude; negative controls fail it). The 64-bit product is `mul` + `mulhu`. Nothing was linked or run |
+| Not checked | the JIT's own link step, any execution on a device, the lockstep assumption (checked at run time by a `TT_FATAL`), NOC coordinates, throughput |
 
-Log lines (read by `prefix_markers`): `nvme tier p2p on cards= threads= staging_bytes= chunk_blocks= shard_bytes= mapping_verified= window=`, `nvme tier p2p restore blocks= bytes= ms=`, and the trouble lines `p2p
-UNAVAILABLE`, `p2p latched off`, `p2p restore failed`, `p2p CHECKSUM MISMATCH`. The open line carries `backend=p2p`. The smoke table (`c2_smoke_check`) wants the `p2p on` line when a profile sets the flag.
+## 1. Where the staging range goes, and what it costs
 
-`nvme_p2p_map_verified` is 1 when `/proc/self/pagemap` confirmed the mapping (needs CAP_SYS_ADMIN). The path does not start without it (`UNAVAILABLE`) unless the gate-only override is set, and then the gauge is 0.
+Requirement (INTERFACE section 2): on every device, **one contiguous byte range in one DRAM bank** that the allocator never hands to anything else.
 
-## 6. Async restore: the answer
+What tt-metal does (read in the source of the served tree, tag v0.77.0 = commit 9f9cd4fd; the headers and the allocator files are byte-identical to the build container's):
 
-DESIGN section 0: `TierHooks.load` writes synchronously inside `schedule()`, so every seat stalls for the length of a restore (~1 s per 254k). A P2P restore moves the same bytes at the same speed, so run
-inside `load_direct` it would stall just as long. **The minimal change that lets it run beside the other seats' decodes is the sliced restore that already exists** (`QWEN_PREFIX_TIER_RESTORE_SLICE`: a
-`RestoreJob` advanced one slice per scheduler step by the one-fresh-prefill admission's hold), extended to direct backends:
+* The DRAM allocator (`BankManager`, `tt_metal/impl/allocator/bank_manager.cpp`) keeps **one free list for all banks**. `allocate_buffer(size, page_size, ...)` computes
+  `size_per_bank` and asks that one free list for `size_per_bank` bytes; the address it returns applies to **every bank of the device**. So an allocation reserves
+  the SAME address range in all 8 banks, whatever it holds, and a one-shard sharded buffer reserves just as much as an interleaved one. There is no single-bank reservation.
+  On a mesh the allocation is made once for the mesh (`MeshBuffer`, "allocated in lock-step across all devices"), so the address is the same on all four cards.
+* An interleaved buffer puts page `p` on bank `p mod 8` at `address + (p div 8) * page`. So **the pages of one bank are contiguous**: in an interleaved buffer of
+  `8 x S` bytes with page size `P` (`P` divides `S`), bank `b` holds bytes `[address, address + S)` as one contiguous range.
+* The allocator's range per bank is `[dram_unreserved_base, dram_view_size - trace_region_per_bank)` with `dram_view_size = 4,278,190,080` (0xFF000000, **4 GiB minus 16 MiB**,
+  `blackhole_140_arch.yaml`). Everything the allocator returns is real memory, reachable through a 4 GiB TLB window at bank address 0, and addresses are far below the window's top.
+  This explains P1's "3 GiB failed": the destination `[1 GiB, 4 GiB)` ends in the last 16 MiB of the window, which is not memory. Nothing about 2 GiB being a limit; an
+  allocator-placed range never has the problem.
 
-* `P2PBackend.sliced = True`; `TierHooks.start` now marks the NVMe blocks `Pending` for it (before, a direct backend had no sliced restore and the trim restored whole);
-* the first `advance` of a job begins a **stream** over the job's positions (`begin_stream`: pins the entries, starts the reads, chunks of at most the slice cap); **the reads run on the engine's pool, between
-  steps**, not on the scheduler thread;
-* each step, `advance_direct` takes the next chunk **only if all its shards have landed**; if not it does nothing and the pass goes on without the request (a decode-only pass: the seats keep getting
-  rounds); if so it runs the checksum op, takes the chunk's blocks from the pool (nothing is allocated for a chunk that does not verify), writes the host-tier records of the chunk as before, enqueues the copy
-  ops, and lets the next read start (after a device sync of the half);
-* the only work left on the scheduler thread per step is the checksum op with its readback, the block allocation (with the existing `flush` of what it evicts), and the copy enqueue: estimated **ms to tens of ms
-  per 120-block chunk** (the copy is 67 MB per card of DRAM-to-DRAM), against ~40 ms of drive read per chunk that is now off-thread. **UNTESTED/UNMEASURED**: P3a prints the check and copy times per chunk and
-  the restore's end-to-end rate; G-C3 judges the disturbance.
-* a block is **published only after** the device has been synced past the job's last copy (`sync_p2p`; also before an abandoned job's blocks are freed): whatever queue the model's rounds use, a published block is a
-  written block (ADR rule R2). A stream that is closed with reads still in flight hands its staging half back when the last of them lands (`reap`); a synchronous restore waits for a chunk at most 60 s;
-* failures: a mismatch abandons the job (a miss; the request's tier hit is ignored); a read or device error before any block was taken hands the rest of the job to the host `fill` path
-  (`job.host_only`); a path that latches under a job finishes it through the host path; a drive that lands nothing for 20 s abandons the job and latches the path; the trim reaching an unfinished job finishes
-  it whole and **waits** for the reads (`advance(whole=True)`), as before.
+So the cheapest way to get a protected single-bank range is the obvious one: **allocate an interleaved DRAM buffer of `8 x size` and use bank `b`'s range**
+(`ttnn.qwen_p2p_staging_alloc`, one `MeshBuffer` kept alive for the engine's life; the allocator cannot give any of it to anything else while the handle lives).
 
-Not done, on purpose: ttnn calls from a worker thread. The model runner issues its ops from the engine core's thread on the same mesh command queue; the only off-thread work here is the drive's
-reads into memory the device does not touch until the next sync.
+**Cost per card = `8 x size_bytes`** (plus a few KiB: the checksum's partial-sum buffer, and the kernels' binaries in DRAM at their first dispatch).
+Default `size_bytes` = 2 x 64 MiB = 128 MiB, so **1 GiB per card**: 128 MiB in the chosen bank, and the other seven banks' ranges (896 MiB) are kept but unused by default.
+The guarantee is that THIS MeshDevice's allocator never gives the range away: a submesh or a second MeshDevice over the same chips has its own free list (and so does a single-device
+allocation), so the engine must allocate DRAM only through the MeshDevice it passes to `qwen_p2p_staging_alloc`.
+They are not wasted if the host wants them: every op takes `bank=`, so the same buffer is eight staging ranges of 128 MiB (the host can stripe a restore over banks to spread
+the write bandwidth, with one TLB window aim per bank). `size_bytes` is a parameter: 2 x 32 MiB costs 512 MiB, 2 x 16 MiB costs 256 MiB. The allocator's free bytes per bank before and after are in `qwen_p2p_staging_info`.
 
-It needs the slice flag **and** the admission wrapper that holds a request between slices (`hold_ready`); without them a direct backend still restores whole in the trim (`load_direct`), blocking for the
-restore's length. **What must wait for a later step:** the device-side copy still runs on the same queue as the decode rounds (tens of ms of device time a 254k restore, not measured), and nothing here
-changes `flush` (the device read of the blocks an allocation evicts), which is synchronous; both belong to the G-C3 concurrency gate.
+Placement: top-down (`bottom_up=False`) so the range sits at the high end of the free space, away from the bottom-up allocations of weights, KV pool and transient tensors.
+Allocate it **once at engine start, after the KV pool and before any decode trace is captured** (allocating after a trace capture warns: buffers made then can
+overlap addresses a captured trace re-uses). The range start is 64-byte aligned (the allocator's guarantee); `qwen_p2p_staging_info` also reports where the first 4096-aligned
+bank address is (`aligned_4k_offset`) so the host can keep its O_DIRECT objects page aligned.
 
-## 7. Files
+## 2. Ops as built (`ttnn.*`, from `qwen_kv_read` version 3)
 
-| file | what |
-|---|---|
-| `scripts/ci/qwen_p2p_restore.py` | `p2p_checksum`, `ShardLayout`, `plan_aim`, `TtLink`, `StagingApi`, `P2PEngine`, `Stream` |
-| `scripts/ci/qwen_kv_nvme.py` | the flags, the `chipmajor-v1` layout, `P2PBackend`, `NvmeTier._start_p2p` / `_chipmajor` / `_read_many` / `_restore_via_host`, counters |
-| `scripts/ci/qwen_nvme_store.py` | the entry's auxiliary bytes |
-| `scripts/ci/qwen_prefix_scheduler_patch.py` | the sliced restore for a direct backend (`begin_stream`, `advance_direct`), `audit_direct` |
-| `scripts/ci/tp4_p2p_probe.py` | P3a |
-| `scripts/ci/p2p_checksum_vectors.json` | the three shared vectors |
-| `scripts/ci/test_qwen_p2p_restore.py`, `test_qwen_p2p_tier.py`, `test_tp4_p2p_probe.py` | the CPU tests (named in `qwen-integration-cpu.yml` through `fusion-wp/NVME.json`) |
-| `scripts/ci/references/tp4-p2p-jobs/` | the P3a job template |
-| `patches/tt-kmd-p2pmem/`, `scripts/p2p/` | from `tp4/p2p-nvme`: the kernel patch, the P1 probe, the topology tool, the layout and bandwidth model |
+```
+qwen_p2p_staging_alloc(mesh_device, size_bytes=128 MiB, bank=0, page_bytes=64 KiB, bottom_up=False) -> QwenP2PStaging
+qwen_p2p_staging_info(staging) -> [dict per device, mesh row-major order]
+qwen_write_blocks_from_staging(device_tensor, staging, byte_offset, blocks, bank=None)      enqueued, does not wait
+qwen_staging_checksum(staging, byte_offset, length, bank=None, cores=64) -> [int per device] blocking
+qwen_p2p_staging_write(staging, byte_offset, data[devices, n], bank=None)                    diagnostic, blocking
+qwen_p2p_staging_read(staging, byte_offset, out[devices, n], bank=None)                      diagnostic, blocking
+QwenP2PStaging: .release(), .size_bytes, .page_bytes, .bank, .num_banks, .address, .released
+```
 
-`qwen_p2p_restore.py` is in the serving image's one copy list (`docker/qwen-c2-overlay.txt`, generated from `fusion-wp/NVME.json`; the P8 copy lists are not involved for the C2 image). `qwen_kv_nvme`
-imports it only when the flag is on.
+* **info** per device: `device_id`, `mmio_chip_id`/`pcie_device` (tt-metal's `GetPCIeDeviceID`: the logical chip id of the MMIO chip; it is the tt-kmd index N of `/dev/tenstorrent/N` only when every card is visible
+  to the process, as in the serving container), `pci_bus_id` (sysfs, derived from that: **verify it against the card actually opened**; `None` when unreadable), `dram_bank`, `noc_x`, `noc_y`, `noc_endpoints`
+  (all three NOC endpoints of the bank, translated coordinates, tt-metal's order: index 0 is the view's NOC0 worker endpoint), `endpoint_index` (0), `address` (bank address of the range start = the TLB-window offset, bank offset is 0 on Blackhole), `size`,
+  `aligned_4k_offset/address/size`, `page_bytes`, `bytes_reserved` (the cost above), `dram_free_per_bank_before/after`, and `banks`: the same description for all 8 banks.
+  **Aim the window at `(noc_x, noc_y)` from this record**, not at the probe's formula (section 5).
+* **write_blocks_from_staging**: the semantics of `qwen_write_blocks_raw`; device d's slice `blocks[i]` gets `staging_d[byte_offset + i*slice_bytes : + slice_bytes]`. The tensor
+  must be an interleaved DRAM tensor laid out alike on every device; its page at most 8192 bytes (L1 scratch); `slice_bytes` a whole number of its pages (1,088-byte bf8 tile pages in production); `byte_offset` a multiple of 64 (NOT of 1,088: objects
+  start at multiples of 4,096, which is not); block ids distinct; at most 512 blocks per launch (more are several launches). Every DRAM access is one whole page.
+  Runtime args (the tensor's address, the staging address, the block ids) are rewritten from the live buffers on every call, as a program-cache hit would.
+* **checksum**: INTERFACE section 4 exactly: `S = sum_k ((k*2654435761 + 1) mod 2^32) * x_k mod 2^64` over the little-endian uint32 words of `staging[byte_offset : + length]`,
+  `k` counted from `byte_offset`. `length` a positive multiple of 4096, `byte_offset` a multiple of 64.
+  The three shared vectors (the numpy reference is `p2p_staging_ref.checksum_numpy`, equal to an independent plain-Python implementation):
 
-## 8. P3a: the standalone card probe
+  | vector | S |
+  |---|---|
+  | 4096 zero bytes | 0 |
+  | 4096 bytes, byte i = i % 251 | 17453227578024978262 (0xf2365202d43ae756) |
+  | `numpy.random.default_rng(20261030).integers(0, 256, 1<<20, numpy.uint8)` | 4942361704597259676 (0x4496cbc8da03859c) (numpy 2.4.6; the stream is numpy's) |
 
-`scripts/ci/tp4_p2p_probe.py`, run by the `fabric` action of `qwen-c2-serving.yml`: **job key `C2_FABRIC_PROBE=p2p`** with `C2_CARDS=quad`, `C2_ACTIONS=fabric` (template
-`scripts/ci/references/tp4-p2p-jobs/P3a-p2p-restore.env`; `C2_IMAGE_TAG` names an image with the device-op extension). The probe runs from the checkout the step mounts at `/c2`: an image, not a build of this
-commit. Order, and what it refuses before it does anything:
+* Both ops run **programs**, unlike the rest of the extension: the kernels (`qwen_p2p_scatter.cpp`, `qwen_p2p_checksum.cpp`) are read from the directory of the `.so` and JIT-compiled
+  at the first dispatch (seconds), and the programs are cached in the handle (the program binaries take a little DRAM at that first dispatch). **Warm them at engine start**
+  (one scatter into a scratch block and one checksum of 4096 bytes), before the decode trace is captured. Call them from the thread that issues the model's ops.
+  `release()` the handle **before** `close_mesh_device` (and after the last op has completed): after the mesh is closed it leaks the cached programs on purpose, because their destructors would
+  touch destroyed devices.
 
-0. **The drive, first.** Identity by model and serial through `/dev/disk/by-id` (a link `nvme-<model>_<serial>[_n]` that resolves to the node; a link of that name pointing elsewhere refuses) and,
-   independently, the kernel's own model and serial for the node; the values come from the job's environment (`P2P_DRIVE_BY_ID`, `P2P_DRIVE_MODEL`, `P2P_DRIVE_SERIAL`, `P2P_CARDS`), which the step reads from
-   **a private file on the runner** (`P2P_ENV_FILE`, owned by the runner user, not group- or world-writable, a strict `KEY=VALUE` parser, never sourced). The step checks the by-id name against the model and serial
-   before `docker run`; the probe checks again inside. Then **R1's readings, printed**: `P3A R1 controller_state=live namespace_bytes=N`. **Anything but `live` (or an empty namespace) refuses, nothing written.**
-   A drive carrying the NVMe tier's superblock refuses unless `--allow-store-overwrite`. The model, serial and PCI addresses are never printed (the Actions log of a public repository is public): the report has an
-   6-hex fingerprint of model and serial. Exception messages (a path in an `OSError`, a card in a refusal) are scrubbed of the drive's path and by-id name, its model, serial and every PCI address before they reach the report or the log.
-1. The (1, 4) mesh as the kv-read probe opens it; the ops must exist (refusal otherwise); scratch KV caches allocated as production allocates its own.
-2. N blocks (default 96, ~214 MB) of random bytes in the host tier's layout, laid out chip-major, with their per-chip checksums, **written `O_DIRECT` at `--scratch-offset` (default 1 GiB) only after step 3**.
-3. Every published card's window taken, aimed, pinned, proved and its mapping confirmed against the BAR (engine construction, staging 32 MiB per card by default so the object is four chunks and the halves
-   rotate; the staging description is printed without PCI addresses). Without CAP_SYS_ADMIN this refuses (`--allow-unverified-map` to go on).
-4. **One card first**: the widest link among the published cards (the x16 card), alone: its shards of the first blocks read into its staging buffer, its device checksums compared with the host's.
-5. **Every published card**: the read on its own (GB/s drive -> cards), then the whole restore (checksum ops, `qwen_write_blocks_from_staging` into the scratch caches), then `qwen_read_blocks_raw` back and a
-   byte-for-byte comparison with what was written to the drive. Printed: read GB/s, end-to-end GB/s, checksum and copy ms per chunk.
-6. **Negative arm**: one byte of one chip's shard of one block flipped on the drive: the restore must be refused by the checksum, the cache block it was for must still be zeros, and after the byte is put back the same
-   restore must pass.
-7. The windows released and every `p2pmem/available` equal to `size`.
+## 3. The kernels
 
-Last lines: `P3A verdict=PASS|FAIL|NOT-MEASURED ...` and one JSON object (kind `p2p-p3a-quad`); exit 0 / 1 / 2 (a refusal or a setup failure) / 3 (the watchdog, 30 minutes).
+* **scatter** (`qwen_p2p_scatter.cpp`): 16 cores (8 x 2), RISCV_0. Each takes up to 32 of the launch's blocks (a contiguous slice), reads the block's pages from the staging bank in
+  chunks of 16 pages into one of two L1 halves and writes them to the destination pages, the reads of chunk c+1 overlapping the writes of chunk c. L1: `2 x 16 x page_bytes + 64`
+  (34,880 bytes for bf8 tile pages) per core. The staging source is addressed as `bank, address + offset` through a `TensorAccessor` on the staging buffer (page id = bank id), so the
+  staging buffer's own page interleaving never enters the arithmetic.
+* **checksum** (`qwen_p2p_checksum.cpp`): `cores` cores (default 64, a multiple of 8, at most 80), RISCV_0. The range is split in 4096-byte units, core c takes
+  `[floor(c*u/C), floor((c+1)*u/C))`, starts its weight at `w_(k0)` (computed by the host), walks it with `w += 2654435761` and accumulates `uint64(w) * x` (`mul` + `mulhu` on the rv32im core),
+  reading 32 KiB chunks into two L1 halves. Each core writes its 64-bit partial as a whole 64-byte page; the host adds the partials mod 2^64. L1: 65,664 bytes per core.
+  Rate (an estimate from the instruction count, to be measured): about 0.6 GB/s per core, so 64 cores check 64 MiB in roughly 2 ms. It uses compute cores the decode needs: it
+  is a short, blocking op per staged chunk, not a background job.
 
-## 9. What production needs from the platform (for a software-factory ticket)
+## 4. Checks on a CPU (all named in `qwen-integration-cpu.yml`)
 
-The node agent launches the serving container. For the P2P restore it must, in addition to what the NVMe tier already needs (the drive's by-id path as `QWEN_PREFIX_NVME_DEVICE`, the Opal status file, the
-stop grace; `docs/tp4-kv-nvme.md` section 9):
+`optimisation/ttnn-op/kv_region_read/test_p2p_staging.py`, `test_p2p_staging_card.py` and `scripts/ci/test_pin_kvread_p2p.py`:
 
-1. **Devices.** `/dev/tenstorrent/*` for all four cards (already) and the cache drive's block node read-write (the tier writes it too).
-2. **sysfs, writable where it must be.** The container's `/sys` is read-only. For **each card with a published slice**, the directory `/sys/bus/pci/devices/<bdf>/p2pmem` must be bind-mounted **read-write**
-   (the engine opens `allocate` `O_RDWR` and maps it shared). `/sys/class/tenstorrent` (the `p2pmem` attributes are root-readable) and `/sys/bus/pci/devices/<bdf>/resource` must stay readable. The agent finds
-   `<bdf>` at launch from the same table the engine uses (`/sys/class/tenstorrent/tenstorrent!N/device`); the nodes renumber on every reset.
-3. **Capabilities.** The ioctls need only the open fd, and `O_DIRECT` and the mapping need root in the container; but **`CAP_SYS_ADMIN` is required**: `/proc/self/pagemap` shows physical addresses only with it,
-   and the engine refuses to start (`UNAVAILABLE`) unless it can confirm where the p2pmem mapping sits (`nvme_p2p_map_verified` = 1). A gate that cannot grant it may set the gate-only
-   `QWEN_PREFIX_NVME_P2P_ALLOW_UNVERIFIED_MAP=1`; production should not.
-4. **Environment.** `QWEN_PREFIX_NVME_P2P=1` (a gate profile today), optionally `QWEN_PREFIX_NVME_P2PMEM=<bdf>,<bdf>,...` (the runner's `C2_P2PMEM`) and the staging and thread knobs; plus the tier's existing
-   names (`C2_NVME_DEVICE` -> `QWEN_PREFIX_NVME_DEVICE`).
-5. **The kernel module.** The patched tt-kmd (`p2pmem_devices` naming **all four cards**; today two are published and a reboot returns the stock module) installed through DKMS or a boot unit, with
-   `p2pmem_size_mb` (default one 4 GiB window; 64 MiB of host RAM per card). A node without it serves from the host backend.
-6. **Reset ordering.** While an engine holds a card, `p2pmem/available` is 0 and a destructive `RESET_DEVICE` returns EBUSY: the agent's reset (and the ZR job) must stop the serving container first and treat EBUSY
-   as "something still holds the card", never retry blindly. A container that cannot be stopped holds the pool.
-7. **The window.** The engine needs TLB window 202 (the published one) free: confirm with the UMD's mappings (`/sys/kernel/debug/tenstorrent/*/mappings`) that the serving process holds none of the 4 GiB windows.
-   Nothing else on the node may map the published range (the kernel maps it uncached).
-8. **DRAM budget.** The staging buffer is `QWEN_PREFIX_NVME_P2P_STAGING_MIB` (128) per card, allocated by the device-op extension after the KV pool; the profile's DRAM ledger must leave it.
-9. **Topology.** The drive and the cards must be on paths the kernel allows peer-to-peer on (P1: all `THRU_HOST_BRIDGE`, hairpin through the CPU measured fine at 6.95 GB/s); the drive must stay a plain
-   NVMe namespace (no md, device-mapper, LVM or dm-crypt: they do not carry the peer-to-peer flag). A PCI rescan that takes the drive away (R1) latches the tier, as before.
+* checksum: numpy = plain Python = the three expected values; k restarts at the range start; one flipped bit changes it; partial sums over 1/8/64/80 cores add up;
+* `qwen_p2p_plan.hpp` (every split, weight, argument vector, CB size and argument check) compiled and compared with its Python mirror; the arithmetic block of the checksum kernel
+  compiled as it stands in the kernel, under many chunkings;
+* **both kernels run on the CPU** (`emu/`): the real kernel source is compiled against a stand-in for `api/dataflow/dataflow_api.h` and driven by the same argument builders the extension uses.
+  The stand-in models DRAM banks, an interleaved `TensorAccessor`, L1, and NOC transfers that land late (at the barrier) or at once (`-DEMU_EAGER`), and refuses a sub-page access, an
+  unaligned DRAM address, an access outside the allowed range and a kernel that finishes with a transfer pending. Scenarios: one block; runs; shuffled ids; every bank; page
+  sizes 64..32768; 1..48 pages per block; 17, 100, 513, 600 blocks (cores and launches); offsets of 64, 192, 4160+k*17408; the end of the ring; the checksum vectors on 8/24/64/80
+  cores at several offsets and banks;
+* **mutation check**: 17 plausible slips in the kernels (a barrier dropped, the wrong half, an off-by-one page, a half-page write, a restarted weight, a truncated product, a wrong
+  slot, ...) are each caught under at least one of the two schedules, and the unbroken kernels pass both;
+* the card test (`p2p_staging_card.py`) against an in-memory fake extension: a correct fake passes, and each of ten plausible mistakes (a flipped byte, a block forgotten, a spill into
+  an unnamed block, `bank=` ignored, a wrong checksum, a short info list, a differing or misaligned address, ...) fails it.
 
-## 10. What is untested until cards
+## 5. Corrections to the contract (INTERFACE.md), for the orchestrator
 
-Everything in the data path past the CPU tests: that a process in the serving container can take TLB window 202 while the UMD holds the card; the `ALLOCATE_TLB` / `CONFIGURE_TLB` / `EXPORT_TLB_DMABUF` call
-sequence on a live card as `TtLink` makes it (the structs are the probe's, pinned equal in a test); the canary at the allocator's staging address; the bind mount of a sysfs `p2pmem` directory read-write
-over a read-only `/sys`; the pagemap check inside a container; the O_DIRECT reads of 557,056-byte shards into p2pmem at 4 x 8 threads (P1 measured 16 MiB chunks; the per-read size here is smaller and the
-drive's rate at it is unmeasured); whether a posted write ever trails the drive's completion (the retry exists for it); the device ops themselves and their `row_stride` / `count` forms; the copy's cost beside a
-decode round; the disturbance of a 254k restore on eight live seats (G-C3); a reset with the engine stopped, and the EBUSY paths; the DRAM bank contention of a single-bank staging buffer; the `chipmajor-v1`
-conversion cost on the spill thread and the host fallback's cost under load; the stock-module reboot (the path must come up `UNAVAILABLE`, not crash).
+1. **Cost**: the single-bank range costs `8 x size` per card, not `size`: the allocator is lockstep over banks (section 1). The other seven banks' ranges stay usable through `bank=`.
+2. **P1's "~2 GiB usable"**: not a memory limit. The top 16 MiB of each 4 GiB window is not DRAM (`dram_view_size` = 0xFF000000); P1's 3 GiB test ended inside it. A range the allocator
+   hands out is always inside memory.
+3. **`byte_offset` need not be a multiple of 1,088**: objects start at multiples of 4,096 in the ring, so a second tensor's data starts at a multiple of 64 only. The ops require 64.
+4. **NOC coordinates**: take `noc_x`/`noc_y` (or any of `noc_endpoints`) from `qwen_p2p_staging_info`. They are tt-metal's own translated coordinates of the bank's endpoints
+   (`logical DRAM core (bank, endpoint index)`); the default is endpoint 0, the view's NOC0 worker endpoint, which the kernels and tt-metal's own host reads of DRAM use (for banks 0 and 4-7 it is
+   also the sub-port the UMD's static TLBs use; for banks 1-3 that is endpoint 2). Whether the three endpoints of a channel are interchangeable for a PCIe window is a hardware fact the
+   source cannot show: the host's window self-test settles it (try another endpoint from the list if the default fails). The probe's formula (banks 0-3 in column 17, 4-7 in
+   column 18, `y = 12 + 3*(bank mod 4) + port`) is an assumption from the UMD; the card test reports whether it agrees with the allocator's answer (`formula_first_endpoint_in_info`).
+   P1 verified one window by reading back through it, which does not prove the bank number; the checksum does.
+5. **Object bytes (section 1)**: "a host-path restore and a P2P restore read the same object bytes" holds for the **slice bytes** (the packed bf8 bytes of one block of one cache tensor on one
+   chip), not for the arrangement. The host tier's record (`_QwenKvTierIO`) is per block, `[cache][chip][slice]`, chip-interleaved; the P2P object of a card is per run of blocks,
+   `[cache][block][slice]` for that chip. The spill side must transpose (`kv_shard_layout.py` is the model of it); the device ops follow section 1 and do not care.
+6. **`address`** in `info` is the range start in the bank as the window sees it (bank offset 0 on Blackhole is added anyway). The host mmaps the whole published slice and DMAs at
+   `address + byte_offset` from the mapping's start; nothing needs to be MiB aligned.
+7. **Flush before the first device read.** A posted PCIe write finishing at the NVMe is not an ordering point on the card's NOC and DRAM path. After the NVMe completion and before enqueueing the
+   checksum or the scatter, the host should do a non-posted read through the same TLB window (any word of the range): the usual flush of posted writes. It does not strictly order writes of
+   another requester (the drive), so the checksum stays the arbiter (a miss is a cold prefill); a scatter alone would not catch a stale range.
+8. **Program binaries**: the first dispatch of each op allocates a little DRAM (its kernel binary) and compiles; do it at engine start (section 2).
+
+## 6. What only a card settles
+
+* the JIT's link of the two kernels (they compile with the real RISC-V compiler and the JIT's flags, `rv_kernel_check.sh`, but nothing was linked or dispatched);
+* that `MeshBuffer::create` replicated gives the same address on all four cards (the constructor checks and throws if not) and the page size asked for;
+* the NOC coordinates and the bank (card test: `staging` block of the report), the lockstep, the cost in free DRAM per bank (`dram_free_per_bank_*`);
+* whether the three NOC endpoints of a channel are interchangeable for a PCIe window, and that `pci_bus_id` is the card the host opened;
+* L1 fit of the circular buffers on cores (0..7, 0..9) next to a served model's L1 buffers (a clash is a `TT_FATAL` at the first dispatch, not corruption);
+* the rates: the write op's GB/s per card (report `write_gbps_per_card`), the checksum's (`checksum_gbps_per_card`), the effect of reading 16 cores' worth of pages from one bank;
+* running while decode traces are live (ordering on the one command queue is assumed, as for every other op).
+
+Run: `python3 optimisation/ttnn-op/kv_region_read/p2p_staging_card.py --devices 4 --staging-mib 32` in a card window (the host side's probe calls `run()` from the same file).
+
+## 7. Delivery into an image
+
+The module is the existing `qwen_kv_read` extension, version 3. The image copies its **whole build directory** (`COPY opgraft-KVR/`), so the two kernels and the header ship beside the `.so`.
+
+1. On the rig host, from a checkout of this branch: `bash optimisation/ttnn-op/kv_region_read/build_kv_read.sh ~/opgraft-KVR3` (compiles in the build container, then imports the module in
+   the production image with no network and no device; it also compiles both kernels with the real RISC-V toolchain, and refuses unless all ten ops import and the kernels sit beside the `.so`).
+2. `python3 scripts/ci/pin_kvread.py --dir ~/opgraft-KVR3 --write` moves the four pin sites to the new hash (it refuses a build whose source or shipped kernels are not this
+   checkout's, or that lacks the P2P op names); commit that.
+3. `build-c2-serving-image.sh` now reads `~/opgraft-KVR3` by default (the version 2 and 1 directories are untouched). The Dockerfile's RUN fails the image build unless the baked module is
+   version 3 with the ten ops and both kernels.
+4. Image build job (a build, no card; `.github/c2-serving-job.env` on a throwaway commit, then push the tag `experiment/c2-serving-vN`; one tag at a time):
+
+```
+C2_CARDS=quad
+C2_ACTIONS=build
+C2_IMAGE_TAG=<new tag>
+C2_PROFILE=c2-packed-tp4
+```
+
+Read the build log for the provenance report with no problem line (check (g) at the new pin) and the Dockerfile's `[KVREAD] qwen_kv_read 3 ...` line.

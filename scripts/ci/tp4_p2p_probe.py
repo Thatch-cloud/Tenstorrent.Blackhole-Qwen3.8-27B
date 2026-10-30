@@ -1,4 +1,4 @@
-"""P3a: the peer-to-peer restore on the cards, standalone (qwen-c2-serving.yml 'fabric' with C2_FABRIC_PROBE=p2p, C2_CARDS=quad; docs/tp4-p2p-restore.md section 8).
+"""P3a: the peer-to-peer restore on the cards, standalone (qwen-c2-serving.yml 'fabric' with C2_FABRIC_PROBE=p2p, C2_CARDS=quad; docs/tp4-p2p-host.md section 8).
 
     python3 -B /c2/scripts/ci/tp4_p2p_probe.py --fabric FABRIC_1D --output /probe-results/p2p-p3a.json
 
@@ -9,7 +9,9 @@ What it does, in this order, and what it refuses before it does anything:
      tier's superblock is refused too (--allow-store-overwrite says it is a gate's drive to destroy). The values come from the job's environment, never from a tracked file, and are
      never printed (the log of a public repository is public): the report carries a short hash of them.
   1. THE MESH AND THE OPS. The (1, 4) mesh as the kv-read probe opens it; the device-op extension's ops must exist (staging alloc and info, the checksum, the copy from staging) with the
-     raw block ops of the host tier; the scratch KV caches are allocated as production allocates its own (bfloat8_b tiles, one head per chip).
+     raw block ops of the host tier; the scratch KV caches are allocated as production allocates its own (bfloat8_b tiles, one head per chip). The device-op branch's own card check
+     (optimisation/ttnn-op/kv_region_read/p2p_staging_card.py run(): the staging buffer's place and cost, the checksum against the numpy reference, the copy into scratch caches, the banks)
+     runs first, on this mesh, before the drive is touched; a failure of it is the verdict (--skip-device-ops-check leaves it out).
   2. THE KNOWN OBJECT. N blocks of random bytes in the host tier's layout, laid out chip-major (the NVMe tier's P2P layout), written O_DIRECT to the drive at --scratch-offset, with the
      per-chip checksums the spill thread would record.
   3. THE WINDOWS. Every published card's TLB window is taken, aimed at its staging buffer, pinned and proved with the canary (qwen_p2p_restore.TtLink); the staging buffer's description is
@@ -361,9 +363,26 @@ def read_back(ttnn, cache, chips, ids, slice_bytes):
 # ================================================================================================
 # The run
 # ================================================================================================
-def run_data_plane(ttnn, mesh, options, drive_info, report, log, alloc=alloc_cache, drive_factory=Drive, engine_factory=None):
+def device_ops_check(ttnn, mesh, chips, options):
+    """The device-op branch's card test on this mesh (its run()): -> its report dict (ok, problems, ...)."""
+    directory = str(HERE.parent.parent / 'optimisation' / 'ttnn-op' / 'kv_region_read')
+    if directory not in sys.path:
+        sys.path.insert(0, directory)
+    import p2p_staging_card
+
+    return p2p_staging_card.run(ttnn, mesh, chips, blocks=max(64, options.blocks), heads_per_chip=options.heads_per_chip, staging_mib=options.staging_mib, bank=0, long_run=False)
+
+
+def run_data_plane(ttnn, mesh, options, drive_info, report, log, alloc=alloc_cache, drive_factory=Drive, engine_factory=None, ops_check=None):
     chips = int(mesh.get_num_devices())
     report['chips'] = chips
+    if not options.skip_device_ops_check:
+        checked = (ops_check or device_ops_check)(ttnn, mesh, chips, options)
+        scrub = scrubber(options)
+        report['device_ops_check'] = dict(ok=bool(checked.get('ok')), status=checked.get('status'), problems=[scrub(problem) for problem in checked.get('problems', [])][:20])
+        log_line(log, 'device ops (the device-op branch\'s card check): %s%s', 'OK' if checked.get('ok') else 'FAILED', '' if checked.get('ok') else ' (%s)' % '; '.join(report['device_ops_check']['problems'][:3]))
+        if not checked.get('ok'):
+            return report
     heads = options.heads_per_chip
     blocks = options.blocks
     cache_blocks = blocks + 2                         # (the last id is the negative arm's: never written by the good restores)
@@ -464,8 +483,8 @@ def describe_engine(engine, report, log, sysfs_pci=p2p.SYSFS_PCI):
     report['engine'] = dict(info, cards=[dict(position=position, link_width=link_width(bdf, sysfs_pci), window=getattr(link, 'window_id', None), mapping_verified=bool(getattr(link, 'map_verified', False)),
                                               noc=dict(getattr(link, 'aim', {}).get('noc', {})), slice_offset=getattr(link, 'aim', {}).get('slice_offset'))
                                          for position, ((_index, bdf), link) in enumerate(zip(engine.cards, engine.links))])
-    log_line(log, 'engine cards=%d threads=%d staging_bytes=%d chunk_blocks=%d shard_bytes=%d mapping_verified=%d', info['cards'], info['threads'], info['staging_bytes'],
-             info['chunk_blocks'], info['shard_bytes'], info['mapping_verified'])
+    log_line(log, 'engine cards=%d threads=%d staging_bytes=%d chunk_blocks=%d shard_bytes=%d mapping_verified=%d device_ops=%s', info['cards'], info['threads'], info['staging_bytes'],
+             info['chunk_blocks'], info['shard_bytes'], info['mapping_verified'], info['device_ops'])
     for position, card in enumerate(report['engine']['cards']):
         log_line(log, 'card %d: link x%d window %s noc (%s,%s) staging at slice offset %s mapping_verified=%s', position, card['link_width'], card['window'],
                  card['noc'].get('x'), card['noc'].get('y'), card['slice_offset'], card['mapping_verified'])
@@ -529,6 +548,9 @@ def verdict_of(report):
         return 'NOT-MEASURED', [report['refusal']]
     if report.get('error'):
         return 'NOT-MEASURED', [report['error']]
+    checked = report.get('device_ops_check')
+    if checked is not None and not checked.get('ok'):
+        return 'FAIL', ['the device ops\' own card check failed: %s' % '; '.join(checked.get('problems') or ['no detail'])[:300]]
     if not (report.get('one_card') or {}).get('verified'):
         reasons.append('the one-card stage did not verify')
     exact = report.get('exact') or {}
@@ -561,7 +583,7 @@ def required_ops(ttnn):
     return [name for name in needed if not callable(getattr(ttnn, name, None))]
 
 
-def run(options, ttnn=None, environ=None, log=print, alloc=alloc_cache, drive_factory=Drive, engine_factory=None, mesh_opener=None):
+def run(options, ttnn=None, environ=None, log=print, alloc=alloc_cache, drive_factory=Drive, engine_factory=None, mesh_opener=None, ops_check=None):
     environ = os.environ if environ is None else environ
     report = dict(kind=KIND, fabric=options.fabric, blocks=options.blocks, opened=False, serving_contract=environ.get('QWEN_C2_SERVING'),
                   allow_unverified_map=bool(options.allow_unverified_map))
@@ -595,7 +617,7 @@ def run(options, ttnn=None, environ=None, log=print, alloc=alloc_cache, drive_fa
     mesh = None
     try:
         mesh = (mesh_opener or open_mesh)(ttnn, options, report)
-        run_data_plane(ttnn, mesh, options, report['drive'], report, log, alloc, drive_factory, engine_factory)
+        run_data_plane(ttnn, mesh, options, report['drive'], report, log, alloc, drive_factory, engine_factory, ops_check)
     except Refusal as refusal:
         report['refusal'] = str(refusal)
         log_line(log, 'REFUSED: %s', refusal)
@@ -640,6 +662,7 @@ def build_parser():
     parser.add_argument('--staging-mib', type=int, default=32, help='staging buffer per card (default 32: halves of 29 blocks, so the default object is several chunks and the halves rotate)')
     parser.add_argument('--allow-unverified-map', action='store_true', help='go on although /proc/self/pagemap cannot confirm where the p2pmem mapping is (no CAP_SYS_ADMIN): the DMA then trusts the pool\'s order')
     parser.add_argument('--scratch-offset', type=int, default=DEFAULT_SCRATCH_OFFSET, help='where on the drive the object is written (default 1 GiB)')
+    parser.add_argument('--skip-device-ops-check', action='store_true', help='leave out the device-op branch\'s own card check that runs first')
     parser.add_argument('--allow-store-overwrite', action='store_true', help='go on although the drive carries the NVMe tier\'s superblock (a gate\'s drive to destroy)')
     parser.add_argument('--by-id-dir', default='/dev/disk/by-id')
     parser.add_argument('--sysfs', default='/sys')

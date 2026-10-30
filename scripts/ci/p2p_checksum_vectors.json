@@ -1,5 +1,5 @@
 {
- "algorithm": "words x_k = little-endian uint32 at byte 4k of the range; w_k = (k * 2654435761 + 1) mod 2^32; S = sum_k(w_k * x_k) mod 2^64; k counts from the first byte of the range (docs/tp4-p2p-restore.md, section 3)",
+ "algorithm": "words x_k = little-endian uint32 at byte 4k of the range; w_k = (k * 2654435761 + 1) mod 2^32; S = sum_k(w_k * x_k) mod 2^64; k counts from the first byte of the range (docs/tp4-p2p-host.md, section 3)",
  "vectors": [
   {
    "name": "zero_4096",

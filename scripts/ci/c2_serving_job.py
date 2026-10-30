@@ -38,7 +38,7 @@ Keys (every one optional but C2_IMAGE_TAG):
                       the 2048 bucket, so a difference is attributed to the segments' programs or to the store at the split; SPLIT_PROBE attribution
                       lines, docs/tp4-exact-end.md 2) or p2p (tp4_p2p_probe.py, P3a: the cache drive's identity and R1's readings first, then the peer-to-peer
                       restore NVMe -> the cards' staging buffers -> the KV caches, one card first, byte for byte, with a negative arm, the windows and the p2pmem
-                      pools released at the end; P3A verdict=PASS|FAIL|NOT-MEASURED, exit 0/1/2; docs/tp4-p2p-restore.md section 8. Which drive and which cards come from
+                      pools released at the end; P3A verdict=PASS|FAIL|NOT-MEASURED, exit 0/1/2; docs/tp4-p2p-host.md section 8. Which drive and which cards come from
                       a PRIVATE file on the runner, never from the job or the repository); needs the fabric action
   C2_SUPERSEDED_BY    set on every template of a pack that a later pack replaced (references/tp4-w2-jobs); read_job REFUSES such a template
   C2_PROFILE          the C2 profile smoke and gate serve (default: general)

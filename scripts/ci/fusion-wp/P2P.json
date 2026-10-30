@@ -1,0 +1,10 @@
+{
+ "wp": "P2P",
+ "branch": "tp4/p2p-devop",
+ "description": "The device side of the peer-to-peer KV restore (docs/tp4-p2p-restore.md): version 3 of the qwen_kv_read extension adds ttnn.qwen_p2p_staging_alloc / _info (one contiguous range in one DRAM bank per device that the allocator never hands to anything else), qwen_write_blocks_from_staging (staged bytes into KV blocks, whole tile pages) and qwen_staging_checksum (the contract's weighted sum mod 2^64, parallel over cores), with two device kernels shipped beside the .so. The kernels are executed on the CPU against a host stand-in of the dataflow API by the tests below. Never run on a card.",
+ "tests": [
+  "test_pin_kvread_p2p",
+  {"discover": "optimisation/ttnn-op/kv_region_read", "pattern": "test_*.py"}
+ ],
+ "notes": "No lever, no profile, no smoke row: the ops are inert until the host side calls them. The image carries the extension through the existing opgraft-KVR directory (build_kv_read.sh into opgraft-KVR3, then pin_kvread.py); nothing here is a scripts/ci overlay file. Card plan: optimisation/ttnn-op/kv_region_read/p2p_staging_card.py (docs/tp4-p2p-restore.md section 6)."
+}

@@ -15,6 +15,7 @@ import os
 import shutil
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -165,7 +166,8 @@ class ProbeCase(unittest.TestCase):
             self.engine = engine
             return engine
 
-        defaults = dict(alloc=self.alloc, drive_factory=lambda path: probe.Drive(path, direct=False), engine_factory=engine_factory)
+        defaults = dict(alloc=self.alloc, drive_factory=lambda path: probe.Drive(path, direct=False), engine_factory=engine_factory,
+                        ops_check=lambda ttnn_, mesh, chips, opts: dict(ok=True, status='ok', problems=[]))
         self.allocated = []
         defaults.update(kwargs)
         report = probe.run(options or self.options(), ttnn=ttnn, environ={}, log=self.log, **defaults)
@@ -418,6 +420,31 @@ class FlowTests(ProbeCase):
         chunk_blocks = ((options.staging_mib << 20) // 2) // layout.shard_bytes
         self.assertGreater(options.blocks, 3 * chunk_blocks)
 
+    def test_the_device_ops_own_card_check_runs_first_and_a_failure_of_it_is_the_verdict_before_the_drive_is_touched(self):
+        before = open(self.device, 'rb').read(8 << 20)
+        report = self.run_flow(ops_check=lambda t, mesh, chips, opts: dict(ok=False, status='fail', problems=['the checksum of the staging range differs on %s (%s)' % ('0000:41:00.0', SERIAL)]))
+        self.assertEqual(report['verdict'], 'FAIL')
+        self.assertIn('device ops', ' '.join(report['reasons']))
+        self.assertEqual(open(self.device, 'rb').read(8 << 20), before, 'not a byte was written')
+        self.assertNotIn(SERIAL, json.dumps(report, default=str))
+        self.assertNotIn('0000:41:00.0', json.dumps(report, default=str))
+        self.assertNotIn('one_card', report)
+
+    def test_the_device_ops_check_is_the_branchs_run_with_this_probes_geometry(self):
+        seen = {}
+        fake = types.ModuleType('p2p_staging_card')
+        fake.run = lambda ttnn, mesh, devices, **kwargs: seen.update(devices=devices, **kwargs) or dict(ok=True)
+        with mock.patch.dict(sys.modules, {'p2p_staging_card': fake}):
+            result = probe.device_ops_check('ttnn', 'mesh', 4, self.options(staging_mib=32, blocks=96))
+        self.assertTrue(result['ok'])
+        self.assertEqual((seen['devices'], seen['bank'], seen['long_run'], seen['staging_mib'], seen['blocks']), (4, 0, False, 32, 96))
+        report = self.run_flow(self.options(skip_device_ops_check=False), ops_check=lambda t, mesh, chips, opts: dict(ok=True, status='ok', problems=[]))
+        self.assertEqual((report['verdict'], report['device_ops_check']['ok']), ('PASS', True))
+
+    def test_the_run_reports_which_form_of_device_ops_it_used(self):
+        report = self.run_flow()
+        self.assertEqual(report['engine']['device_ops'], 'strided')
+
     def test_a_pool_left_allocated_is_a_fail(self):
         def leaky(engine, options):
             return dict(links_closed=True, available_equals_size=False)
@@ -469,7 +496,7 @@ class FlowTests(ProbeCase):
 
         out = os.path.join(self.directory, 'out.json')
         argv = ['--output', out, '--drive', os.path.join(self.by_id, 'nvme-Fake_NVMe_Model_9000_1TB_FAKESERIAL123'), '--drive-model', MODEL, '--drive-serial', SERIAL,
-                '--by-id-dir', self.by_id, '--sysfs', self.sysfs, '--sysfs-pci', self.sysfs_pci, '--blocks', '24', '--caches', '4', '--staging-mib', '2', '--scratch-offset', str(1 << 20)]
+                '--by-id-dir', self.by_id, '--sysfs', self.sysfs, '--sysfs-pci', self.sysfs_pci, '--blocks', '24', '--caches', '4', '--staging-mib', '2', '--scratch-offset', str(1 << 20), '--skip-device-ops-check']
         self.allocated = []
         status = probe.main(argv, ttnn=ttnn, environ={}, log=self.log, alloc=self.alloc, drive_factory=lambda path: probe.Drive(path, direct=False), engine_factory=engine_factory)
         self.assertEqual(status, 0)

@@ -1,4 +1,4 @@
-"""The NVMe tier's peer-to-peer restore (QWEN_PREFIX_NVME_P2P; docs/tp4-p2p-restore.md), under the real scheduler graft on the fake world of the host-tier tests, with the cards' end of the
+"""The NVMe tier's peer-to-peer restore (QWEN_PREFIX_NVME_P2P; docs/tp4-p2p-host.md), under the real scheduler graft on the fake world of the host-tier tests, with the cards' end of the
 path replaced by memory (test_qwen_p2p_restore's FakeMesh and FakeLink) and the drive by a file.
 
 Held:
@@ -31,7 +31,7 @@ import qwen_prefix_scheduler_patch as patch_module  # noqa: E402
 import serving_c2_contract as contract  # noqa: E402
 import test_qwen_prefix_tiers as tiers_module  # noqa: E402
 from test_qwen_kv_nvme import ACKED, NvmeCase, first_turn  # noqa: E402
-from test_qwen_p2p_restore import FakeMesh, make_links  # noqa: E402
+from test_qwen_p2p_restore import AsBuiltMesh, FakeMesh, make_links  # noqa: E402
 from test_qwen_prefix_scheduler_patch import FakeKvIO, Request, kv_content  # noqa: E402
 from test_qwen_prefix_tiers import span  # noqa: E402
 
@@ -61,15 +61,15 @@ class GeoKvIO(FakeKvIO):
 class P2PWorld(object):
     """What the tests reach: the engine factory patched in for default_p2p_engine, the fake mesh, the links, the tiers it built."""
 
-    def __init__(self, threads=2, staging_blocks=8, fail=None, reader=None):
-        self.threads, self.staging_blocks, self.fail, self.reader = threads, staging_blocks, fail, reader
+    def __init__(self, threads=2, staging_blocks=8, fail=None, reader=None, mesh_class=FakeMesh):
+        self.threads, self.staging_blocks, self.fail, self.reader, self.mesh_class = threads, staging_blocks, fail, reader, mesh_class
         self.meshes, self.links, self.engines = [], [], []
 
     def factory(self, tier):
         if self.fail is not None:
             raise self.fail
         layout = tier.shards
-        mesh = FakeMesh(layout, tier.io.sink, deferred=True)
+        mesh = self.mesh_class(layout, tier.io.sink, deferred=True)
         link_factory, links = make_links(mesh)
         # (the fake world's blocks are 32 bytes: shards are not 4 KiB-aligned there, so the reads go straight at the store's device file; the real alignment is test_qwen_p2p_restore's)
         reader = self.reader or (lambda offset, view: os.preadv(tier.store.bf.fd, [view], offset))
@@ -147,7 +147,7 @@ class FlagTests(unittest.TestCase):
 
     def test_on_it_takes_its_knobs_strictly(self):
         plan, problems = kvnvme.parse(dict(ACKED, **P2P))
-        self.assertEqual((problems, plan.p2p, plan.p2p_threads, plan.p2p_staging_bytes >> 20, plan.restore), ([], True, 8, 128, 'host'))
+        self.assertEqual((problems, plan.p2p, plan.p2p_threads, plan.p2p_staging_bytes >> 20, plan.restore), ([], True, 8, 64, 'host'))
         plan, problems = kvnvme.parse(dict(ACKED, QWEN_PREFIX_NVME_P2P='1', QWEN_PREFIX_NVME_P2P_THREADS='16', QWEN_PREFIX_NVME_P2P_STAGING_MIB='256',
                                            QWEN_PREFIX_NVME_P2PMEM='0000:42:00.0, 41:00.0'))
         self.assertEqual((problems, plan.p2p_threads, plan.p2p_staging_bytes, plan.p2pmem), ([], 16, 256 << 20, ('0000:41:00.0', '0000:42:00.0')))
@@ -386,7 +386,7 @@ class RestoreTests(P2PCase):
         open_line = next(line for line in made.lines if line.startswith('nvme tier open '))
         self.assertIn('backend=p2p', open_line)
         on_line = next(line for line in made.lines if line.startswith('nvme tier p2p on '))
-        for word in ('cards=4', 'threads=2', 'chunk_blocks=4', 'shard_bytes=8', 'mapping_verified=1', 'window=202'):
+        for word in ('cards=4', 'threads=2', 'chunk_blocks=4', 'shard_bytes=8', 'mapping_verified=1', 'window=202', 'device_ops=strided'):
             self.assertIn(word, on_line)
 
     def test_a_flipped_byte_on_the_drive_is_a_miss_the_entry_is_dropped_and_nothing_is_written(self):
@@ -624,6 +624,48 @@ class RestoreTests(P2PCase):
 # The sliced restore: beside the other seats
 # ================================================================================================
 SLICE_ENV = {'QWEN_PREFIX_TIER_RESTORE_SLICE': '16', 'QWEN_PREFIX_TIER_RESTORE_SLICE_MS': '60000'}
+
+
+class AsBuiltDeviceOpsTests(P2PCase):
+    """The device-op extension as built (contiguous rows, one checksum range): the whole tier path works with it, in compat mode, and says so."""
+
+    def setUp(self):
+        P2PCase.setUp(self)
+        self.install(P2PWorld(mesh_class=AsBuiltMesh))
+
+    def test_a_returning_session_is_exact_and_the_log_says_compat(self):
+        made = self.p2p_rig()
+        self.assertTrue(any('device_ops=compat' in line for line in made.lines))
+        self.assertTrue(any('contiguous-row form' in line for line in made.lines))
+        a = self.push_out(made, first_turn())
+        again, start, grant = self.returning_exact(made, a)
+        self.assertEqual(start, 4096)
+        self.assertTrue(made.check_kv())
+        self.assertGreater(made.registry.snapshot()['nvme_p2p_blocks'], 0)
+        self.assertEqual(made.registry.snapshot()['nvme_p2p_errors'], 0)
+
+    def test_a_sliced_restore_is_exact_in_compat_mode_too(self):
+        made = self.p2p_rig(tier_env=SLICE_ENV)
+        a = self.push_out(made, first_turn())
+        again = self.returning(a)
+        hooks = made.graft.tier_hooks
+        hooks.hold_ready = True
+        steps = 0
+        while hooks.hold(again) and steps < 3000:
+            made.graft.step_no += 1
+            steps += 1
+            time.sleep(0.001)
+        start, grant = made.serve(again)
+        self.assertEqual(start, 4096)
+        self.assertTrue(made.check_kv())
+
+    def test_a_flipped_byte_is_a_miss_in_compat_mode(self):
+        made = self.p2p_rig()
+        a = self.push_all_the_way(made, first_turn())
+        self.corrupt(made, a.block_hashes[20], chip=2, byte=3)
+        again, start, grant = self.returning_exact(made, a)
+        self.assertEqual(start, 0)
+        self.assertTrue(made.check_kv())
 
 
 class SlicedP2PTests(P2PCase):

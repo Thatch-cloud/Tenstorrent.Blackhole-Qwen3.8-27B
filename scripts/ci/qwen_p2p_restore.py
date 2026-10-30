@@ -1,4 +1,4 @@
-"""Peer-to-peer KV restore, host side (docs/tp4-p2p-restore.md): NVMe raw namespace -> O_DIRECT read into PCI p2pmem -> the card's BAR4 TLB window -> a staging buffer in card DRAM ->
+"""Peer-to-peer KV restore, host side (docs/tp4-p2p-host.md): NVMe raw namespace -> O_DIRECT read into PCI p2pmem -> the card's BAR4 TLB window -> a staging buffer in card DRAM ->
 a device op copies it into the paged KV cache. No host bounce. The device ops (ttnn.qwen_p2p_staging_alloc / _info, qwen_staging_checksum, qwen_write_blocks_from_staging) are the
 device-op branch's; the kernel side is the tt-kmd p2pmem patch (patches/tt-kmd-p2pmem); this module is everything the host does between them. Stdlib + numpy + ctypes.
 
@@ -65,7 +65,7 @@ CHECKSUM_MULTIPLIER = 2654435761
 CHECKSUM_BLOCK_WORDS = 1 << 20        # words weighed per numpy pass
 LAYOUT_CHIPMAJOR = 'chipmajor-v1'
 DEFAULT_THREADS = 8
-DEFAULT_STAGING_BYTES = 128 << 20     # two halves of 64 MiB per card
+DEFAULT_STAGING_BYTES = 64 << 20      # two halves of 32 MiB per card (the allocator keeps the same range in all 8 banks: 8 x this per card of DRAM)
 CANARY_BYTES = PAGE
 
 
@@ -290,13 +290,15 @@ def card_table(sysfs_class=SYSFS_CLASS):
 
 def locate_cards(infos, sysfs_class=SYSFS_CLASS):
     """[(device index, PCI address)] in mesh order, from the staging buffer's per-device records: `pci_bus_id` (a PCI address) or `pcie_device_id` / `tt_device_index` (the N of
-    /dev/tenstorrent/N), each resolved against the driver's own table. P2PUnavailable when a record names neither, or names a card the driver does not know."""
+    /dev/tenstorrent/N; the device-op extension's name for it is `pcie_device`), each resolved against the driver's own table. When a record gives both they must agree: the extension derives
+    pci_bus_id from a logical chip id, which is the driver's index only when every card is visible to the process. P2PUnavailable when a record names neither, or names a card the driver
+    does not know, or the two disagree."""
     table = card_table(sysfs_class)
     by_index = {index: bdf for bdf, index in table.items()}
     out = []
     for position, info in enumerate(infos):
         bdf = info.get('pci_bus_id')
-        index = info.get('pcie_device_id', info.get('tt_device_index'))
+        index = info.get('pcie_device_id', info.get('pcie_device', info.get('tt_device_index')))
         if bdf:
             try:
                 bdf = normalise_bdf(bdf)
@@ -304,6 +306,8 @@ def locate_cards(infos, sysfs_class=SYSFS_CLASS):
                 raise P2PUnavailable('device %d: %s' % (position, error))
             if bdf not in table:
                 raise P2PUnavailable('device %d is %s, which the driver does not list under %s' % (position, bdf, sysfs_class))
+            if index is not None and int(index) != table[bdf]:
+                raise P2PUnavailable('device %d: the staging record says PCI address %s and /dev/tenstorrent/%s, the driver says that address is /dev/tenstorrent/%d' % (position, bdf, index, table[bdf]))
             out.append((table[bdf], bdf))
         elif index is not None:
             if int(index) not in by_index:
@@ -372,6 +376,7 @@ class TtLink(object):
         self.aim = None
         self.info = None
         self.map_verified = False
+        self.endpoint_tried = 0
         self.closed = False
 
     @classmethod
@@ -389,6 +394,10 @@ class TtLink(object):
             self.fd = os.open(os.path.join(self.dev_dir, str(self.index)), os.O_RDWR | getattr(os, 'O_CLOEXEC', 0))
         except OSError as error:
             raise P2PUnavailable('cannot open %s/%d: %s' % (self.dev_dir, self.index, error))
+        seen = card_table(self.sysfs_class)
+        if seen.get(normalise_bdf(self.bdf)) != self.index:
+            raise P2PUnavailable('mesh device says PCI address %s, but %s/%d is a different card (the driver numbers %s as %s): the staging record names a card this process did not open' % (
+                self.bdf, self.dev_dir, self.index, self.bdf, seen.get(normalise_bdf(self.bdf))))
         self.info = read_p2pmem(self.index, self.bdf, self.sysfs_class, self.sysfs_pci)
         if self.info['core_available'] != self.info['core_size']:
             raise P2PUnavailable('the published slice of %s is already allocated (available %d of %d): another holder has it' % (self.bdf, self.info['core_available'], self.info['core_size']))
@@ -402,7 +411,7 @@ class TtLink(object):
         self._configure(noc['x'], noc['y'], noc['addr'], noc['ordering'])
         self._pin()
         self._map_cpu_window()
-        self.selftest()
+        self._prove_window(staging.get('noc_endpoints'))
         self._map_p2pmem()
         if require_verified and not self.map_verified:
             raise P2PUnavailable('the p2pmem mapping of %s could not be checked against the BAR (/proc/self/pagemap shows no physical addresses without CAP_SYS_ADMIN): the DMA writes wherever the '
@@ -472,6 +481,39 @@ class TtLink(object):
             raise P2PUnavailable('cannot map TLB window %d of %s: %s' % (self.window_id, self.bdf, error))
 
     # -- the canary --------------------------------------------------------------------------------
+    def _prove_window(self, endpoints):
+        """The canary at the staging bank's first NOC endpoint; if it fails, at the bank's other endpoints in the order the device-op extension lists them (whether the three endpoints of a
+        channel are interchangeable for a PCIe window is a hardware fact the source cannot show). The window is left aimed at the first that stores. The canary cannot tell WHICH bank an
+        endpoint is (the checksum does); it tells that the window reaches memory."""
+        tried = []
+        candidates = [(self.aim['noc']['x'], self.aim['noc']['y'])]
+        for item in endpoints or ():
+            try:
+                pair = (int(item[0]), int(item[1])) if not isinstance(item, dict) else (int(item.get('x', item.get('noc_x'))), int(item.get('y', item.get('noc_y'))))
+            except (TypeError, ValueError, KeyError, IndexError):
+                continue
+            if pair not in candidates and all(0 <= value < NOC_COORDINATE_LIMIT for value in pair):
+                candidates.append(pair)
+        failure = None
+        for x, y in candidates:
+            if (x, y) != (self.aim['noc']['x'], self.aim['noc']['y']):
+                self._configure(x, y, self.aim['noc']['addr'], self.aim['noc']['ordering'])
+                self.aim['noc']['x'], self.aim['noc']['y'] = x, y
+            tried.append((x, y))
+            try:
+                self.selftest()
+                self.endpoint_tried = len(tried)
+                return
+            except P2PUnavailable as error:
+                failure = error
+        raise P2PUnavailable('%s (tried %d NOC endpoint(s) of the staging bank)' % (failure, len(tried)))
+
+    def flush(self, staging_offset=0):
+        """One non-posted read through the window, after the drive's completion and before the first device op over the range: a posted write finishing at the NVMe is not an ordering point on
+        the card's NOC and DRAM path, and a read that comes back is the usual flush. It does not strictly order another requester's writes, so the checksum stays the arbiter."""
+        start = self.aim['window_offset'] + int(staging_offset)
+        return bytes(self.cpu[start:start + 8])
+
     def selftest(self):
         """Before any DMA: a pattern written through the window reads back from it at both ends of the staging buffer, and the two ends do not alias. It shows the window is aimed at
         something that stores, not at what. It writes only inside the staging buffer (nothing is staged between restores). Never call it while a read is in flight."""
@@ -561,21 +603,44 @@ class TtLink(object):
 # ================================================================================================
 # The device ops
 # ================================================================================================
+def _accepts(function, name):
+    """Whether a callable takes a parameter called `name`: from its signature, else from its docstring (a pybind11 function states its signature there). False when neither says."""
+    try:
+        import inspect
+
+        return name in inspect.signature(function).parameters
+    except (TypeError, ValueError):
+        pass
+    return name in str(getattr(function, '__doc__', None) or '')
+
+
 class StagingApi(object):
-    """The device-op branch's ops behind one adapter (a ttnn module or a fake):
-         qwen_p2p_staging_alloc(mesh, size) -> handle           qwen_p2p_staging_info(handle) -> [{device_id, pci_bus_id | pcie_device_id, dram_bank, noc_x, noc_y, address, size}] per device
-         qwen_staging_checksum(handle, byte_offset, length, count) -> per device `count` uint64: the checksums of the consecutive ranges [byte_offset + i * length, + length)
-         qwen_write_blocks_from_staging(cache, handle, byte_offset, blocks, row_stride) -> row i of device d's [len(blocks), slice_bytes] = staging_d[byte_offset + i * row_stride : + slice_bytes]
-       and ttnn.synchronize_device(mesh)."""
+    """The device-op extension's ops (qwen_kv_read version 3, as built by the device-op branch) behind one adapter (a ttnn module or a fake):
+         qwen_p2p_staging_alloc(mesh, size_bytes, bank=0) -> handle     qwen_p2p_staging_info(handle) -> one dict per device (see StagingApi.info)
+         qwen_staging_checksum(handle, byte_offset, length) -> [int per device], blocking, ONE range
+         qwen_write_blocks_from_staging(cache, handle, byte_offset, blocks) -> row i of device d's [len(blocks), slice_bytes] = staging_d[byte_offset + i * slice_bytes : + slice_bytes], enqueued
+       and ttnn.synchronize_device(mesh).
+       The host lays a chunk out BLOCK-MAJOR (block j's whole shard at j * shard_bytes: that is what one aligned read per block and card can produce), so cache tensor t's rows are
+       `shard_bytes` apart, not `slice_bytes`; the as-built copy op takes only contiguous rows. Two optional extensions take that off the host:
+         qwen_write_blocks_from_staging(..., row_stride=)   row i at byte_offset + i * row_stride
+         qwen_staging_checksum(..., count=)                  `count` consecutive ranges of `length`, one value each: [[int] * count] per device
+       When the ops have them (`strided`, `ranged`: found from their signatures, or given) one call does a chunk's tensor / a chunk's checksums. When they do not (COMPAT MODE) the host calls
+       the copy once per block and tensor, and the checksum once per block: correct, and slow (n x 32 launches for n blocks; n blocking readbacks). P3a prints which mode it ran in."""
 
     REQUIRED = ('qwen_p2p_staging_alloc', 'qwen_p2p_staging_info', 'qwen_staging_checksum', 'qwen_write_blocks_from_staging')
 
-    def __init__(self, ttnn, mesh, tensors):
+    def __init__(self, ttnn, mesh, tensors, strided=None, ranged=None):
         missing = [name for name in self.REQUIRED if not callable(getattr(ttnn, name, None))]
         if missing:
             raise P2PUnavailable('this ttnn lacks %s (the device-op extension is older than the peer-to-peer restore)' % ', '.join(missing))
         self.ttnn, self.mesh, self.tensors = ttnn, mesh, list(tensors)
         self.handle = None
+        self.strided = _accepts(ttnn.qwen_write_blocks_from_staging, 'row_stride') if strided is None else bool(strided)
+        self.ranged = _accepts(ttnn.qwen_staging_checksum, 'count') if ranged is None else bool(ranged)
+
+    @property
+    def mode(self):
+        return 'strided' if self.strided and self.ranged else ('compat' if not self.strided and not self.ranged else 'half-compat')
 
     def alloc(self, size):
         try:
@@ -591,9 +656,16 @@ class StagingApi(object):
             raise P2PUnavailable('qwen_p2p_staging_info failed: %s: %s' % (type(error).__name__, error))
 
     def checksums(self, byte_offset, length, count, chips):
-        """[[int] * count] per device. Whatever the op returns (lists, a numpy array, a torch tensor) is read as a (chips, count) matrix of unsigned 64-bit integers."""
+        """[[int] * count] per device. Whatever the op returns (lists, a numpy array, a torch tensor) is read as a (chips, count) matrix of unsigned 64-bit integers. Without the `count`
+        extension the ranges are asked for one at a time and the columns put together."""
+        if not self.ranged and count != 1:
+            columns = [self.checksums(byte_offset + index * length, length, 1, chips) for index in range(count)]
+            return [[column[chip][0] for column in columns] for chip in range(chips)]
         try:
-            raw = self.ttnn.qwen_staging_checksum(self.handle, int(byte_offset), int(length), int(count))
+            if self.ranged:
+                raw = self.ttnn.qwen_staging_checksum(self.handle, int(byte_offset), int(length), count=int(count))
+            else:
+                raw = self.ttnn.qwen_staging_checksum(self.handle, int(byte_offset), int(length))
         except Exception as error:
             raise P2PDeviceError('qwen_staging_checksum failed: %s: %s' % (type(error).__name__, error))
         try:
@@ -608,11 +680,27 @@ class StagingApi(object):
             raise P2PDeviceError('qwen_staging_checksum answered %s, wanted %d devices x %d checksums' % ([len(row) for row in matrix], chips, count))
         return matrix
 
-    def write(self, tensor_index, byte_offset, block_ids, row_stride):
+    def write(self, tensor_index, byte_offset, block_ids, row_stride, slice_bytes=None):
+        """Copy rows `row_stride` apart (starting at byte_offset) into the cache tensor's `block_ids`. `slice_bytes` is the row length: when it equals the stride one launch does it, whatever
+        the extension; when the ops lack `row_stride` it is one launch per block."""
+        ids = [int(block) for block in block_ids]
         try:
-            self.ttnn.qwen_write_blocks_from_staging(self.tensors[tensor_index], self.handle, int(byte_offset), [int(block) for block in block_ids], row_stride=int(row_stride))
+            if slice_bytes is None or int(row_stride) == int(slice_bytes):
+                self.ttnn.qwen_write_blocks_from_staging(self.tensors[tensor_index], self.handle, int(byte_offset), ids)
+            elif self.strided:
+                self.ttnn.qwen_write_blocks_from_staging(self.tensors[tensor_index], self.handle, int(byte_offset), ids, row_stride=int(row_stride))
+            else:
+                for position, block in enumerate(ids):
+                    self.ttnn.qwen_write_blocks_from_staging(self.tensors[tensor_index], self.handle, int(byte_offset) + position * int(row_stride), [block])
         except Exception as error:
             raise P2PDeviceError('qwen_write_blocks_from_staging (tensor %d) failed: %s: %s' % (tensor_index, type(error).__name__, error))
+
+    def release(self):
+        """Give the staging buffer back (the extension's handle must be released before the mesh is closed)."""
+        handle, self.handle = self.handle, None
+        release = getattr(handle, 'release', None)
+        if callable(release):
+            release()
 
     def sync(self):
         try:
@@ -717,7 +805,7 @@ class Stream(object):
     def _submit(self, chunk, half):
         engine = self.engine
         chunk.half = half
-        chunk.offset = half * engine.half_bytes
+        chunk.offset = engine.base + half * engine.half_bytes          # the device ops' byte offset in the staging range; the card's mapping starts at engine.base
         total = len(chunk.pending) * len(self.chips)
         chunk.todo = total
         chunk.reap = engine.reap
@@ -780,6 +868,10 @@ class Stream(object):
                 raise P2PError('block %d: %s' % (position, error))
         began = time.perf_counter()
         chunk.ops = True
+        for chip in self.chips:
+            flush = getattr(engine.links[chip], 'flush', None)
+            if flush is not None:
+                flush(chunk.offset - engine.base)       # (one non-posted read through the window per card: the drive's posted writes are in before the first device read)
         bad = self._compare(chunk, wanted)
         if bad:
             stats['mismatch_retries'] += 1
@@ -809,7 +901,7 @@ class Stream(object):
         began = time.perf_counter()
         chunk.ops = True
         for tensor in range(layout.caches):
-            engine.api.write(tensor, chunk.offset + tensor * layout.slice_bytes, block_ids, layout.shard_bytes)
+            engine.api.write(tensor, chunk.offset + tensor * layout.slice_bytes, block_ids, layout.shard_bytes, layout.slice_bytes)
         engine.stats['write_ms'] += (time.perf_counter() - began) * 1000.0
         engine.stats['chunks'] += 1
         engine.stats['blocks'] += len(chunk.pending)
@@ -869,17 +961,27 @@ class P2PEngine(object):
             raise P2PUnavailable('a staging buffer of %d bytes cannot hold two shards of %d' % (staging_bytes, layout.shard_bytes))
         self.half_bytes = self.chunk_blocks * layout.shard_bytes
         self.staging_bytes = self.half_bytes * self.halves
+        self.base = 0                          # where the O_DIRECT objects start inside the staging range: its first 4096-aligned byte (the range itself is only 64-byte aligned)
         try:
-            api.alloc(self.staging_bytes)
+            api.alloc(self.staging_bytes + PAGE)                   # (a page more, so that the aligned part still holds every half)
             infos = api.info()
             if len(infos) != layout.chips:
                 raise P2PUnavailable('the staging buffer answers for %d devices, the KV block is split over %d' % (len(infos), layout.chips))
+            bases = set()
             for position, info in enumerate(infos):
                 for name in ('noc_x', 'noc_y', 'address', 'size'):
                     if info.get(name) is None:
                         raise P2PUnavailable('the staging record of device %d lacks %s' % (position, name))
-                if int(info['size']) < self.staging_bytes:
-                    raise P2PUnavailable('device %d staged %d bytes, %d were asked for' % (position, int(info['size']), self.staging_bytes))
+                lead = info.get('aligned_4k_offset')
+                lead = (-int(info['address'])) % PAGE if lead is None else int(lead)
+                usable = info.get('aligned_4k_size')
+                usable = (max(0, int(info['size']) - lead) // PAGE) * PAGE if usable is None else int(usable)
+                if (int(info['address']) + lead) % PAGE or usable < self.staging_bytes:
+                    raise P2PUnavailable('device %d staged %d bytes (%d usable from its first 4096-aligned byte), %d were asked for' % (position, int(info['size']), usable, self.staging_bytes))
+                bases.add(lead)
+            if len(bases) != 1:
+                raise P2PUnavailable('the staging range starts at different offsets on the devices (%s): the device ops take one byte offset for all' % sorted(bases))
+            self.base = bases.pop()
             self.infos = infos
             self.cards = locate_cards(infos, sysfs_class) if link_factory is None else [(position, info.get('pci_bus_id')) for position, info in enumerate(infos)]
             if expected:
@@ -887,7 +989,7 @@ class P2PEngine(object):
                 if have != set(expected):
                     raise P2PUnavailable('the mesh runs on %s, the configuration names %s' % (sorted(have), sorted(expected)))
             for position, (index, bdf) in enumerate(self.cards):
-                staging = dict(infos[position], size=self.staging_bytes)
+                staging = dict(infos[position], address=int(infos[position]['address']) + self.base, size=self.staging_bytes)
                 if link_factory is not None:
                     link = link_factory(position, index, bdf, staging, ordering)
                 else:
@@ -905,7 +1007,7 @@ class P2PEngine(object):
         view = None
         try:
             if chunk.error is None and not self.closed:
-                view = self.links[chip].view(chunk.offset + slot * self.layout.shard_bytes, self.layout.shard_bytes)
+                view = self.links[chip].view(chunk.offset - self.base + slot * self.layout.shard_bytes, self.layout.shard_bytes)
                 self.reader(entry.offset + chip * self.layout.shard_bytes, view)
         except BaseException as caught:         # (the chunk records it; the scheduler thread raises)
             error = caught
@@ -989,6 +1091,7 @@ class P2PEngine(object):
     def describe(self):
         link = self.links[0] if self.links else None
         return dict(cards=len(self.links), threads=self.threads, staging_bytes=self.staging_bytes, chunk_blocks=self.chunk_blocks, shard_bytes=self.layout.shard_bytes,
+                    device_ops=getattr(self.api, 'mode', 'unknown'), staging_base=self.base,
                     mapping_verified=int(all(getattr(item, 'map_verified', False) for item in self.links)) if self.links else 0, window=getattr(link, 'window_id', None))
 
     def close(self, wait_s=None):
@@ -1010,6 +1113,10 @@ class P2PEngine(object):
                     link.close()
             except Exception:
                 pass
+        try:
+            self.api.release()
+        except Exception as error:
+            self.log('p2p engine: the staging buffer was not released (%s: %s)', type(error).__name__, error)
 
 
 def _make_pool(threads):

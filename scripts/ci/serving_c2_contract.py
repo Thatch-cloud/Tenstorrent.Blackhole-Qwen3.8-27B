@@ -135,7 +135,7 @@ PREFIX_NVME_NAMES = ('QWEN_PREFIX_NVME', 'QWEN_PREFIX_NVME_DEVICE', 'QWEN_PREFIX
                      'QWEN_PREFIX_NVME_THROUGH_BLOCKS', 'QWEN_PREFIX_NVME_THROUGH_IDLE_S', 'QWEN_PREFIX_NVME_RETENTION_ACK', 'QWEN_PREFIX_NVME_ALLOW_ON_ZERO_RETENTION',
                      'QWEN_PREFIX_NVME_DRAIN_S', 'QWEN_PREFIX_NVME_REQUIRE_SED', 'QWEN_PREFIX_NVME_SED_STATUS', 'QWEN_PREFIX_NVME_P2P', 'QWEN_PREFIX_NVME_P2P_THREADS',
                      'QWEN_PREFIX_NVME_P2P_STAGING_MIB', 'QWEN_PREFIX_NVME_P2PMEM', 'QWEN_PREFIX_NVME_P2P_ALLOW_UNVERIFIED_MAP')
-# The peer-to-peer restore (docs/tp4-p2p-restore.md) is a gate's own until a card has qualified it: promoting it is a contract change (drop it here, add it to NVME_WAIVABLE_LEVERS).
+# The peer-to-peer restore (docs/tp4-p2p-host.md) is a gate's own until a card has qualified it: promoting it is a contract change (drop it here, add it to NVME_WAIVABLE_LEVERS).
 PREFIX_NVME_GATE_ONLY = ('QWEN_PREFIX_NVME_AUDIT', 'QWEN_PREFIX_NVME_FORMAT', 'QWEN_PREFIX_NVME_CMD_DIR', 'QWEN_PREFIX_NVME_ALLOW_ON_ZERO_RETENTION', 'QWEN_PREFIX_NVME_P2P',
                           'QWEN_PREFIX_NVME_P2P_ALLOW_UNVERIFIED_MAP')
 # Names whose OFF value is a gate's own: the at-rest encryption check (QWEN_PREFIX_NVME_REQUIRE_SED) is on by default and a traffic profile may name it only at 1.

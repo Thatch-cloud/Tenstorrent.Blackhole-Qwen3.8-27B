@@ -88,13 +88,13 @@ Owner decision (~04:00Z, 2026-10-21): "deploy shouldn't clear warm cache". The f
 
 `qwen_kv_nvme.RestoreBackend` has two methods and a flag:
 
-| | `host` (built) | `p2p` (built, `QWEN_PREFIX_NVME_P2P=1`; `docs/tp4-p2p-restore.md`) |
+| | `host` (built) | `p2p` (built, `QWEN_PREFIX_NVME_P2P=1`; `docs/tp4-p2p-host.md`) |
 | --- | --- | --- |
 | `direct` | `False` | `True` |
 | `read_to_host(tier, entries, views)` | NVMe -> the slab slots the caller reserved (reader threads, merged runs, digest checks) | - |
 | `restore_to_device(tier, entries, block_ids, io)` | - | NVMe -> the device blocks the pool allocated, no host copy |
 
-`TierHooks` asks `backend.direct`: a host backend promotes the NVMe-resident blocks to host records and the existing upload writes them; a direct backend takes the NVMe-resident blocks to the device blocks the pool allocated for them (`TierHooks.load_direct`; the host-resident blocks are written as before; the sliced restore is not offered to a direct backend and falls back to the whole restore). `load_direct` is tested with an in-memory double (`test_qwen_kv_nvme.DirectBackendTests`), so the seam a P2P backend plugs into is exercised. `QWEN_PREFIX_NVME_RESTORE=p2p` is refused (the flag is `QWEN_PREFIX_NVME_P2P=1`, which keeps the host backend as its fallback). The P2P backend, its layout (`chipmajor-v1`: the drive holds each block chip-major so a card can read its own share), its checksums and its sliced restore are in `docs/tp4-p2p-restore.md`; this section's seam is what it plugs into.
+`TierHooks` asks `backend.direct`: a host backend promotes the NVMe-resident blocks to host records and the existing upload writes them; a direct backend takes the NVMe-resident blocks to the device blocks the pool allocated for them (`TierHooks.load_direct`; the host-resident blocks are written as before; the sliced restore is not offered to a direct backend and falls back to the whole restore). `load_direct` is tested with an in-memory double (`test_qwen_kv_nvme.DirectBackendTests`), so the seam a P2P backend plugs into is exercised. `QWEN_PREFIX_NVME_RESTORE=p2p` is refused (the flag is `QWEN_PREFIX_NVME_P2P=1`, which keeps the host backend as its fallback). The P2P backend, its layout (`chipmajor-v1`: the drive holds each block chip-major so a card can read its own share), its checksums and its sliced restore are in `docs/tp4-p2p-host.md`; this section's seam is what it plugs into.
 
 ## 5. Flags
 
@@ -110,8 +110,8 @@ The tier is off unless `QWEN_PREFIX_NVME=1`; every value is strict (plain digits
 | `QWEN_PREFIX_NVME_MAX_BYTES` | 0 (all) | most bytes the tier holds (at least 1 MiB) |
 | `QWEN_PREFIX_NVME_FREE_FLOOR_BYTES` | 5% of the data region | bytes of the data region never used |
 | `QWEN_PREFIX_NVME_VERIFY` | `sample` | digest check at restore: `sample`, `all`, `off` |
-| `QWEN_PREFIX_NVME_RESTORE` | `host` | `host`; `p2p` is refused (the flag is `QWEN_PREFIX_NVME_P2P`, `docs/tp4-p2p-restore.md`) |
-| `QWEN_PREFIX_NVME_P2P` | off | **gate only.** `1`: the peer-to-peer restore NVMe -> card (and the chip-major layout, a new fingerprint); knobs `..._P2P_THREADS` (8), `..._P2P_STAGING_MIB` (128), `..._P2PMEM` (PCI addresses; optional) |
+| `QWEN_PREFIX_NVME_RESTORE` | `host` | `host`; `p2p` is refused (the flag is `QWEN_PREFIX_NVME_P2P`, `docs/tp4-p2p-host.md`) |
+| `QWEN_PREFIX_NVME_P2P` | off | **gate only.** `1`: the peer-to-peer restore NVMe -> card (and the chip-major layout, a new fingerprint); knobs `..._P2P_THREADS` (8), `..._P2P_STAGING_MIB` (64), `..._P2PMEM` (PCI addresses; optional) |
 | `QWEN_PREFIX_NVME_QUEUE_BYTES` | 2 GiB | bytes waiting for the writer; also the number of spare slab slots mapped (resident only while in use) |
 | `QWEN_PREFIX_NVME_THREADS` | 4 | reader and hash threads |
 | `QWEN_PREFIX_NVME_SPILL` | `through` | `through` (the default): a finished session is copied toward the drive straight away, and every record entering the host tier is queued. `evict`: write only on host-tier eviction (the specification's first form; an explicit choice) |
@@ -266,7 +266,7 @@ The override is a gate's own name: a traffic profile cannot carry it, and an inh
 
 ## 11. The peer-to-peer follow-up (NVMe -> card, no host bounce)
 
-**Built on `tp4/p2p-host`: see `docs/tp4-p2p-restore.md`.** What follows is the original contract; where they differ (the object is chip-major, the staging window is whatever the device-op branch allocates, the integrity check is a per-shard device checksum), that note is the current one.
+**Built on `tp4/p2p-host`: see `docs/tp4-p2p-host.md`.** What follows is the original contract; where they differ (the object is chip-major, the staging window is whatever the device-op branch allocates, the integrity check is a per-shard device checksum), that note is the current one.
 
 Proven on 2026-10-21, outside this repository: a read from the namespace into a card's BAR4 window through the patched kernel driver at 6.95 GB/s, byte-exact. A usable window is about 3 GiB per card at a 1 GiB offset (the top of a 4 GiB window failed its self-test). What `RestoreBackend` with `direct = True` (`P2PBackend`) needs, as written in its docstring:
 

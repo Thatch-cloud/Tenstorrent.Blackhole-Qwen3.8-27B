@@ -27,7 +27,7 @@ RAW NVMe namespace (qwen_nvme_store: no filesystem, a journal, O_DIRECT, 4 KiB-a
   AT REST  The drive must be an Opal self-encrypting drive with locking enabled and currently unlocked (QWEN_PREFIX_NVME_REQUIRE_SED, on by default; 0 is a gate's own): sed_check asks
            the drive (IOC_OPAL_DISCOVERY, read-only) or, where the container lacks CAP_SYS_ADMIN, reads the status file the host's boot unit writes; anything it cannot show is
            NOT encrypted and the tier never opens the drive (one REFUSED line, nvme_refused_not_encrypted). TRIM of freed extents is on by default (QWEN_PREFIX_NVME_DISCARD).
-  BACKENDS RestoreBackend: 'host' and 'p2p' (QWEN_PREFIX_NVME_P2P=1, docs/tp4-p2p-restore.md: the drive's O_DIRECT read lands in the cards' staging buffers through the published BAR4
+  BACKENDS RestoreBackend: 'host' and 'p2p' (QWEN_PREFIX_NVME_P2P=1, docs/tp4-p2p-host.md: the drive's O_DIRECT read lands in the cards' staging buffers through the published BAR4
            window, a device checksum is compared with the one stored at spill, and a device op copies the bytes into the KV blocks; the host backend is its fallback). TierHooks asks
            backend.direct: a direct backend restores NVMe-resident blocks straight to the freshly allocated device blocks instead of through the host (TierHooks.load_direct). With the
            flag on the drive holds each block CHIP-MAJOR ([chip][cache][slice], layout 'chipmajor-v1', its own fingerprint): chip d's share is one aligned run a card can read alone.
@@ -94,7 +94,7 @@ ENV_P2P_UNVERIFIED = 'QWEN_PREFIX_NVME_P2P_ALLOW_UNVERIFIED_MAP'
 NAMES = (ENV_SWITCH, ENV_DEVICE, ENV_TTL_S, ENV_MAX_AGE_S, ENV_MAX_BYTES, ENV_VERIFY, ENV_RESTORE, ENV_FREE_FLOOR, ENV_QUEUE, ENV_THREADS, ENV_FORMAT, ENV_DISCARD,
          ENV_COMPAT, ENV_CMD_DIR, ENV_AUDIT, ENV_SPILL, ENV_THROUGH_BLOCKS, ENV_THROUGH_IDLE_S, ENV_RETENTION_ACK, ENV_ALLOW_ZERO_RETENTION, ENV_DRAIN_S, ENV_REQUIRE_SED, ENV_SED_STATUS,
          ENV_P2P, ENV_P2P_THREADS, ENV_P2P_STAGING_MIB, ENV_P2PMEM, ENV_P2P_UNVERIFIED)
-# What only a gate sets (the contract refuses them on a traffic profile even under the owner's waiver). The peer-to-peer restore is a gate's until a card has qualified it (docs/tp4-p2p-restore.md);
+# What only a gate sets (the contract refuses them on a traffic profile even under the owner's waiver). The peer-to-peer restore is a gate's until a card has qualified it (docs/tp4-p2p-host.md);
 # its three knobs are refused as inert unless it is on, so they cannot reach a traffic profile without it.
 GATE_ONLY = (ENV_AUDIT, ENV_FORMAT, ENV_CMD_DIR, ENV_ALLOW_ZERO_RETENTION, ENV_P2P, ENV_P2P_UNVERIFIED)
 # Names whose OFF value is the gate's own: a traffic profile may carry the name (at 1, or by default) but never 0. The encryption check is on unless a gate turns it off.
@@ -131,9 +131,9 @@ HEALTH_EVERY_S = 2.0                 # how often poll() looks at the device's no
 # errnos that mean the device itself is gone (a failing write with one of these latches the tier at once instead of after three strikes)
 GONE_ERRNOS = (errno.ENODEV, errno.ENXIO, errno.ESHUTDOWN, errno.ENOMEDIUM)
 LAYOUT = 'packed-v1'                 # the on-disk payload layout: the host tier's raw packed block ([cache tensor][chip][slice]); a new layout is a new fingerprint
-LAYOUT_CHIPMAJOR = 'chipmajor-v1'    # the same bytes as [chip][cache tensor][slice] (QWEN_PREFIX_NVME_P2P=1): chip d's share of a block is one 4 KiB-aligned run (docs/tp4-p2p-restore.md)
+LAYOUT_CHIPMAJOR = 'chipmajor-v1'    # the same bytes as [chip][cache tensor][slice] (QWEN_PREFIX_NVME_P2P=1): chip d's share of a block is one 4 KiB-aligned run (docs/tp4-p2p-host.md)
 DEFAULT_P2P_THREADS = 8              # reads in flight over all cards
-DEFAULT_P2P_STAGING_MIB = 128        # staging buffer per card: two halves
+DEFAULT_P2P_STAGING_MIB = 64         # staging buffer per card: two halves of 32 MiB (the allocator keeps the range in all 8 banks: 8 times this per card)
 P2P_BATCH_BYTES = 128 << 20          # a chip-major spill batch is converted in a second buffer of its size: keep batches smaller than the 512 MiB of the host layout
 P2P_READ_GROUP = 16                  # blocks a chip-major host read converts at a time (the scratch it needs is this many blocks)
 P2P_STRIKES = 3                      # consecutive failed peer-to-peer restores (or checksum mismatches on bytes the host path proves good) that latch the path off
@@ -287,7 +287,7 @@ def parse(env):
     if restore not in RESTORE_BACKENDS:
         problems.append('%s=%r must be one of %s' % (ENV_RESTORE, restore, ', '.join(RESTORE_BACKENDS)))
     elif restore == 'p2p':
-        problems.append('%s=p2p is not a setting: the peer-to-peer restore is %s=1, which keeps the host backend as its fallback (docs/tp4-p2p-restore.md)' % (ENV_RESTORE, ENV_P2P))
+        problems.append('%s=p2p is not a setting: the peer-to-peer restore is %s=1, which keeps the host backend as its fallback (docs/tp4-p2p-host.md)' % (ENV_RESTORE, ENV_P2P))
     plan.restore = restore
     floor = env.get(ENV_FREE_FLOOR)
     plan.free_floor_bytes = None if floor in (None, '') else _digits(env, ENV_FREE_FLOOR, 0, 0, 1 << 60, problems)
@@ -328,7 +328,7 @@ def parse(env):
         problems.append('%s=1 is required with %s=1: the tier keeps prompt-derived KV on a drive for up to its TTL (default 1 day; all tenants; owner decisions 2026-10-21), which a '
                         'node that advertises zero-retention must not do, and a serving process cannot tell what its node advertises' % (ENV_RETENTION_ACK, ENV_SWITCH))
     plan.allow_zero_retention = _switch(env, ENV_ALLOW_ZERO_RETENTION, problems)
-    # The peer-to-peer restore (docs/tp4-p2p-restore.md): off unless named. On, the drive holds the blocks chip-major (a new layout in the fingerprint) and the restores go NVMe -> card.
+    # The peer-to-peer restore (docs/tp4-p2p-host.md): off unless named. On, the drive holds the blocks chip-major (a new layout in the fingerprint) and the restores go NVMe -> card.
     plan.p2p = _switch(env, ENV_P2P, problems)
     plan.p2p_threads = _digits(env, ENV_P2P_THREADS, DEFAULT_P2P_THREADS, 1, 64, problems)
     plan.p2p_staging_bytes = _digits(env, ENV_P2P_STAGING_MIB, DEFAULT_P2P_STAGING_MIB, 2, 4096, problems) << 20
@@ -868,7 +868,7 @@ class HostBounceBackend(RestoreBackend):
 
 
 class P2PBackend(HostBounceBackend):
-    """NVMe -> card with no host copy (QWEN_PREFIX_NVME_P2P=1; docs/tp4-p2p-restore.md). `direct` while the path is usable; the host path (read_to_host, inherited) is always there, and is
+    """NVMe -> card with no host copy (QWEN_PREFIX_NVME_P2P=1; docs/tp4-p2p-host.md). `direct` while the path is usable; the host path (read_to_host, inherited) is always there, and is
     what any failure falls back to, so a restore is never worse than a miss:
       * the engine (qwen_p2p_restore.P2PEngine) reads each card's share of every block from the drive into the card's staging buffer (O_DIRECT into the published p2pmem), checks it on
         the card against the checksums recorded at spill, and only then asks the device to copy it into the KV blocks the pool allocated;
@@ -1385,8 +1385,11 @@ class NvmeTier(object):
             return
         self.backend = P2PBackend(engine, self)
         info = engine.describe()
-        self.log('nvme tier p2p on cards=%d threads=%d staging_bytes=%d chunk_blocks=%d shard_bytes=%d mapping_verified=%d window=%s', info['cards'], info['threads'], info['staging_bytes'],
-                 info['chunk_blocks'], info['shard_bytes'], info['mapping_verified'], info['window'])
+        self.log('nvme tier p2p on cards=%d threads=%d staging_bytes=%d chunk_blocks=%d shard_bytes=%d mapping_verified=%d window=%s device_ops=%s', info['cards'], info['threads'],
+                 info['staging_bytes'], info['chunk_blocks'], info['shard_bytes'], info['mapping_verified'], info['window'], info.get('device_ops'))
+        if info.get('device_ops') != 'strided':
+            self.log('nvme tier p2p: the device ops are the contiguous-row form (no row_stride / count): every restore costs one copy launch per block and cache tensor and one checksum readback per block '
+                     '(compat mode, correct and slow); the extension\'s row_stride and count make a chunk a few launches')
 
     def _forget(self, entries):
         """Entries that failed their digest: out of the index at once, their journal record and extents on the writer thread."""

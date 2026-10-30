@@ -12,7 +12,7 @@ name: Qwen C2 serving image
 #            64-row block against its one-tile calls, bit for bit, then the tile-split wrapper): rs-tile-spike.json
 #            C2_FABRIC_PROBE=kvread runs scripts/ci/tp4_kv_read_probe.py (the prefix audit's region read, ttnn.qwen_read_blocks, against the
 #            whole-cache read byte for byte on the pool-sized cache; KV_READ_PROBE verdict=PASS|FAIL): kv-read-probe.json
-#            C2_FABRIC_PROBE=p2p runs scripts/ci/tp4_p2p_probe.py, P3a (docs/tp4-p2p-restore.md section 8: the cache drive's identity and R1's readings, then NVMe ->
+#            C2_FABRIC_PROBE=p2p runs scripts/ci/tp4_p2p_probe.py, P3a (docs/tp4-p2p-host.md section 8: the cache drive's identity and R1's readings, then NVMe ->
 #            the cards' staging buffers -> the KV caches, one card first, byte for byte, with a negative arm; P3A verdict=PASS|FAIL|NOT-MEASURED): p2p-p3a.json.
 #            The drive and the cards come from a private file on the runner (P2P_ENV_FILE), never from the repository.
 #   cardm  - a single-card qualification harness (C2_CARDM_HARNESS, e.g. optimisation/ttnn-op/k64j/run_card_b.sh)
@@ -483,7 +483,7 @@ jobs:
           if [ "${PROBE:-fabric}" = kvread ] && [ -s /home/thatch/opgraft-KVR/qwen_kv_read.so ]; then
             kvmount=(-v /home/thatch/opgraft-KVR:/opt/qwen-c2/kvr-mount:ro -e QWEN_KVREAD_DIR=/opt/qwen-c2/kvr-mount)
           fi
-          # p2p is P3a (docs/tp4-p2p-restore.md section 8): the peer-to-peer restore against the cache drive, on the cards. WHICH drive and WHICH cards come from a private file on this
+          # p2p is P3a (docs/tp4-p2p-host.md section 8): the peer-to-peer restore against the cache drive, on the cards. WHICH drive and WHICH cards come from a private file on this
           # runner, P2P_ENV_FILE (KEY=VALUE lines, only P2P_DRIVE_BY_ID, P2P_DRIVE_MODEL, P2P_DRIVE_SERIAL and P2P_CARDS), never from the repository, and never into this log (it is public
           # when the repository is). The drive's identity is checked here before docker (the by-id name of the configured model and serial must resolve to a block device) and again
           # inside by the probe (the by-id link and the kernel's own model and serial), before the first byte is written; the cards' p2pmem pools must be whole. The drive's node and the
