@@ -12,8 +12,8 @@ name: Qwen C2 serving image
 #            64-row block against its one-tile calls, bit for bit, then the tile-split wrapper): rs-tile-spike.json
 #            C2_FABRIC_PROBE=kvread runs scripts/ci/tp4_kv_read_probe.py (the prefix audit's region read, ttnn.qwen_read_blocks, against the
 #            whole-cache read byte for byte on the pool-sized cache; KV_READ_PROBE verdict=PASS|FAIL): kv-read-probe.json
-#            C2_FABRIC_PROBE=p2p runs scripts/ci/tp4_p2p_probe.py, P3a (docs/tp4-p2p-host.md section 8: the cache drive's identity and R1's readings, then NVMe ->
-#            the cards' staging buffers -> the KV caches, one card first, byte for byte, with a negative arm; P3A verdict=PASS|FAIL|NOT-MEASURED): p2p-p3a.json.
+#            C2_FABRIC_PROBE=p2p-restore runs scripts/ci/tp4_p2p_restore_probe.py, P3a (docs/tp4-p2p-host.md section 8: the cache drive's identity and R1's readings, then NVMe ->
+#            the cards' staging buffers -> the KV caches, one card first, byte for byte, with a negative arm; P3A verdict=PASS|FAIL|NOT-MEASURED): p2p-restore-p3a.json.
 #            The drive and the cards come from a private file on the runner (P2P_ENV_FILE), never from the repository.
 #   cardm  - a single-card qualification harness (C2_CARDM_HARNESS, e.g. optimisation/ttnn-op/k64j/run_card_b.sh)
 #            on card M alone, card B being reserved for another project: QUAL_CARD=card M, ALLOW_SERVING_CARD=1, after
@@ -450,7 +450,7 @@ jobs:
             rs-tile) script=tp4_rs_tile_spike.py; report=rs-tile-spike.json ;;
             mr) script=tp4_mr_probe.py; report=mr-probe.json ;;
             kvread) script=tp4_kv_read_probe.py; report=kv-read-probe.json ;;
-            p2p) script=tp4_p2p_probe.py; report=p2p-p3a.json ;;
+            p2p-restore) script=tp4_p2p_restore_probe.py; report=p2p-restore-p3a.json ;;
             ccl-sweep) script=tp4_ccl_sweep_probe.py; report=ccl-sweep.json ;;
             ccl-sweep-safe) script=tp4_ccl_sweep_probe.py; report=ccl-sweep.json; probe_args="--skip-probe-only" ;;
             ccl-sweep-core) script=tp4_ccl_sweep_probe.py; report=ccl-sweep.json; probe_args="--skip-probe-only --no-exotic" ;;
@@ -489,7 +489,7 @@ jobs:
           # inside by the probe (the by-id link and the kernel's own model and serial), before the first byte is written; the cards' p2pmem pools must be whole. The drive's node and the
           # by-id links go into the container, and the p2pmem directory of each card read-write over the container's read-only sysfs; SYS_ADMIN lets the probe confirm where the pages are.
           p2pargs=()
-          if [ "${PROBE:-fabric}" = p2p ]; then
+          if [ "${PROBE:-fabric}" = p2p-restore ]; then
             p2p_env="${P2P_ENV_FILE:-$HOME/.config/qwen-p2p/p3a.env}"
             [ -f "$p2p_env" ] || { echo 'refusing: the runner has no private P3a file (P2P_ENV_FILE)' >&2; exit 1; }
             [ "$(stat -c %u "$p2p_env")" = "$(id -u)" ] && [ -z "$(find "$p2p_env" -perm /022)" ] || { echo 'refusing: the private P3a file is not the runner user'"'"'s alone' >&2; exit 1; }

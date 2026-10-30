@@ -1,4 +1,4 @@
-"""P3a (tp4_p2p_probe) on the CPU: the drive's identity and R1's readings before a byte is written, then the whole flow on a fake ttnn, fake cards and a regular file for the drive.
+"""P3a (tp4_p2p_restore_probe) on the CPU: the drive's identity and R1's readings before a byte is written, then the whole flow on a fake ttnn, fake cards and a regular file for the drive.
 
 Held:
   * the identity: the by-id link of the configured model and serial must resolve to the node, the kernel's own model and serial must agree, a link of that name pointing elsewhere or
@@ -6,8 +6,8 @@ Held:
   * R1: the controller state and the namespace size are printed, and anything but `live` (or an empty namespace, a superblock of the NVMe tier) refuses with NOTHING written;
   * the flow: one card first, then every published card, byte-exact against what was written to the drive, timings, the negative arm (a flipped byte refused, nothing written, passes
     when put back), the windows released and every p2pmem pool whole again; a restore that corrupts, an arm that does not refuse, a pool left allocated: each is a FAIL;
-  * the job wiring: C2_FABRIC_PROBE=p2p is a probe of the fabric action and the workflow step runs the script with the drive and the p2pmem directories, from a private file.
-Run alone: python3 -B -m unittest test_tp4_p2p_probe (python 3.11+, numpy)
+  * the job wiring: C2_FABRIC_PROBE=p2p-restore is a probe of the fabric action and the workflow step runs the script with the drive and the p2pmem directories, from a private file.
+Run alone: python3 -B -m unittest test_tp4_p2p_restore_probe (python 3.11+, numpy)
 """
 
 import json
@@ -28,7 +28,7 @@ sys.path.insert(0, str(HERE))
 
 import c2_serving_job as job  # noqa: E402
 import qwen_p2p_restore as p2p  # noqa: E402
-import tp4_p2p_probe as probe  # noqa: E402
+import tp4_p2p_restore_probe as probe  # noqa: E402
 from test_qwen_p2p_restore import FakeMesh, build_sysfs, make_links  # noqa: E402
 
 MODEL = 'Fake NVMe Model 9000 1TB'
@@ -565,26 +565,26 @@ class JobWiringTests(unittest.TestCase):
         return sorted(json.loads((HERE / 'qwen_c2_profiles.json').read_text(encoding='utf-8'))['profiles'])
 
     def test_p2p_is_a_probe_of_the_fabric_action(self):
-        self.assertIn('p2p', job.FABRIC_PROBES)
-        values = job.parse_env('C2_CARDS=quad\nC2_ACTIONS=fabric\nC2_FABRIC_PROBE=p2p\nC2_IMAGE_TAG=tp4-p2p-1\n')
+        self.assertIn('p2p-restore', job.FABRIC_PROBES)
+        values = job.parse_env('C2_CARDS=quad\nC2_ACTIONS=fabric\nC2_FABRIC_PROBE=p2p-restore\nC2_IMAGE_TAG=tp4-p2p-1\n')
         outputs = job.read_job(values, self.profiles(), root=ROOT)
-        self.assertEqual((outputs['actions'], outputs['fabric_probe'], outputs['cards']), ('fabric', 'p2p', 'quad'))
+        self.assertEqual((outputs['actions'], outputs['fabric_probe'], outputs['cards']), ('fabric', 'p2p-restore', 'quad'))
 
     def test_a_pair_job_cannot_name_it(self):
         with self.assertRaises(job.JobError):
-            job.read_job(job.parse_env('C2_CARDS=pair\nC2_ACTIONS=fabric\nC2_FABRIC_PROBE=p2p\nC2_IMAGE_TAG=tp4-p2p-1\n'), self.profiles(), root=ROOT)
+            job.read_job(job.parse_env('C2_CARDS=pair\nC2_ACTIONS=fabric\nC2_FABRIC_PROBE=p2p-restore\nC2_IMAGE_TAG=tp4-p2p-1\n'), self.profiles(), root=ROOT)
 
     def test_the_template_parses_and_names_no_drive_card_or_host(self):
         text = self.TEMPLATE.read_text(encoding='utf-8')
         outputs = job.read_job(job.parse_env(text), self.profiles(), root=ROOT)
-        self.assertEqual((outputs['actions'], outputs['fabric_probe']), ('fabric', 'p2p'))
+        self.assertEqual((outputs['actions'], outputs['fabric_probe']), ('fabric', 'p2p-restore'))
         self.assertNotRegex(text, r'[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]')
         self.assertNotRegex(text, r'nvme-[A-Za-z0-9]')
         for name in probe.ENV_NAMES:
             self.assertNotIn(name + '=', text, 'the drive and the cards come from the runner\'s private file, not from the job')
 
     def test_the_workflow_step_runs_the_script_with_the_drive_and_the_p2pmem_directories(self):
-        self.assertIn('p2p) script=tp4_p2p_probe.py; report=p2p-p3a.json ;;', self.WORKFLOW)
+        self.assertIn('p2p-restore) script=tp4_p2p_restore_probe.py; report=p2p-restore-p3a.json ;;', self.WORKFLOW)
         step = self.WORKFLOW[self.WORKFLOW.index('p2pargs=()'):]
         step = step[:step.index('timeout -k 30 "$limit" docker run')]
         for word in ('P2P_DRIVE_BY_ID', 'P2P_DRIVE_MODEL', 'P2P_DRIVE_SERIAL', 'P2P_CARDS', '/p2pmem', '--device', 'SYS_ADMIN', 'refusing'):
@@ -606,7 +606,7 @@ class JobWiringTests(unittest.TestCase):
 
         block = self.WORKFLOW[self.WORKFLOW.index('          p2pargs=()'):self.WORKFLOW.index('          # split builds the image')]
         import textwrap
-        script = 'set -euo pipefail\nPROBE=p2p\n' + textwrap.dedent(block) + '\necho BLOCK-PASSED\n'
+        script = 'set -euo pipefail\nPROBE=p2p-restore\n' + textwrap.dedent(block) + '\necho BLOCK-PASSED\n'
         directory = tempfile.mkdtemp(prefix='p3a-shell-')
         self.addCleanup(shutil.rmtree, directory, True)
         path = os.path.join(directory, 'step.sh')
@@ -640,7 +640,7 @@ class JobWiringTests(unittest.TestCase):
 
     def test_the_script_is_in_the_image_free_checkout_mount(self):
         # the fabric step mounts the checkout read-only at /c2 and runs /c2/scripts/ci/<script>: the probe needs no image rebuild, only an image with the device-op extension
-        self.assertTrue((HERE / 'tp4_p2p_probe.py').exists())
+        self.assertTrue((HERE / 'tp4_p2p_restore_probe.py').exists())
         self.assertIn('-v "$PWD:/c2:ro"', self.WORKFLOW)
 
 

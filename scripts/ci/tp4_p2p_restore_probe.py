@@ -1,6 +1,6 @@
-"""P3a: the peer-to-peer restore on the cards, standalone (qwen-c2-serving.yml 'fabric' with C2_FABRIC_PROBE=p2p, C2_CARDS=quad; docs/tp4-p2p-host.md section 8).
+"""P3a: the peer-to-peer restore on the cards, standalone (qwen-c2-serving.yml 'fabric' with C2_FABRIC_PROBE=p2p-restore, C2_CARDS=quad; docs/tp4-p2p-host.md section 8).
 
-    python3 -B /c2/scripts/ci/tp4_p2p_probe.py --fabric FABRIC_1D --output /probe-results/p2p-p3a.json
+    python3 -B /c2/scripts/ci/tp4_p2p_restore_probe.py --fabric FABRIC_1D --output /probe-results/p2p-restore-p3a.json
 
 What it does, in this order, and what it refuses before it does anything:
   0. THE DRIVE. Identity first, before a byte is written or a card opened: the drive named by --drive (P2P_DRIVE_BY_ID) must be the one with the model and serial the job config gives

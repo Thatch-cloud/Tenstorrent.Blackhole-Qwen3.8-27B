@@ -196,9 +196,9 @@ changes `flush` (the device read of the blocks an allocation evicts), which is s
 | `scripts/ci/qwen_kv_nvme.py` | the flags, the `chipmajor-v1` layout, `P2PBackend`, `NvmeTier._start_p2p` / `_chipmajor` / `_read_many` / `_restore_via_host`, counters |
 | `scripts/ci/qwen_nvme_store.py` | the entry's auxiliary bytes |
 | `scripts/ci/qwen_prefix_scheduler_patch.py` | the sliced restore for a direct backend (`begin_stream`, `advance_direct`), `audit_direct` |
-| `scripts/ci/tp4_p2p_probe.py` | P3a |
+| `scripts/ci/tp4_p2p_restore_probe.py` | P3a |
 | `scripts/ci/p2p_checksum_vectors.json` | the three shared vectors |
-| `scripts/ci/test_qwen_p2p_restore.py`, `test_qwen_p2p_tier.py`, `test_tp4_p2p_probe.py` | the CPU tests (named in `qwen-integration-cpu.yml` through `fusion-wp/NVME.json`) |
+| `scripts/ci/test_qwen_p2p_restore.py`, `test_qwen_p2p_tier.py`, `test_tp4_p2p_restore_probe.py` | the CPU tests (named in `qwen-integration-cpu.yml` through `fusion-wp/NVME.json`) |
 | `scripts/ci/references/tp4-p2p-jobs/` | the P3a job template |
 | `patches/tt-kmd-p2pmem/`, `scripts/p2p/` | from `tp4/p2p-nvme`: the kernel patch, the P1 probe, the topology tool, the layout and bandwidth model |
 
@@ -207,7 +207,7 @@ imports it only when the flag is on.
 
 ## 8. P3a: the standalone card probe
 
-`scripts/ci/tp4_p2p_probe.py`, run by the `fabric` action of `qwen-c2-serving.yml`: **job key `C2_FABRIC_PROBE=p2p`** with `C2_CARDS=quad`, `C2_ACTIONS=fabric` (template
+`scripts/ci/tp4_p2p_restore_probe.py`, run by the `fabric` action of `qwen-c2-serving.yml`: **job key `C2_FABRIC_PROBE=p2p-restore`** with `C2_CARDS=quad`, `C2_ACTIONS=fabric` (template
 `scripts/ci/references/tp4-p2p-jobs/P3a-p2p-restore.env`; `C2_IMAGE_TAG` names an image with the device-op extension). The probe runs from the checkout the step mounts at `/c2`: an image, not a build of this
 commit. Order, and what it refuses before it does anything:
 
