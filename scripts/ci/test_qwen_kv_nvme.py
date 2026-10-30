@@ -2305,6 +2305,49 @@ class SedCheckTests(unittest.TestCase):
         self.refused('another drive', status=self.good(by_id='', pci='0000:06:00.0'))
         self.refused('another drive', status=self.good(by_id='nvme-Example_Model_SERIAL0001_1', pci='0000:06:00.0'))
 
+    def test_a_multipath_head_namespace_is_found_through_its_controller(self):
+        """With NVMe multipath the node's sysfs path is /sys/devices/virtual/nvme-subsystem/nvme-subsysN/nvmeNn1, with no PCI function in it; the subsystem's nvmeN children are the
+        controllers and carry the path of theirs."""
+        self.device = os.path.join(self.directory, 'renamed-node-in-a-container')
+        Path(self.device).write_bytes(b'')
+        sysfs = os.path.join(self.directory, 'sys')
+        controller = os.path.join(sysfs, 'devices', 'pci0000:00', '0000:00:01.1', '0000:05:00.0', 'nvme', 'nvme3')
+        subsystem = os.path.join(sysfs, 'devices', 'virtual', 'nvme-subsystem', 'nvme-subsys3')
+        head = os.path.join(subsystem, 'nvme3n1')
+        os.makedirs(controller)
+        os.makedirs(head)
+        os.symlink(controller, os.path.join(subsystem, 'nvme3'))
+        os.makedirs(os.path.join(sysfs, 'dev', 'block'))
+        os.symlink(head, os.path.join(sysfs, 'dev', 'block', '0:0'))
+        self.assertEqual(self.check(self.good(by_id='', pci='0000:05:00.0'))[0], 'status file')
+        self.refused('another drive', status=self.good(by_id='', pci='0000:06:00.0'))
+
+    def test_the_boot_units_real_file_is_accepted(self):
+        """The rig's boot unit writes {by_id: <a bare by-id name>, pci_addr, timestamp (ISO), state: ok, link_speed, locked, locking_enabled, sed, ...}: no ts, no pci, no link_gts.
+        The first design's field names were ts and pci; a file in the unit's own words must open the tier (it was refused for want of a time and of anything to check)."""
+        by_id_dir = os.path.join(self.directory, 'by-id')
+        os.makedirs(by_id_dir)
+        self.device = os.path.join(self.directory, 'renamed-node-in-a-container')           # a container maps the drive under a name of its own
+        Path(self.device).write_bytes(b'')
+        sysfs = os.path.join(self.directory, 'sys')
+        function = os.path.join(sysfs, 'devices', 'pci0000:00', '0000:00:01.1', '0000:05:00.0', 'nvme', 'nvme3', 'nvme3n1')
+        os.makedirs(function)
+        os.makedirs(os.path.join(sysfs, 'dev', 'block'))
+        os.symlink(function, os.path.join(sysfs, 'dev', 'block', '0:0'))
+        real = dict(by_id='nvme-Example_Model_SERIAL0001_1', detail='', key_sealing='host', link_speed='16.0 GT/s PCIe', locked=False, locking_enabled=True, nvme='nvme3',
+                    pci_addr='0000:05:00.0', schema=1, sed='opal', state='ok', timestamp='2026-01-02T03:04:05Z')
+        self.boot = 1000.0
+        source, facts = self.check(real)
+        self.assertEqual((source, facts['sed'], facts['locked']), ('status file', 'opal', False))
+        self.refused('another drive', status=dict(real, pci_addr='0000:06:00.0'))
+        self.refused('time (ts)', status={key: value for key, value in real.items() if key != 'timestamp'})
+        self.boot = time.time() + 3600.0
+        self.refused('older than this boot', status=real)
+        self.boot = 1000.0
+        self.refused('own state', status=dict(real, state='degraded'))
+        self.assertEqual(self.check(dict(real, state=None))[0], 'status file', 'a file without a state is the first design\'s: still fine')
+        self.assertEqual(self.check(dict(real, ts=3000.0, timestamp='garbage'))[0], 'status file', 'ts, when present, wins')
+
 
 class TrimDefaultTests(NvmeCase):
     """QWEN_PREFIX_NVME_DISCARD=1 is the default: freed extents (a delete, an expiry, an eviction) are TRIMmed - on the writer side, never on the scheduler thread."""
