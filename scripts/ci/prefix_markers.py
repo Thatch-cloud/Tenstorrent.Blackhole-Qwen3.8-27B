@@ -106,6 +106,8 @@ never guessed around):
     [PINDIAG] prefix: nvme tier spill blocks=<n> bytes=<n> ckpts=<n> ckpt_bytes=<n> ms=<f> queue=<n>      one per written batch (the writer thread); read into nvme_spills.
     [PINDIAG] prefix: nvme tier restore req=<id> blocks=<n> bytes=<n> from=<tokens> to=<tokens> backend=<host> verify=<mode>     NVMe blocks read into host records; read into nvme_restores.
     [PINDIAG] prefix: nvme tier checkpoint restored pos=<n> bytes=<n> ms=<f>        a checkpoint read back into the store; read into nvme_ckpt_restores.
+    [PINDIAG] prefix: nvme tier at-rest encryption verified: opal locking_enabled=1 locked=0 media_encryption=1 source=<ioctl|status-file>     the encryption check passed; read into nvme_atrest.
+    [PINDIAG] prefix: nvme tier stopped drained=<0|1> snapshot=<0|1> latched=<0|1> ms=<n>        the graceful stop's end (the drain); read into nvme_stops.
     [PINDIAG] prefix: nvme tier REFUSED to start on a zero-retention node: ... | nvme tier UNAVAILABLE, ... | nvme tier latched off: ... | nvme tier DEVICE LOST: ... | nvme tier ... NOT APPLIED ... | nvme tier spill failed ... | nvme tier ... failed its digest ...
         the tier did not start, or stopped, or dropped something that failed its check; read into nvme_trouble (a gate that asks for the tier needs nvme_on and an empty nvme_trouble).
 
@@ -201,7 +203,7 @@ TIER_UPLOAD_LATCHED = '[PINDIAG] prefix: host tier upload latched off'
 TIER_TROUBLE = ('[PINDIAG] prefix: host tier latched off', '[PINDIAG] prefix: host tier spill failed', '[PINDIAG] prefix: host tier restore failed')
 NVME = '[PINDIAG] prefix: nvme tier '
 NVME_TROUBLE = ('REFUSED', 'UNAVAILABLE', 'latched off', 'spill failed', 'failed its digest', 'restore failed', 'AUDIT MISMATCH', 'checkpoint restore failed',
-                'checkpoint failed its digest', 'idle copy failed', 'command ', 'DEVICE LOST', 'NOT APPLIED', 'writer error', 'stop: ')
+                'checkpoint failed its digest', 'idle copy failed', 'command ', 'DEVICE LOST', 'NOT APPLIED', 'writer error', 'stop: ', 'sink failed', 'not packed')
 CKPT_AUDIT = '[PREFIX-AUDIT-CKPT] tensors='
 CKPT_PRECONVERTED = '[PINDIAG] prefix: checkpoint preconverted '
 STATS = re.compile(r'\[PINDIAG\] prefix: stats (\{.*\})\s*$')
@@ -394,6 +396,14 @@ def nvme_line(out, line, where):
         entry = fields(body[len('checkpoint restored '):])
         entry.update(where)
         out['nvme_ckpt_restores'].append(entry)
+    elif body.startswith('at-rest encryption verified'):
+        entry = fields(body[len('at-rest encryption verified'):].replace(':', ' ', 1))
+        entry.update(where)
+        out['nvme_atrest'].append(entry)
+    elif body.startswith('stopped '):
+        entry = fields(body[len('stopped '):])
+        entry.update(where)
+        out['nvme_stops'].append(entry)
     elif any(marker in body for marker in NVME_TROUBLE):
         out['nvme_trouble'].append(dict(where, line=line.strip()[:300]))
 
@@ -461,7 +471,7 @@ def scan(lines):
                model_warm=[], model_warm_skipped=[], kv_shared=[], audit_windows=[], tier_on=[], tier_io=[], tier_spills=[], tier_restores=[],
                tier_spill_complete=[], tier_spill_slow=[], tier_trouble=[], ckpt_audits=[], ckpt_preconverted=0, quota_on=[], tier_slice_on=[], tier_slices=[], tier_slice_trouble=[], tier_upload_on=[], tier_upload_trouble=[],
                window_engaged=[], window_carried=[], window_stored=[], window_skipped=[], window_audits=[],
-               nvme_open=[], nvme_on=[], nvme_spills=[], nvme_restores=[], nvme_ckpt_restores=[], nvme_trouble=[])
+               nvme_open=[], nvme_on=[], nvme_spills=[], nvme_restores=[], nvme_ckpt_restores=[], nvme_trouble=[], nvme_atrest=[], nvme_stops=[])
     for index, raw in enumerate(lines):
         stamp, line = split_timestamp(raw.rstrip('\n'))
         where = dict(index=index, time=stamp)
