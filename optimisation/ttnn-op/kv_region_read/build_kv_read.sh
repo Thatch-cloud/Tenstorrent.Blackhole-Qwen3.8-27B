@@ -35,7 +35,7 @@ TTNN_SHA=914d09462e27e8f5c9d7df03218c51d159bd25f03b87ebc95103dcd06f01a640
 run() { if [ "${KVR_DRY_RUN:-0}" = 1 ]; then echo "### run: $*"; else "$@"; fi; }
 
 # The source files of the build: the module, its pure-arithmetic header, and the two device kernels it JIT-compiles at run time.
-SOURCES="qwen_kv_read.cpp qwen_p2p_plan.hpp qwen_p2p_scatter.cpp qwen_p2p_checksum.cpp"
+SOURCES="qwen_kv_read.cpp qwen_p2p_plan.hpp qwen_p2p_scatter.cpp qwen_p2p_checksum.cpp rv_kernel_check.sh"
 for f in $SOURCES; do test -s "$here/$f" || { echo "no $f beside this script" >&2; exit 2; }; done
 if [ "$(docker inspect -f '{{.State.Running}}' ttbuild 2>/dev/null || echo missing)" != true ]; then
   echo "ttbuild is not running: starting it (a container start, no device)"
@@ -71,6 +71,10 @@ readelf -d /tmp/kvr/qwen_kv_read.so | grep -E "NEEDED|SONAME"
 EOF
 run docker cp "$work/inner.sh" ttbuild:/tmp/kvr/inner.sh
 run docker exec ttbuild bash /tmp/kvr/inner.sh
+# 1b. the two device kernels are JIT-compiled only at the first dispatch on a card: compile them now with the real RISC-V toolchain and the JIT's flags (a front-end check,
+# no device), so a toolchain error stops this build instead of the first restore
+run docker exec ttbuild bash /tmp/kvr/rv_kernel_check.sh /tmp/kvr scatter "1088,16,16,32,0,0,0,0"
+run docker exec ttbuild bash /tmp/kvr/rv_kernel_check.sh /tmp/kvr checksum "32768,64,0,0,0,0"
 for f in qwen_kv_read.so qwen_kv_read.o; do run docker cp ttbuild:/tmp/kvr/$f "$work/$f"; done
 run docker cp ttbuild:/tmp/kvr/flags.txt "$work/compile-flags.txt"
 for f in $SOURCES "$(basename "${BASH_SOURCE[0]}")"; do cp "$here/$f" "$work/"; done

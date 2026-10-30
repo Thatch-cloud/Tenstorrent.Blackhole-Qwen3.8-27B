@@ -11,7 +11,8 @@ costs), what was built, what is checked on a CPU and what only a card can settle
 |---|---|
 | Built | `qwen_kv_read.so` version 3 (the existing extension, grown): compiles and links against the serving tt-metal tree (9f9cd4fd), every non-Python symbol resolves |
 | Checked on a CPU | the arithmetic, the argument checks, **both device kernels executed against a host stand-in of the dataflow API** (random block sets, page sizes, banks, offsets incl. the end of the ring, launch splits), a mutation check of that harness, the card test against an in-memory fake extension |
-| Not checked | JIT compile of the two kernels on the real toolchain (they compile with the stand-in API under `-Wall -Werror`, not with the RISC-V compiler), any execution on a device, the lockstep assumption (checked at run time by a `TT_FATAL`), NOC coordinates, throughput |
+| Compiled with the real RISC-V toolchain | both kernels, front end only (`rv_kernel_check.sh`: the build container's sfpi g++ with the JIT's flags, `-Wall -Werror -ftt-no-dyninit`, behind the firmware's include prelude; negative controls fail it). The 64-bit product is `mul` + `mulhu`. Nothing was linked or run |
+| Not checked | the JIT's own link step, any execution on a device, the lockstep assumption (checked at run time by a `TT_FATAL`), NOC coordinates, throughput |
 
 ## 1. Where the staging range goes, and what it costs
 
@@ -125,7 +126,7 @@ QwenP2PStaging: .release(), .size_bytes, .page_bytes, .bank, .num_banks, .addres
 
 ## 6. What only a card settles
 
-* the two kernels on the real RISC-V toolchain (JIT: `-Wall -Werror`, `-ftt-no-dyninit`; the stand-in compile cannot see a toolchain-specific error);
+* the JIT's link of the two kernels (they compile with the real RISC-V compiler and the JIT's flags, `rv_kernel_check.sh`, but nothing was linked or dispatched);
 * that `MeshBuffer::create` replicated gives the same address on all four cards (the constructor checks and throws if not) and the page size asked for;
 * the NOC coordinates and the bank (card test: `staging` block of the report), the lockstep, the cost in free DRAM per bank (`dram_free_per_bank_*`);
 * L1 fit of the circular buffers on cores (0..7, 0..9) next to a served model's L1 buffers (a clash is a `TT_FATAL` at the first dispatch, not corruption);
@@ -139,7 +140,7 @@ Run: `python3 optimisation/ttnn-op/kv_region_read/p2p_staging_card.py --devices 
 The module is the existing `qwen_kv_read` extension, version 3. The image copies its **whole build directory** (`COPY opgraft-KVR/`), so the two kernels and the header ship beside the `.so`.
 
 1. On the rig host, from a checkout of this branch: `bash optimisation/ttnn-op/kv_region_read/build_kv_read.sh ~/opgraft-KVR3` (compiles in the build container, then imports the module in
-   the production image with no network and no device; refuses unless all ten ops import and the kernels sit beside the `.so`).
+   the production image with no network and no device; it also compiles both kernels with the real RISC-V toolchain, and refuses unless all ten ops import and the kernels sit beside the `.so`).
 2. `python3 scripts/ci/pin_kvread.py --dir ~/opgraft-KVR3 --write` moves the four pin sites to the new hash (it refuses a build whose source or shipped kernels are not this
    checkout's, or that lacks the P2P op names); commit that.
 3. `build-c2-serving-image.sh` now reads `~/opgraft-KVR3` by default (the version 2 and 1 directories are untouched). The Dockerfile's RUN fails the image build unless the baked module is

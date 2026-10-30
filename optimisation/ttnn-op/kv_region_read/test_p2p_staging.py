@@ -246,6 +246,28 @@ int main() {
         self.assertEqual(cargs, [111, 222, 5, 4160 + 7 * 4096, 5 * 4096, ref.start_weight(7 * 1024), 3])
 
 
+class StagingGeometryTests(unittest.TestCase):
+    """The claim the staging placement rests on: in an interleaved buffer of banks x S bytes the pages of ONE bank are one contiguous range of S bytes."""
+
+    def test_the_pages_of_one_bank_are_one_contiguous_range(self):
+        for page in (64, 1088, 4096):
+            for bank in (0, 3, 7):
+                size = page * 40
+                buffer = np.zeros(ref.BANKS * size, dtype=np.uint8)
+                # what the allocator's interleaving does: page p on bank p % 8, at (p // 8) * page of that bank
+                per_bank = [bytearray(size) for _ in range(ref.BANKS)]
+                for p in range(buffer.size // page):
+                    per_bank[p % ref.BANKS][(p // ref.BANKS) * page:(p // ref.BANKS + 1) * page] = bytes([p % 251]) * page
+                for byte in range(0, size, page // 2 or 1):
+                    logical = ref.staging_bank_position(byte, page, bank)
+                    self.assertEqual(logical // page % ref.BANKS, bank)
+                    self.assertEqual(per_bank[bank][byte], (logical // page) % 251, (page, bank, byte))
+
+    def test_the_cost_is_banks_times_the_range(self):
+        for size in (16 << 20, 128 << 20):
+            self.assertEqual(ref.BANKS * size, size * 8)
+
+
 class ChecksumArithmeticTests(unittest.TestCase):
     """The arithmetic block between the markers of the kernel, compiled on its own."""
 
@@ -590,15 +612,27 @@ class SourceAgreementTests(unittest.TestCase):
 
     def test_the_build_script_ships_the_kernels_and_the_header(self):
         text = read(BUILD)
-        for name in ('qwen_p2p_scatter.cpp', 'qwen_p2p_checksum.cpp', 'qwen_p2p_plan.hpp'):
+        for name in ('qwen_p2p_scatter.cpp', 'qwen_p2p_checksum.cpp', 'qwen_p2p_plan.hpp', 'rv_kernel_check.sh'):
             self.assertIn(name, text, name)
+        # the RISC-V front-end check runs on both kernels, with compile-time args of the right count (4 + accessor args, 2 + accessor args)
+        self.assertIn('rv_kernel_check.sh /tmp/kvr scatter', text)
+        self.assertIn('rv_kernel_check.sh /tmp/kvr checksum', text)
         for op in ('qwen_p2p_staging_alloc', 'qwen_write_blocks_from_staging', 'qwen_staging_checksum', 'qwen_p2p_staging_info'):
             self.assertIn(op, text, op)
+
+    def test_the_riscv_check_uses_the_jit_flags_that_matter(self):
+        text = read(os.path.join(HERE, 'rv_kernel_check.sh'))
+        for flag in ('-Wall -Werror', '-ftt-no-dyninit', '-mcpu=tt-bh', '-std=c++17', '-DCOMPILE_FOR_BRISC', '-DKERNEL_BUILD', 'riscv-tt-elf-g++'):
+            self.assertIn(flag, text, flag)
+        self.assertTrue(os.access(os.path.join(HERE, 'rv_kernel_check.sh'), os.X_OK))
+        if shutil.which('bash'):
+            self.assertEqual(subprocess.run(['bash', '-n', os.path.join(HERE, 'rv_kernel_check.sh')]).returncode, 0)
+            self.assertEqual(subprocess.run(['bash', '-n', BUILD]).returncode, 0)
 
     def test_no_private_string_in_the_new_files(self):
         """The repository is public: no hostnames, addresses, serials, registries or tokens in what this change adds."""
         forbidden = re.compile(r'(\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b|thatch\.local|zot\.|/home/[a-z]|\bspark-|blackhole-[0-9A-F]{8,}|ghp_|ssh-rsa|BEGIN [A-Z ]*PRIVATE)')
-        names = ['qwen_p2p_scatter.cpp', 'qwen_p2p_checksum.cpp', 'qwen_p2p_plan.hpp', 'p2p_staging_ref.py', 'p2p_staging_card.py', 'test_p2p_staging_card.py',
+        names = ['qwen_p2p_scatter.cpp', 'qwen_p2p_checksum.cpp', 'qwen_p2p_plan.hpp', 'rv_kernel_check.sh', 'p2p_staging_ref.py', 'p2p_staging_card.py', 'test_p2p_staging_card.py',
                  os.path.join('emu', 'api', 'dataflow', 'dataflow_api.h'), os.path.join('emu', 'emu_common.hpp'), os.path.join('emu', 'emu_scatter.cpp'),
                  os.path.join('emu', 'emu_checksum.cpp'), os.path.join('..', '..', '..', 'docs', 'tp4-p2p-restore.md')]
         for name in names:
