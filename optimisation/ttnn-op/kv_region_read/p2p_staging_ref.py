@@ -69,6 +69,7 @@ SCATTER_ROWS = 2
 SCATTER_CORES = SCATTER_COLUMNS * SCATTER_ROWS
 SCATTER_MAX_BLOCKS_PER_CORE = 32
 SCATTER_CHUNK_PAGES = 16
+SCATTER_MAX_PAGE_BYTES = 8192
 SCATTER_LAUNCH_BLOCKS = SCATTER_CORES * SCATTER_MAX_BLOCKS_PER_CORE
 SCATTER_FIXED_ARGS = 5
 SCATTER_ARGS = SCATTER_FIXED_ARGS + SCATTER_MAX_BLOCKS_PER_CORE
@@ -135,6 +136,8 @@ def check_scatter(byte_offset, slice_bytes, page_bytes, blocks, staging_bytes):
     """-> None, or the reason the arguments are refused (the C++ check_scatter)."""
     if page_bytes == 0 or page_bytes % DRAM_ALIGNMENT:
         return "the tensor's page size must be a multiple of 64 bytes (a whole DRAM-aligned page)"
+    if page_bytes > SCATTER_MAX_PAGE_BYTES:
+        return "the tensor's page size is above 8192 bytes (the scatter's L1 scratch is two halves of 16 pages)"
     if slice_bytes == 0 or slice_bytes % page_bytes:
         return 'a block must be a whole number of tensor pages'
     if byte_offset % DRAM_ALIGNMENT:
@@ -158,13 +161,15 @@ def check_checksum(byte_offset, length, staging_bytes, cores):
     return None
 
 
-def check_staging(size_bytes, page_bytes, bank, num_banks):
+def check_staging(size_bytes, page_bytes, bank, num_banks, bank_bytes):
     if page_bytes == 0 or page_bytes % DRAM_ALIGNMENT:
         return 'the staging page size must be a multiple of 64'
     if size_bytes == 0 or size_bytes % page_bytes:
         return 'the staging size must be a positive multiple of the staging page size'
     if num_banks == 0 or bank >= num_banks:
         return "the staging bank is outside the device's DRAM banks"
+    if size_bytes > bank_bytes or size_bytes >= (1 << 32):
+        return 'the staging size is larger than the allocatable bytes of one DRAM bank'
     return None
 
 

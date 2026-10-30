@@ -18,6 +18,8 @@ constexpr uint32_t kScatterRows = 2;
 constexpr uint32_t kScatterCores = kScatterColumns * kScatterRows;
 constexpr uint32_t kScatterMaxBlocksPerCore = 32;
 constexpr uint32_t kScatterChunkPages = 16;
+// The scatter's L1 scratch is two halves of kScatterChunkPages pages: a page above this would not leave room next to a served model's L1 buffers.
+constexpr uint32_t kScatterMaxPageBytes = 8192;
 constexpr uint32_t kScatterLaunchBlocks = kScatterCores * kScatterMaxBlocksPerCore;
 // Runtime args of one scatter core: staging/destination addresses, bank, source offset, block count, then the block ids (padded).
 constexpr uint32_t kScatterFixedArgs = 5;
@@ -126,6 +128,9 @@ inline const char* check_scatter(
     if (page_bytes == 0 || page_bytes % kDramAlignment != 0) {
         return "the tensor's page size must be a multiple of 64 bytes (a whole DRAM-aligned page)";
     }
+    if (page_bytes > kScatterMaxPageBytes) {
+        return "the tensor's page size is above 8192 bytes (the scatter's L1 scratch is two halves of 16 pages)";
+    }
     if (slice_bytes == 0 || slice_bytes % page_bytes != 0) {
         return "a block must be a whole number of tensor pages";
     }
@@ -157,8 +162,9 @@ inline const char* check_checksum(uint64_t byte_offset, uint64_t length, uint64_
     return nullptr;
 }
 
-// The staging geometry: a range of size_bytes in one bank is the usable part of an interleaved buffer of num_banks * size_bytes bytes.
-inline const char* check_staging(uint64_t size_bytes, uint64_t page_bytes, uint32_t bank, uint32_t num_banks) {
+// The staging geometry: a range of size_bytes in one bank is the usable part of an interleaved buffer of num_banks * size_bytes bytes. bank_bytes is what the
+// allocator can give in one bank; the range must fit it, and its offsets are 32-bit in the kernels' runtime arguments.
+inline const char* check_staging(uint64_t size_bytes, uint64_t page_bytes, uint32_t bank, uint32_t num_banks, uint64_t bank_bytes) {
     if (page_bytes == 0 || page_bytes % kDramAlignment != 0) {
         return "the staging page size must be a multiple of 64";
     }
@@ -167,6 +173,9 @@ inline const char* check_staging(uint64_t size_bytes, uint64_t page_bytes, uint3
     }
     if (num_banks == 0 || bank >= num_banks) {
         return "the staging bank is outside the device's DRAM banks";
+    }
+    if (size_bytes > bank_bytes || size_bytes >= (1ull << 32)) {
+        return "the staging size is larger than the allocatable bytes of one DRAM bank";
     }
     return nullptr;
 }

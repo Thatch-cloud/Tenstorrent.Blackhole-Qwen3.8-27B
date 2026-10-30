@@ -142,6 +142,8 @@ int main() {
   std::printf("S "); pr(check_scatter(1 << 20, 17408, 1088, 1, 1 << 20));
   std::printf("S "); pr(check_scatter((1 << 20) - 3 * 17408, 17408, 1088, 3, 1 << 20));
   std::printf("S "); pr(check_scatter((1 << 20) - 3 * 17408, 17408, 1088, 4, 1 << 20));
+  std::printf("S "); pr(check_scatter(0, 65536, 8192, 1, 1 << 20));
+  std::printf("S "); pr(check_scatter(0, 65536, 16384, 1, 1 << 20));
   std::printf("K "); pr(check_checksum(0, 4096, 8192, 64));
   std::printf("K "); pr(check_checksum(0, 0, 8192, 64));
   std::printf("K "); pr(check_checksum(0, 4000, 8192, 64));
@@ -150,11 +152,14 @@ int main() {
   std::printf("K "); pr(check_checksum(0, 4096, 8192, 7));
   std::printf("K "); pr(check_checksum(0, 4096, 8192, 88));
   std::printf("K "); pr(check_checksum(0, 4096, 8192, 0));
-  std::printf("G "); pr(check_staging(1 << 20, 4096, 0, 8));
-  std::printf("G "); pr(check_staging(1 << 20, 4096, 8, 8));
-  std::printf("G "); pr(check_staging(1000, 4096, 0, 8));
-  std::printf("G "); pr(check_staging(1 << 20, 100, 0, 8));
-  std::printf("G "); pr(check_staging(0, 4096, 0, 8));
+  std::printf("G "); pr(check_staging(1 << 20, 4096, 0, 8, 1ull << 30));
+  std::printf("G "); pr(check_staging(1 << 20, 4096, 8, 8, 1ull << 30));
+  std::printf("G "); pr(check_staging(1000, 4096, 0, 8, 1ull << 30));
+  std::printf("G "); pr(check_staging(1 << 20, 100, 0, 8, 1ull << 30));
+  std::printf("G "); pr(check_staging(0, 4096, 0, 8, 1ull << 30));
+  std::printf("G "); pr(check_staging(2ull << 30, 4096, 0, 8, 1ull << 30));
+  std::printf("G "); pr(check_staging(1ull << 32, 4096, 0, 8, 1ull << 40));
+  std::printf("G "); pr(check_staging(1ull << 30, 4096, 0, 8, 1ull << 30));
   std::vector<uint32_t> blocks; for (uint32_t i = 0; i < 40; ++i) blocks.push_back(1000 - 7 * i);
   auto args = scatter_core_args(111, 222, 5, 4160, 17408, blocks, 0, {3, 4});
   std::printf("A"); for (auto v : args) std::printf(" %%u", v); std::printf("\\n");
@@ -178,7 +183,7 @@ int main() {
     def test_constants_match_the_python_mirror(self):
         text = read(PLAN)
         for name, value in (('kScatterColumns', ref.SCATTER_COLUMNS), ('kScatterRows', ref.SCATTER_ROWS), ('kScatterMaxBlocksPerCore', ref.SCATTER_MAX_BLOCKS_PER_CORE),
-                            ('kScatterChunkPages', ref.SCATTER_CHUNK_PAGES), ('kScatterFixedArgs', ref.SCATTER_FIXED_ARGS), ('kChecksumUnit', ref.CHECKSUM_UNIT),
+                            ('kScatterChunkPages', ref.SCATTER_CHUNK_PAGES), ('kScatterMaxPageBytes', ref.SCATTER_MAX_PAGE_BYTES), ('kScatterFixedArgs', ref.SCATTER_FIXED_ARGS), ('kChecksumUnit', ref.CHECKSUM_UNIT),
                             ('kChecksumChunkBytes', ref.CHECKSUM_CHUNK_BYTES), ('kChecksumPartialBytes', ref.CHECKSUM_PARTIAL_BYTES),
                             ('kChecksumColumns', ref.CHECKSUM_COLUMNS), ('kChecksumDefaultCores', ref.CHECKSUM_DEFAULT_CORES),
                             ('kChecksumMaxCores', ref.CHECKSUM_MAX_CORES), ('kChecksumArgs', ref.CHECKSUM_ARGS), ('kDramAlignment', ref.DRAM_ALIGNMENT)):
@@ -219,7 +224,8 @@ int main() {
     def test_argument_checks(self):
         want = [ref.check_scatter(64, 17408, 1088, 3, 1 << 20), ref.check_scatter(0, 17408, 1088, 0, 1 << 20), ref.check_scatter(0, 17000, 1088, 1, 1 << 20),
                 ref.check_scatter(32, 17408, 1088, 1, 1 << 20), ref.check_scatter(0, 17408, 1000, 1, 1 << 20), ref.check_scatter(1 << 20, 17408, 1088, 1, 1 << 20),
-                ref.check_scatter((1 << 20) - 3 * 17408, 17408, 1088, 3, 1 << 20), ref.check_scatter((1 << 20) - 3 * 17408, 17408, 1088, 4, 1 << 20)]
+                ref.check_scatter((1 << 20) - 3 * 17408, 17408, 1088, 3, 1 << 20), ref.check_scatter((1 << 20) - 3 * 17408, 17408, 1088, 4, 1 << 20),
+                ref.check_scatter(0, 65536, 8192, 1, 1 << 20), ref.check_scatter(0, 65536, 16384, 1, 1 << 20)]
         self.assertEqual([line or None for line in (x if x != 'OK' else None for x in self.of('S'))], want)
         self.assertEqual(want[0], None)
         self.assertEqual(want[6], None, 'a run that ends exactly at the end of the ring is fine')
@@ -228,9 +234,11 @@ int main() {
                 ref.check_checksum(4096, 8192, 8192, 64), ref.check_checksum(0, 4096, 8192, 7), ref.check_checksum(0, 4096, 8192, 88), ref.check_checksum(0, 4096, 8192, 0)]
         self.assertEqual([None if x == 'OK' else x for x in self.of('K')], want)
         self.assertEqual([want[0]] + [bool(x) for x in want[1:]], [None] + [True] * 7)
-        want = [ref.check_staging(1 << 20, 4096, 0, 8), ref.check_staging(1 << 20, 4096, 8, 8), ref.check_staging(1000, 4096, 0, 8),
-                ref.check_staging(1 << 20, 100, 0, 8), ref.check_staging(0, 4096, 0, 8)]
+        want = [ref.check_staging(1 << 20, 4096, 0, 8, 1 << 30), ref.check_staging(1 << 20, 4096, 8, 8, 1 << 30), ref.check_staging(1000, 4096, 0, 8, 1 << 30),
+                ref.check_staging(1 << 20, 100, 0, 8, 1 << 30), ref.check_staging(0, 4096, 0, 8, 1 << 30), ref.check_staging(2 << 30, 4096, 0, 8, 1 << 30),
+                ref.check_staging(1 << 32, 4096, 0, 8, 1 << 40), ref.check_staging(1 << 30, 4096, 0, 8, 1 << 30)]
         self.assertEqual([None if x == 'OK' else x for x in self.of('G')], want)
+        self.assertEqual([x is None for x in want], [True, False, False, False, False, False, False, True])
 
     def test_runtime_argument_vectors_are_constant_length_and_match(self):
         blocks = [1000 - 7 * i for i in range(40)]
@@ -286,6 +294,7 @@ class ChecksumArithmeticTests(unittest.TestCase):
 #include <cstdio>
 #include <cstdlib>
 #include <vector>
+#define tt_l1_ptr
 %s
 // argv[1]: file of bytes, argv[2]: words per call (the kernel calls it once per chunk and carries w)
 int main(int argc, char** argv) {
@@ -391,7 +400,7 @@ class ScatterKernelEmulationTests(unittest.TestCase):
                 self.check(1088, 16, bank, 128, [1, 4, 5], 8, seed=bank)
 
     def test_other_page_sizes_and_block_shapes(self):
-        for page, ppb in ((64, 1), (576, 3), (2048, 32), (1088, 1), (1088, 48), (4096, 5), (32768, 2)):
+        for page, ppb in ((64, 1), (576, 3), (2048, 32), (1088, 1), (1088, 48), (4096, 5), (8192, 2)):
             with self.subTest(page=page, pages_per_block=ppb):
                 self.check(page, ppb, 6, 0, [4, 1, 7, 6], 10, seed=page)
 

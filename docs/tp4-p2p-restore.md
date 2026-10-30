@@ -36,6 +36,8 @@ So the cheapest way to get a protected single-bank range is the obvious one: **a
 
 **Cost per card = `8 x size_bytes`** (plus a few KiB: the checksum's partial-sum buffer, and the kernels' binaries in DRAM at their first dispatch).
 Default `size_bytes` = 2 x 64 MiB = 128 MiB, so **1 GiB per card**: 128 MiB in the chosen bank, and the other seven banks' ranges (896 MiB) are kept but unused by default.
+The guarantee is that THIS MeshDevice's allocator never gives the range away: a submesh or a second MeshDevice over the same chips has its own free list (and so does a single-device
+allocation), so the engine must allocate DRAM only through the MeshDevice it passes to `qwen_p2p_staging_alloc`.
 They are not wasted if the host wants them: every op takes `bank=`, so the same buffer is eight staging ranges of 128 MiB (the host can stripe a restore over banks to spread
 the write bandwidth, with one TLB window aim per bank). `size_bytes` is a parameter: 2 x 32 MiB costs 512 MiB, 2 x 16 MiB costs 256 MiB. The allocator's free bytes per bank before and after are in `qwen_p2p_staging_info`.
 
@@ -56,12 +58,13 @@ qwen_p2p_staging_read(staging, byte_offset, out[devices, n], bank=None)         
 QwenP2PStaging: .release(), .size_bytes, .page_bytes, .bank, .num_banks, .address, .released
 ```
 
-* **info** per device: `device_id`, `pcie_device` (N of `/dev/tenstorrent/N`), `pci_bus_id` (from sysfs, `None` when unreadable), `dram_bank`, `noc_x`, `noc_y`, `noc_endpoints`
-  (all the bank's NOC endpoints, translated coordinates), `address` (bank address of the range start = the TLB-window offset, bank offset is 0 on Blackhole), `size`,
+* **info** per device: `device_id`, `mmio_chip_id`/`pcie_device` (tt-metal's `GetPCIeDeviceID`: the logical chip id of the MMIO chip; it is the tt-kmd index N of `/dev/tenstorrent/N` only when every card is visible
+  to the process, as in the serving container), `pci_bus_id` (sysfs, derived from that: **verify it against the card actually opened**; `None` when unreadable), `dram_bank`, `noc_x`, `noc_y`, `noc_endpoints`
+  (all three NOC endpoints of the bank, translated coordinates, tt-metal's order: index 0 is the view's NOC0 worker endpoint), `endpoint_index` (0), `address` (bank address of the range start = the TLB-window offset, bank offset is 0 on Blackhole), `size`,
   `aligned_4k_offset/address/size`, `page_bytes`, `bytes_reserved` (the cost above), `dram_free_per_bank_before/after`, and `banks`: the same description for all 8 banks.
   **Aim the window at `(noc_x, noc_y)` from this record**, not at the probe's formula (section 5).
 * **write_blocks_from_staging**: the semantics of `qwen_write_blocks_raw`; device d's slice `blocks[i]` gets `staging_d[byte_offset + i*slice_bytes : + slice_bytes]`. The tensor
-  must be an interleaved DRAM tensor; `slice_bytes` a whole number of its pages (1,088-byte bf8 tile pages in production); `byte_offset` a multiple of 64 (NOT of 1,088: objects
+  must be an interleaved DRAM tensor laid out alike on every device; its page at most 8192 bytes (L1 scratch); `slice_bytes` a whole number of its pages (1,088-byte bf8 tile pages in production); `byte_offset` a multiple of 64 (NOT of 1,088: objects
   start at multiples of 4,096, which is not); block ids distinct; at most 512 blocks per launch (more are several launches). Every DRAM access is one whole page.
   Runtime args (the tensor's address, the staging address, the block ids) are rewritten from the live buffers on every call, as a program-cache hit would.
 * **checksum**: INTERFACE section 4 exactly: `S = sum_k ((k*2654435761 + 1) mod 2^32) * x_k mod 2^64` over the little-endian uint32 words of `staging[byte_offset : + length]`,
@@ -77,6 +80,8 @@ QwenP2PStaging: .release(), .size_bytes, .page_bytes, .bank, .num_banks, .addres
 * Both ops run **programs**, unlike the rest of the extension: the kernels (`qwen_p2p_scatter.cpp`, `qwen_p2p_checksum.cpp`) are read from the directory of the `.so` and JIT-compiled
   at the first dispatch (seconds), and the programs are cached in the handle (the program binaries take a little DRAM at that first dispatch). **Warm them at engine start**
   (one scatter into a scratch block and one checksum of 4096 bytes), before the decode trace is captured. Call them from the thread that issues the model's ops.
+  `release()` the handle **before** `close_mesh_device` (and after the last op has completed): after the mesh is closed it leaks the cached programs on purpose, because their destructors would
+  touch destroyed devices.
 
 ## 3. The kernels
 
@@ -86,7 +91,7 @@ QwenP2PStaging: .release(), .size_bytes, .page_bytes, .bank, .num_banks, .addres
   staging buffer's own page interleaving never enters the arithmetic.
 * **checksum** (`qwen_p2p_checksum.cpp`): `cores` cores (default 64, a multiple of 8, at most 80), RISCV_0. The range is split in 4096-byte units, core c takes
   `[floor(c*u/C), floor((c+1)*u/C))`, starts its weight at `w_(k0)` (computed by the host), walks it with `w += 2654435761` and accumulates `uint64(w) * x` (`mul` + `mulhu` on the rv32im core),
-  reading 32 KiB chunks into two L1 halves. Each core writes its 64-bit partial as a whole 64-byte page; the host adds the partials mod 2^64. L1: 65,600 bytes per core.
+  reading 32 KiB chunks into two L1 halves. Each core writes its 64-bit partial as a whole 64-byte page; the host adds the partials mod 2^64. L1: 65,664 bytes per core.
   Rate (an estimate from the instruction count, to be measured): about 0.6 GB/s per core, so 64 cores check 64 MiB in roughly 2 ms. It uses compute cores the decode needs: it
   is a short, blocking op per staged chunk, not a background job.
 
@@ -114,7 +119,9 @@ QwenP2PStaging: .release(), .size_bytes, .page_bytes, .bank, .num_banks, .addres
    hands out is always inside memory.
 3. **`byte_offset` need not be a multiple of 1,088**: objects start at multiples of 4,096 in the ring, so a second tensor's data starts at a multiple of 64 only. The ops require 64.
 4. **NOC coordinates**: take `noc_x`/`noc_y` (or any of `noc_endpoints`) from `qwen_p2p_staging_info`. They are tt-metal's own translated coordinates of the bank's endpoints
-   (`logical DRAM core (bank, endpoint index)`); the default is the last endpoint, the one neither NOC's workers read through. The probe's formula (banks 0-3 in column 17, 4-7 in
+   (`logical DRAM core (bank, endpoint index)`); the default is endpoint 0, the view's NOC0 worker endpoint, which the kernels and tt-metal's own host reads of DRAM use (for banks 0 and 4-7 it is
+   also the sub-port the UMD's static TLBs use; for banks 1-3 that is endpoint 2). Whether the three endpoints of a channel are interchangeable for a PCIe window is a hardware fact the
+   source cannot show: the host's window self-test settles it (try another endpoint from the list if the default fails). The probe's formula (banks 0-3 in column 17, 4-7 in
    column 18, `y = 12 + 3*(bank mod 4) + port`) is an assumption from the UMD; the card test reports whether it agrees with the allocator's answer (`formula_first_endpoint_in_info`).
    P1 verified one window by reading back through it, which does not prove the bank number; the checksum does.
 5. **Object bytes (section 1)**: "a host-path restore and a P2P restore read the same object bytes" holds for the **slice bytes** (the packed bf8 bytes of one block of one cache tensor on one
@@ -122,13 +129,17 @@ QwenP2PStaging: .release(), .size_bytes, .page_bytes, .bank, .num_banks, .addres
    `[cache][block][slice]` for that chip. The spill side must transpose (`kv_shard_layout.py` is the model of it); the device ops follow section 1 and do not care.
 6. **`address`** in `info` is the range start in the bank as the window sees it (bank offset 0 on Blackhole is added anyway). The host mmaps the whole published slice and DMAs at
    `address + byte_offset` from the mapping's start; nothing needs to be MiB aligned.
-7. **Program binaries**: the first dispatch of each op allocates a little DRAM (its kernel binary) and compiles; do it at engine start (section 2).
+7. **Flush before the first device read.** A posted PCIe write finishing at the NVMe is not an ordering point on the card's NOC and DRAM path. After the NVMe completion and before enqueueing the
+   checksum or the scatter, the host should do a non-posted read through the same TLB window (any word of the range): the usual flush of posted writes. It does not strictly order writes of
+   another requester (the drive), so the checksum stays the arbiter (a miss is a cold prefill); a scatter alone would not catch a stale range.
+8. **Program binaries**: the first dispatch of each op allocates a little DRAM (its kernel binary) and compiles; do it at engine start (section 2).
 
 ## 6. What only a card settles
 
 * the JIT's link of the two kernels (they compile with the real RISC-V compiler and the JIT's flags, `rv_kernel_check.sh`, but nothing was linked or dispatched);
 * that `MeshBuffer::create` replicated gives the same address on all four cards (the constructor checks and throws if not) and the page size asked for;
 * the NOC coordinates and the bank (card test: `staging` block of the report), the lockstep, the cost in free DRAM per bank (`dram_free_per_bank_*`);
+* whether the three NOC endpoints of a channel are interchangeable for a PCIe window, and that `pci_bus_id` is the card the host opened;
 * L1 fit of the circular buffers on cores (0..7, 0..9) next to a served model's L1 buffers (a clash is a `TT_FATAL` at the first dispatch, not corruption);
 * the rates: the write op's GB/s per card (report `write_gbps_per_card`), the checksum's (`checksum_gbps_per_card`), the effect of reading 16 cores' worth of pages from one bank;
 * running while decode traces are live (ordering on the one command queue is assumed, as for every other op).

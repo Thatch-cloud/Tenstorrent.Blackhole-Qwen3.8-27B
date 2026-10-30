@@ -73,8 +73,8 @@ run docker cp "$work/inner.sh" ttbuild:/tmp/kvr/inner.sh
 run docker exec ttbuild bash /tmp/kvr/inner.sh
 # 1b. the two device kernels are JIT-compiled only at the first dispatch on a card: compile them now with the real RISC-V toolchain and the JIT's flags (a front-end check,
 # no device), so a toolchain error stops this build instead of the first restore
-run docker exec ttbuild bash /tmp/kvr/rv_kernel_check.sh /tmp/kvr scatter "1088,16,16,32,0,0,0,0"
-run docker exec ttbuild bash /tmp/kvr/rv_kernel_check.sh /tmp/kvr checksum "32768,64,0,0,0,0"
+run docker exec ttbuild bash /tmp/kvr/rv_kernel_check.sh /tmp/kvr scatter "1088,16,16,32,2,1088,2,65536"
+run docker exec ttbuild bash /tmp/kvr/rv_kernel_check.sh /tmp/kvr checksum "32768,64,2,65536,2,64"
 for f in qwen_kv_read.so qwen_kv_read.o; do run docker cp ttbuild:/tmp/kvr/$f "$work/$f"; done
 run docker cp ttbuild:/tmp/kvr/flags.txt "$work/compile-flags.txt"
 for f in $SOURCES "$(basename "${BASH_SOURCE[0]}")"; do cp "$here/$f" "$work/"; done

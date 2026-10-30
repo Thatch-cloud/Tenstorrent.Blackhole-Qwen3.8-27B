@@ -6,7 +6,8 @@
 #
 #   bash rv_kernel_check.sh <directory holding the kernel> scatter|checksum "<compile-time args, comma separated>"
 #
-# The compile-time args only have to be well formed (their values are kernel-specific; any valid numbers do). Exit status 0 = the kernel compiles.
+# The compile-time args are the kernel's own, accessor arguments included: each TensorAccessorArgs is (config, aligned page size) and the config of a DRAM
+# interleaved buffer is 2 (IsDram), which selects the DRAM branch of the accessor, so pass 2 there. Exit status 0 = the kernel compiles.
 set -eu
 dir=$1
 kernel=$2
@@ -47,3 +48,13 @@ cd "$work"
 # shellcheck disable=SC2086
 nice -n 19 "$CC" $FLAGS $DEFS $INC -S wrap.cc -o wrap.s
 echo "rv_kernel_check: $kernel compiles with the RISC-V toolchain"
+# The same source once more WITHOUT link-time optimisation (an LTO assembly file holds no code), to read the code generated: the checksum's 32 x 32 -> 64 bit
+# product must be mul + mulhu, never a library call (__muldi3 / __umulsidi3 would be an unresolved symbol at the JIT's link). -Warray-bounds is off for this
+# pass only: a firmware header the wrapper includes trips it without LTO.
+if [ "$kernel" = checksum ]; then
+  # shellcheck disable=SC2086
+  nice -n 19 "$CC" ${FLAGS/-flto=auto/} -Wno-array-bounds $DEFS $INC -S wrap.cc -o wrap_code.s
+  grep -q '[[:space:]]mulhu[[:space:]]' wrap_code.s || { echo "rv_kernel_check: no mulhu in the checksum kernel" >&2; exit 1; }
+  if grep -q '__muldi3\|__umulsidi3\|__mulsi3' wrap_code.s; then echo "rv_kernel_check: the checksum kernel calls a multiply library routine" >&2; exit 1; fi
+  echo "rv_kernel_check: checksum multiplies with mul + mulhu"
+fi

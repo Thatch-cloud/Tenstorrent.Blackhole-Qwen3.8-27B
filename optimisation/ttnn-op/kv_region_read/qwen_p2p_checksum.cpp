@@ -27,7 +27,7 @@
 constexpr uint32_t kQwenP2PStep = 2654435761u;
 
 // Accumulates words[0 .. count) with weights w, w + step, w + 2 step, ... (mod 2^32); returns the updated sum and leaves w advanced.
-inline uint64_t qwen_p2p_accumulate(volatile uint32_t* words, uint32_t count, uint32_t& w, uint64_t sum) {
+inline uint64_t qwen_p2p_accumulate(volatile tt_l1_ptr uint32_t* words, uint32_t count, uint32_t& w, uint64_t sum) {
     uint32_t weight = w;
     uint32_t i = 0;
     for (; i + 4 <= count; i += 4) {
@@ -91,7 +91,7 @@ void kernel_main() {
                     next_count);
             }
             sum = qwen_p2p_accumulate(
-                reinterpret_cast<volatile uint32_t*>(scratch + half * chunk_bytes), count >> 2, weight, sum);
+                reinterpret_cast<volatile tt_l1_ptr uint32_t*>(scratch + half * chunk_bytes), count >> 2, weight, sum);
             if (next >= bytes) {
                 break;
             }
@@ -102,7 +102,7 @@ void kernel_main() {
     }
 
     // The partial sum as one whole page: low word, high word, then zeros.
-    volatile uint32_t* out = reinterpret_cast<volatile uint32_t*>(out_page);
+    volatile tt_l1_ptr uint32_t* out = reinterpret_cast<volatile tt_l1_ptr uint32_t*>(out_page);
     out[0] = static_cast<uint32_t>(sum);
     out[1] = static_cast<uint32_t>(sum >> 32);
     for (uint32_t i = 2; i < out_page_bytes / 4; ++i) {

@@ -84,7 +84,7 @@ class FakeTTNN(object):
         cache.data[:, list(blocks)] = data
 
     def qwen_p2p_staging_alloc(self, mesh, size_bytes=128 << 20, bank=0, page_bytes=65536, bottom_up=False):
-        problem = ref.check_staging(size_bytes, page_bytes, bank, 8)
+        problem = ref.check_staging(size_bytes, page_bytes, bank, 8, 4 << 30)
         if problem:
             raise ValueError(problem)
         staging = FakeStaging(size_bytes, bank, page_bytes, self.devices)

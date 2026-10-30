@@ -112,6 +112,9 @@ def check_info(info, devices, staging_bytes, bank, report, problems):
             problems.append('device %d: info says bank %s, asked for %d' % (index, entry['dram_bank'], bank))
         if entry['noc_x'] is None or entry['noc_y'] is None:
             problems.append('device %d: no NOC coordinates' % index)
+    buses = [entry.get('pci_bus_id') for entry in info]
+    if all(buses) and len(set(buses)) != len(buses):
+        problems.append('two devices report the same PCI address: %s' % buses)
     first = info[0]
     expect = formula_endpoint(bank)
     endpoints = [tuple(point) for point in first.get('noc_endpoints', [])]

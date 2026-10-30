@@ -215,7 +215,8 @@ public:
         using namespace tt::tt_metal;
         auto* allocator = mesh.allocator().get();
         num_banks_ = allocator->get_num_banks(BufferType::DRAM);
-        if (const char* problem = qwen_p2p::check_staging(size_bytes, page_bytes, bank, num_banks_)) {
+        if (const char* problem =
+                qwen_p2p::check_staging(size_bytes, page_bytes, bank, num_banks_, allocator->get_bank_size(BufferType::DRAM))) {
             throw nb::value_error(problem);
         }
         dram_free_before_ = allocator->get_statistics(BufferType::DRAM);
@@ -237,7 +238,10 @@ public:
         dram_free_after_ = allocator->get_statistics(BufferType::DRAM);
         bank_offset_ = allocator->get_bank_offset(BufferType::DRAM, bank_);
         TT_FATAL(address_ % qwen_p2p::kDramAlignment == 0, "The staging buffer address {} is not 64-byte aligned", address_);
-        // The lockstep this relies on: every device holds the buffer at the same address, with the page size asked for.
+        // Sanity of the MeshBuffer (it creates every device's Buffer at the one address, so this cannot fail by itself): same address, page size asked for.
+        // What it does NOT prove is that no other allocator hands out the range: the guarantee is that THIS MeshDevice's allocator never does (a submesh or
+        // a second MeshDevice over the same chips has its own free list, and so has a single-device allocation), so the engine must allocate DRAM only
+        // through the MeshDevice it passes here.
         distributed::MeshCoordinateRange all(mesh.shape());
         for (const auto& coord : all) {
             const Buffer* device_buffer = buffer_->get_device_buffer(coord);
@@ -254,9 +258,20 @@ public:
     P2PStaging(const P2PStaging&) = delete;
     P2PStaging& operator=(const P2PStaging&) = delete;
 
-    // Frees the staging and everything cached with it (the programs hold device memory for their binaries). Call it before the mesh is closed.
+    // Frees the staging and everything cached with it (the programs hold device memory for their binaries). Call it before the mesh is closed. If the
+    // mesh is already closed the Programs are LEAKED on purpose: their destructors unregister from Device objects that close() has destroyed, which
+    // is a use after free (the MeshBuffers are safe, they know a closed mesh).
     void release() {
         std::lock_guard<std::mutex> lock(mutex_);
+        const auto locked = mesh_.lock();
+        if (!locked || !locked->is_initialized()) {
+            for (auto& entry : scatter_) {
+                (void)entry.second.release();
+            }
+            for (auto& entry : checksum_) {
+                (void)entry.second.release();
+            }
+        }
         try {
             scatter_.clear();
             checksum_.clear();
@@ -268,12 +283,13 @@ public:
     }
 
     bool released() const { return buffer_ == nullptr; }
-    tt::tt_metal::distributed::MeshDevice& mesh() const {
+    // The mesh, kept alive by the caller for as long as it uses it.
+    std::shared_ptr<tt::tt_metal::distributed::MeshDevice> mesh() const {
         auto locked = mesh_.lock();
-        if (!locked) {
+        if (!locked || !locked->is_initialized()) {
             throw nb::value_error("the mesh device of this staging buffer is closed");
         }
-        return *locked;
+        return locked;
     }
     uint64_t size_bytes() const { return size_bytes_; }
     uint64_t page_bytes() const { return page_bytes_; }
@@ -443,7 +459,8 @@ void write_blocks_from_staging(
     if (mesh == nullptr || !device_tensor.is_allocated()) {
         throw nb::value_error("qwen_write_blocks_from_staging: device_tensor must be a tensor allocated on a mesh device");
     }
-    if (mesh != &staging.mesh()) {
+    const auto staging_mesh = staging.mesh();
+    if (mesh != staging_mesh.get()) {
         throw nb::value_error("qwen_write_blocks_from_staging: the tensor and the staging buffer are on different meshes");
     }
     if (blocks.empty()) {
@@ -458,8 +475,19 @@ void write_blocks_from_staging(
     const uint64_t slices = mesh_tensor.tensor_spec().logical_shape()[0];
     const uint64_t slice_bytes = qwen_kv::slice_bytes_of(mesh_tensor);
     const uint64_t page_bytes = reference->page_size();
-    if (reference->aligned_page_size() != page_bytes || page_bytes > 32768) {
-        throw nb::value_error("qwen_write_blocks_from_staging: the tensor's page must be DRAM aligned and at most 32 KiB");
+    if (reference->aligned_page_size() != page_bytes) {
+        throw nb::value_error("qwen_write_blocks_from_staging: the tensor's page must be DRAM aligned");
+    }
+    // The program is built once for the reference buffer and its addresses go to every device: every device's buffer must be laid out alike.
+    {
+        const distributed::MeshCoordinateRange all(mesh->shape());
+        for (const auto& coord : all) {
+            const Buffer* device_buffer = destination->get_device_buffer(coord);
+            if (device_buffer == nullptr || device_buffer->address() != reference->address() || device_buffer->page_size() != reference->page_size() ||
+                device_buffer->buffer_layout() != reference->buffer_layout() || device_buffer->buffer_type() != reference->buffer_type()) {
+                throw nb::value_error("qwen_write_blocks_from_staging: the tensor's buffers differ between devices (address, page size or layout)");
+            }
+        }
     }
     const uint32_t bank = bank_opt.value_or(staging.bank());
     if (bank >= staging.num_banks()) {
@@ -491,6 +519,9 @@ void write_blocks_from_staging(
 
     nb::gil_scoped_release release;
     std::lock_guard<std::mutex> lock(staging.mutex());
+    if (staging.released()) {
+        throw nb::value_error("qwen_write_blocks_from_staging: the staging buffer was released");
+    }
     auto& slot = staging.scatter_programs()[compile_args];
     if (!slot) {
         const uint32_t cb_bytes = qwen_p2p::scatter_cb_bytes(static_cast<uint32_t>(page_bytes));
@@ -531,9 +562,10 @@ std::vector<uint64_t> staging_checksum(
     if (bank >= staging.num_banks()) {
         throw nb::value_error("qwen_staging_checksum: bank is outside the device's DRAM banks");
     }
-    MeshDevice& mesh = staging.mesh();
-    const std::shared_ptr<distributed::MeshBuffer>& source = staging.buffer();
-    const std::shared_ptr<distributed::MeshBuffer>& partials = staging.partials();
+    const auto mesh_keeper = staging.mesh();
+    MeshDevice& mesh = *mesh_keeper;
+    const std::shared_ptr<distributed::MeshBuffer> source = staging.buffer();
+    const std::shared_ptr<distributed::MeshBuffer> partials = staging.partials();
 
     std::vector<uint32_t> compile_args = {qwen_p2p::kChecksumChunkBytes, qwen_p2p::kChecksumPartialBytes};
     TensorAccessorArgs(*source).append_to(compile_args);
@@ -542,6 +574,9 @@ std::vector<uint64_t> staging_checksum(
 
     nb::gil_scoped_release release;
     std::lock_guard<std::mutex> lock(staging.mutex());
+    if (staging.released()) {
+        throw nb::value_error("qwen_staging_checksum: the staging buffer was released");
+    }
     auto& slot = staging.checksum_programs()[compile_args];
     if (!slot) {
         const uint32_t cb_bytes = qwen_p2p::checksum_cb_bytes();
@@ -594,14 +629,16 @@ void staging_transfer(
     using namespace tt::tt_metal;
     const uint64_t page = staging.page_bytes();
     const uint32_t bank = bank_opt.value_or(staging.bank());
-    MeshDevice& mesh = staging.mesh();
+    const auto mesh_keeper = staging.mesh();
+    MeshDevice& mesh = *mesh_keeper;
     const MeshCoordinateRange all(mesh.shape());
     const std::vector<MeshCoordinate> coords(all.begin(), all.end());
     if (bank >= staging.num_banks() || host_bytes % coords.size() != 0) {
         throw nb::value_error("qwen_p2p_staging_write/read: bad bank or a buffer that is not [devices, n]");
     }
     const uint64_t per_device = host_bytes / coords.size();
-    if (per_device == 0 || byte_offset % page != 0 || per_device % page != 0 || byte_offset + per_device > staging.size_bytes()) {
+    if (per_device == 0 || byte_offset % page != 0 || per_device % page != 0 || byte_offset > staging.size_bytes() ||
+        per_device > staging.size_bytes() - byte_offset) {
         throw nb::value_error("qwen_p2p_staging_write/read: byte_offset and the per-device length must be multiples of the staging page size and inside the range");
     }
     std::vector<ShardDataTransfer> transfers;
@@ -616,6 +653,9 @@ void staging_transfer(
     }
     nb::gil_scoped_release release;
     std::lock_guard<std::mutex> lock(staging.mutex());
+    if (staging.released()) {
+        throw nb::value_error("qwen_p2p_staging_write/read: the staging buffer was released");
+    }
     auto& queue = mesh.mesh_command_queue();
     if (write) {
         queue.enqueue_write_shards(staging.buffer(), transfers, /*blocking=*/true);
@@ -625,36 +665,42 @@ void staging_transfer(
 }
 
 nb::dict bank_description(tt::tt_metal::IDevice* device, uint32_t bank) {
+    // A Blackhole DRAM channel (a "DRAM view") has three NOC endpoints. tt-metal's logical DRAM coordinate is (view, endpoint index): index 0 is the view's
+    // NOC0 worker endpoint, index 1 its NOC1 worker endpoint, then the remaining endpoint (metal_soc_descriptor.cpp). The result is the TRANSLATED coordinate
+    // the TLB registers take, from the same tables the device uses for its own bank addresses. The default (noc_x, noc_y) is endpoint 0: the one the kernels
+    // and tt-metal's own host reads of DRAM (Cluster::read_dram_vec) go through. Any endpoint reaches the same channel; the host's window self-test settles it.
     nb::list endpoints;
-    uint32_t chosen_x = 0, chosen_y = 0;
-    bool any = false;
-    for (uint32_t sub = 0; sub < 4; ++sub) {
-        try {
-            // The logical DRAM coordinate is (view, endpoint index); the index runs over the view's NOC endpoints, the NOC0 worker endpoint first, the
-            // NOC1 worker endpoint second. The result is the TRANSLATED coordinate the TLB registers take.
-            const CoreCoord endpoint = device->virtual_core_from_logical_core(CoreCoord(bank, sub), tt::CoreType::DRAM);
-            nb::list pair;
-            pair.append(static_cast<uint32_t>(endpoint.x));
-            pair.append(static_cast<uint32_t>(endpoint.y));
-            endpoints.append(pair);
-            chosen_x = endpoint.x;  // the last endpoint: the one neither NOC's workers read through
-            chosen_y = endpoint.y;
-            any = true;
-        } catch (const std::exception&) {
-            break;
-        }
-    }
     nb::dict bank_info;
     bank_info["dram_bank"] = bank;
-    bank_info["noc_x"] = any ? nb::object(nb::int_(chosen_x)) : nb::object(nb::none());
-    bank_info["noc_y"] = any ? nb::object(nb::int_(chosen_y)) : nb::object(nb::none());
+    try {
+        uint32_t first_x = 0, first_y = 0;
+        for (uint32_t index = 0; index < 3; ++index) {
+            const CoreCoord endpoint = device->virtual_core_from_logical_core(CoreCoord(bank, index), tt::CoreType::DRAM);
+            nb::list triple;
+            triple.append(static_cast<uint32_t>(endpoint.x));
+            triple.append(static_cast<uint32_t>(endpoint.y));
+            endpoints.append(triple);
+            if (index == 0) {
+                first_x = endpoint.x;
+                first_y = endpoint.y;
+            }
+        }
+        bank_info["noc_x"] = first_x;
+        bank_info["noc_y"] = first_y;
+        bank_info["endpoint_index"] = 0;
+    } catch (const std::exception& error) {
+        bank_info["noc_x"] = nb::none();
+        bank_info["noc_y"] = nb::none();
+        bank_info["endpoint_error"] = error.what();
+    }
     bank_info["noc_endpoints"] = endpoints;
     return bank_info;
 }
 
 nb::list staging_info(P2PStaging& staging) {
     using namespace tt::tt_metal;
-    MeshDevice& mesh = staging.mesh();
+    const auto mesh_keeper = staging.mesh();
+    MeshDevice& mesh = *mesh_keeper;
     const auto devices = mesh.get_devices();
     const MeshCoordinateRange all(mesh.shape());
     const std::vector<MeshCoordinate> coords(all.begin(), all.end());
@@ -664,6 +710,9 @@ nb::list staging_info(P2PStaging& staging) {
         nb::dict entry = bank_description(device, staging.bank());
         entry["mesh_index"] = index;
         entry["device_id"] = static_cast<int>(device->id());
+        // GetPCIeDeviceID is the logical chip id of the MMIO chip that controls this one. It equals the tt-kmd device index N (/dev/tenstorrent/N) when every
+        // card is visible to the process, in the order the kernel numbered them (the serving container's case) and NOT when a subset is: pci_bus_id below is
+        // derived from it, so the host must compare it with the card it actually opened (the window self-test does) and not trust it blindly.
         uint32_t pcie = 0;
         bool have_pcie = false;
         try {
@@ -671,6 +720,7 @@ nb::list staging_info(P2PStaging& staging) {
             have_pcie = true;
         } catch (const std::exception&) {
         }
+        entry["mmio_chip_id"] = have_pcie ? nb::object(nb::int_(pcie)) : nb::object(nb::none());
         entry["pcie_device"] = have_pcie ? nb::object(nb::int_(pcie)) : nb::object(nb::none());
         const std::string bus = have_pcie ? pci_bus_id_of(pcie) : std::string();
         entry["pci_bus_id"] = bus.empty() ? nb::object(nb::none()) : nb::object(nb::str(bus.c_str()));
@@ -682,7 +732,7 @@ nb::list staging_info(P2PStaging& staging) {
         const uint64_t lead = (4096 - start % 4096) % 4096;
         entry["aligned_4k_offset"] = lead;
         entry["aligned_4k_address"] = start + lead;
-        entry["aligned_4k_size"] = (staging.size_bytes() - lead) / 4096 * 4096;
+        entry["aligned_4k_size"] = staging.size_bytes() > lead ? (staging.size_bytes() - lead) / 4096 * 4096 : uint64_t(0);
         entry["bank_offset"] = staging.bank_offset();
         entry["page_bytes"] = staging.page_bytes();
         // What the allocation took: the same range in every bank (lockstep), and what the allocator had left around it.

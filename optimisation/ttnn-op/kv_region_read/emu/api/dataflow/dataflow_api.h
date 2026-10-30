@@ -20,6 +20,9 @@
 #include <cstring>
 #include <vector>
 
+// The device headers define this as an address-space attribute of the RISC-V compiler; on the host it is nothing.
+#define tt_l1_ptr
+
 namespace emu {
 
 constexpr uint32_t kBanks = 8;
