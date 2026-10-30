@@ -59,8 +59,9 @@ So this branch changes what the drive holds, behind the flag, as the contract al
    counted from its own first byte. The host calls it with `length = shard_bytes` and `count = blocks in the chunk`. (The checksum is not combinable from sub-ranges, so one value per block is the only way to
    check blocks individually; the per-block value is what the store holds.) `count = 1` is the contract's op. The return value is read as a (devices, count) matrix of integers (lists, a numpy array, a torch
    tensor).
-4. `ttnn.qwen_p2p_staging_info(handle)` must name the card of each mesh device: `pci_bus_id` (a PCI address) **or** `pcie_device_id` (the N of `/dev/tenstorrent/N`), besides `noc_x`, `noc_y`, `address`
-   (**4096-aligned**), `size`. The host resolves the card against the driver's own table at run time (the nodes renumber on every reset).
+4. `ttnn.qwen_p2p_staging_info(handle)` must name the card of each mesh device: `pci_bus_id` (a PCI address) **or** `pcie_device_id` (the N of `/dev/tenstorrent/N`), besides `noc_x`, `noc_y`
+   (**the translated NOC coordinates a TLB register takes**: P1 aimed bank 0 at (17, 12); a logical or physical coordinate would aim the window at another tile, and the canary cannot tell which),
+   `address` (**4096-aligned**, the byte address inside the bank), `size`. The host resolves the card against the driver's own table at run time (the nodes renumber on every reset).
 5. The staging buffer is **bank-contiguous inside one 4 GiB window and inside the published slice** (the host refuses anything else, `plan_aim`), 2 halves of `chunk_blocks x 557,056` bytes. P1 found the top of
    a 4 GiB window at bank 0 unusable (a 3 GiB transfer from the 1 GiB mark failed its canary): the staging address comes from the allocator and the canary checks both ends of it.
 
@@ -160,6 +161,9 @@ inside `load_direct` it would stall just as long. **The minimal change that lets
 * failures: a mismatch abandons the job (a miss; the request's tier hit is ignored); a read or device error before any block was taken hands the rest of the job to the host `fill` path
   (`job.host_only`); a path that latches under a job finishes it through the host path; a drive that lands nothing for 20 s abandons the job and latches the path; the trim reaching an unfinished job finishes
   it whole and **waits** for the reads (`advance(whole=True)`), as before.
+
+Not done, on purpose: ttnn calls from a worker thread. The model runner issues its ops from the engine core's thread on the same mesh command queue; the only off-thread work here is the drive's
+reads into memory the device does not touch until the next sync.
 
 It needs the slice flag **and** the admission wrapper that holds a request between slices (`hold_ready`); without them a direct backend still restores whole in the trim (`load_direct`), blocking for the
 restore's length. **What must wait for a later step:** the device-side copy still runs on the same queue as the decode rounds (tens of ms of device time a 254k restore, not measured), and nothing here
