@@ -1,0 +1,43 @@
+# The order of the tp4/upload-1 WINDOW (docs/tp4-upload1.md): the host tier's upload levers (QWEN_PREFIX_TIER_IO_THREADS, QWEN_PREFIX_TIER_IO_CHUNK_BLOCKS, QWEN_PREFIX_TIER_VERIFY_THREADS) derived by the prefix gate onto the
+# ship-5 profiles (c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-traffic-s5, and its audited twin c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-s5-audit), ONE image (tp4-upload-1-1, a placeholder: B0 builds it from the pushed head) and ONE window. The engine-start zero fill, the lazy weight loader
+# and the preconverted checkpoints are IN the ship-5 profile already and are not this window's.
+# One template per line: <template name without .env> <stop|soft|opt> <image tag> <estimated minutes>. stop: the window halts at the first failure of this job. soft: a failure or a skip does not stop the window (the NEEDS lines skip what depended on it). opt: optional, admitted only if it fits.
+# THE QUESTION: does a returning session come back from the host tier faster when the staging copies of the raw block IO run on threads beside the device calls and the digest checks run in parallel, with every byte
+# and every answer identical? U1 answers the second half (audited, byte-exact, 64k/128k/254k, cold twin against restored); U2 to U5 the first (timed, paired ABAB, the same prompts); F1 locates the host cap on the four-card upload
+# that U7 and U8 sweep on the real restore. WHAT IT CANNOT CHANGE: the returning request's own final prefill step and engine build (4.2 to 4.8 s at 254k, T3) and the sliced restore's pacing between slices.
+# P0. PRODUCTION: the owner stops the node agent and unserves production BEFORE X0 and restores it after Z; nothing in this pack does either. B0 is a build and may run while production serves. No other window driver may be alive and no privileged builder container up.
+# P0. The CPU suite is green on the pushed branch head (gh workflow run qwen-cpu-suite.yml -f ref=<sha>) and each tag is pushed on THAT commit (the throwaway commit carries only .github/c2-serving-job.env). Push ONE tag at a time and wait for its run to finish; queued tags are cancelled. Never cancel a running card job. Every result is UNQUALIFIED.
+# P0. SWIFT IS ON THE CARD HOST AND ITS CONVERTED CACHE IS BUILT (python3 scripts/ci/qwen_c2_checkpoint.py check --hub <the hub directory> --repo ukisai/Swift-1.5-Qwen3.8-27b --revision b4c84d42903a8646b25857eb2827288d92ed85a4 exits 0). GRID: read it from the run (13x10 since the firmware unlock).
+# ARC-ZERO U2 U3 U4 U5 U6 U7 U8
+# ARC PAUSE / RESTORE: the owner scales the rig's ARC runner sets to ZERO (the normal values written down first) BEFORE U2 and restores them AFTER U5 (or after U8 when the sweeps run): they are timed host-side numbers, and a model load under CI load has hit the platform's load timeout. B0, X0, F1, U1 and Z do not need it.
+# THE JOBS, in value order (cut the window at a block end): GATES: X0 U1 (120 min); TIMED PAIR: U2 U3 (90 min); REPEAT: U4 U5 (90 min); HOST CAP: F1 (30 min, can run right after X0); SWEEPS: U6 U7 U8 (optional, 135 min); END: Z (10 min). B0 is the WINDOW build, outside the card minutes.
+# DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every job on the right completed and passed its READ rule; otherwise the driver skips them.
+# NEEDS X0 <- B0
+# NEEDS F1 U1 <- X0
+# NEEDS U2 <- U1
+# NEEDS U3 <- U2
+# NEEDS U4 <- U3
+# NEEDS U5 <- U4
+# NEEDS U6 U7 U8 <- U3
+# READ RULES (each also needs c2_smoke_check clean, whose fusion table holds the three lever rows, and no stall; the templates' own headers have the whole text):
+#   B0   'baking the serving default c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-traffic-s5 with a session cap of 8', the provenance report with no problem line, its K64j-OQ graft line, the image id.
+#   X0   four cards present and healthy, the fabric as measured, the 13x10 grid in the run, no other window driver alive; the Swift weight cache found.
+#   F1   'H2D_PROBE verdict=MEASURED'; the chunked, threads and threads_busy arms printed (the cap's location); INEXACT stops the window.
+#   U1   (STOP) the tier-upload plan PASS: the three pairs IDENTICAL, the 'host tier upload on' line (io_wrapped=1), no fell-back line, zero failure/mismatch counters, restore and spill through the threaded IO.
+#   U2 U3 U4 U5   the tier-upload-timed(-control) plans PASS each, then python3 scripts/ci/upload_restore_compare.py <U2> <U3> <U4> <U5>: GO in both pairs (text IDENTICAL, restore ms down >= 25% at 128k and 254k, returning TTFT not up beyond 5% or the floor).
+#   U6 U7 U8   the plans PASS, then upload_restore_compare.py <U2> <U6|U7|U8> read against U3's table (the thread count and the call size that win).
+# NO-GO for the levers: any returning answer that is not IDENTICAL, any audit mismatch or digest failure, a fell-back line, a tier that latched off on its own, a restore that did not go through the threaded IO, a restore not faster than the control's by the bar, a returning-hit TTFT above the control's beyond the floor.
+# Adopting the levers in the ship entry (scripts/ci/fusion-wp/S5.json -> the next profile) is the OWNER'S decision after U1 to U5; the waiver text must then name them (docs/tp4-upload1.md "Shipping").
+# Time (estimate, minutes): B0 40, X0 20, F1 30, U1 100, U2 45, U3 45, U4 45, U5 45, U6 45, U7 45, U8 45, Z 10: 515 minutes (8 h 35 min) with the sweeps, 380 (6 h 20 min) without; nothing of the upload levers has run on a card.
+B0-upload1-build stop tp4-upload-1-1 40
+X0-status-rescan-reset stop tp4-upload-1-1 20
+F1-h2d-rerun soft tp4-upload-1-1 30
+U1-upload-audited stop tp4-upload-1-1 100
+U2-restore-control-a soft tp4-upload-1-1 45
+U3-restore-upload-a soft tp4-upload-1-1 45
+U4-restore-control-b soft tp4-upload-1-1 45
+U5-restore-upload-b soft tp4-upload-1-1 45
+U6-sweep-threads8 opt tp4-upload-1-1 45
+U7-sweep-call128 opt tp4-upload-1-1 45
+U8-sweep-call2048 opt tp4-upload-1-1 45
+Z-reset soft tp4-upload-1-1 10

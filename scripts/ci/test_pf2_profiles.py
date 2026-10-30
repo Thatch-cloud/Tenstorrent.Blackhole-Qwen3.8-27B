@@ -130,11 +130,20 @@ class ProtectedTests(unittest.TestCase):
         # (tp4/next-1 integrated this branch with the lone-user round's, exact resume's / exact-end's and the ship-5 candidate's profiles: test_np1_profiles, test_xe_profiles, test_s5_profiles)
         import make_np1_profiles
         import make_s5_profiles
+        import make_s6_profiles
+        import make_s7_profiles
         import make_xe_profiles
 
         import make_sched_profiles
+        import make_sched2_profiles
 
-        integrated = set(make_np1_profiles.twin_names()) | set(make_sched_profiles.twin_names()) | set(make_xe_profiles.twin_names()) | set(make_s5_profiles.owned_names()) | {name for name in PROFILES if name.endswith(('-fx-all-er', '-fx-all-er-audit'))}
+        integrated = set(make_np1_profiles.twin_names()) | set(make_sched_profiles.twin_names()) | set(make_sched2_profiles.twin_names()) | set(make_xe_profiles.twin_names()) | set(make_s5_profiles.owned_names()) | set(make_s6_profiles.owned_names() + make_s7_profiles.owned_names()) | {name for name in PROFILES if name.endswith(('-fx-all-er', '-fx-all-er-audit'))}
+        import make_pf3_profiles
+        import make_pf3k_profiles
+        import make_nvme_profiles
+
+        integrated |= set(make_nvme_profiles.twin_names())      # (tp4/kv-nvme-2's NVMe-tier twins of the ship-7 candidate, test_nvme_profiles)
+        integrated |= set(make_pf3_profiles.twin_names()) | set(make_pf3k_profiles.twin_names())      # (tp4/prefill-3's three twins of the ship-5 candidate, test_pf3k_profiles)
         self.assertEqual(sorted(set(PROFILES) - set(before['profiles']) - integrated), sorted(twins.NAMES))
 
     def test_the_approved_traffic_profile_never_names_either_flag(self):
@@ -142,12 +151,28 @@ class ProtectedTests(unittest.TestCase):
         self.assertNotIn(AUDIT_FLAG, PROFILES[SHIP]['env'])
         self.assertEqual(PROFILES[SHIP][contract.TRAFFIC_WAIVER]['decision'][:8], 'APPROVED')
         import make_s5_profiles
+        import make_s6_profiles
+        import make_s7_profiles
+        import make_sched2_profiles
+
+        import make_pf3_profiles
+        import make_pf3k_profiles
+        import make_nvme_profiles
 
         for name, profile in PROFILES.items():
             if name not in twins.NAMES:
-                if name in make_s5_profiles.owned_names():
+                if name in make_sched2_profiles.twin_names():
+                    # tp4/sched-2: children of the ship-5 candidate / its audited twin plus one switch each, so the hand-off (and, on the audited child, its audit) as the parent has it
+                    self.assertEqual(profile['env'].get(AUDIT_FLAG), '1' if name.endswith('-audit') else None, name)
+                    self.assertEqual(profile['env'].get(FLAG), '1', name)
+                    continue
+                if name in make_pf3k_profiles.twin_names():
+                    continue      # (tp4/prefill-3's twins are the ship-5 candidate's: they carry the hand-off as it does, and the control the K-split flag at 0: test_pf3k_profiles)
+                if name in make_s5_profiles.owned_names() or name in make_s6_profiles.owned_names() + make_s7_profiles.owned_names() + make_nvme_profiles.twin_names() or name in make_pf3_profiles.twin_names():
                     # tp4/next-1: the ship-5 candidate carries the hand-off (under its owner traffic waiver, in words) and its audited twins carry the audit too; the audit is no traffic profile's
-                    self.assertEqual(profile['env'].get(AUDIT_FLAG), None if name == make_s5_profiles.SHIP else '1', name)
+                    # (tp4/prefill-3's traced-tail twins are the candidate / its audited twin plus the traced-tail flags: the audit is the audited ones')
+                    audited = name.endswith(('audit', 'audit-nowc', 'audit-mid')) if name in make_pf3_profiles.twin_names() else name not in (make_s5_profiles.SHIP, make_s6_profiles.SHIP, make_s7_profiles.SHIP, make_nvme_profiles.TIMED)      # (the NVMe-tier timed twin is unaudited, its audited twins carry the audit: test_nvme_profiles)
+                    self.assertEqual(profile['env'].get(AUDIT_FLAG), '1' if audited else None, name)
                     self.assertEqual(profile['env'].get(FLAG), '1', name)
                     continue
                 self.assertNotIn(FLAG, profile['env'], name)

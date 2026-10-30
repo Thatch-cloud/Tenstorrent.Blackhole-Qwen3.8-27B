@@ -158,6 +158,18 @@ class FlagTests(unittest.TestCase):
             self.assertIsNone(plan, (name, value))
             self.assertTrue(any(name in problem for problem in problems), (name, value, problems))
 
+    def test_the_runners_card_list_is_the_fallback_and_never_an_inert_knob(self):
+        # c2_cache_drive.py sets QWEN_P2PMEM_DEVICES for every job that names C2_P2PMEM, the host-backend tier jobs included: off, it is ignored; on, it names the cards
+        plan, problems = kvnvme.parse(dict(ACKED, QWEN_P2PMEM_DEVICES='0000:42:00.0,0000:41:00.0'))
+        self.assertEqual((problems, plan.p2p, plan.p2pmem), ([], False, ()))
+        plan, problems = kvnvme.parse(dict(ACKED, **dict(P2P, QWEN_P2PMEM_DEVICES='0000:42:00.0,0000:41:00.0')))
+        self.assertEqual((problems, plan.p2pmem), ([], ('0000:41:00.0', '0000:42:00.0')))
+        plan, problems = kvnvme.parse(dict(ACKED, **dict(P2P, QWEN_P2PMEM_DEVICES='0000:42:00.0', QWEN_PREFIX_NVME_P2PMEM='0000:4a:00.0')))
+        self.assertEqual((problems, plan.p2pmem), ([], ('0000:4a:00.0',)))                      # (the explicit name wins)
+        plan, problems = kvnvme.parse(dict(ACKED, **dict(P2P, QWEN_P2PMEM_DEVICES='nonsense')))
+        self.assertIsNone(plan)
+        self.assertTrue(any('QWEN_P2PMEM_DEVICES' in problem for problem in problems), problems)
+
     def test_the_old_restore_name_points_at_the_new_flag(self):
         plan, problems = kvnvme.parse(dict(ACKED, QWEN_PREFIX_NVME_RESTORE='p2p'))
         self.assertIsNone(plan)

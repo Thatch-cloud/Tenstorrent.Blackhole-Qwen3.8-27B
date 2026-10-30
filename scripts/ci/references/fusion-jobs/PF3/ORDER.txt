@@ -1,0 +1,51 @@
+# The order of the tp4/prefill-3 window (docs/tp4-prefill3.md; scripts/ci/make_pf3_jobs.py): the masked tail pass of a prompt as a trace replay (QWEN_FAST_PREFILL_TAIL_TRACE) on the ship-5 candidate and its gate-only twins (make_pf3_profiles.py), the checkpoint production serves (ukisai/Swift-1.5-Qwen3.8-27b, revision b4c84d42903a) in every smoke job, ONE image (tp4-pf3-1, a placeholder: B0 builds it from the pushed tp4/prefill-3 head WITH the K64j-OQ graft) and ONE window.
+# One template per line: <template name without .env> <stop|soft> <image tag> <estimated minutes>. stop: the window halts at the first failure of this job. soft: a failure or a skip does not stop the window (the NEEDS lines skip what depends on it).
+# WHAT THIS DECIDES (the owner's, never the window's): whether the tail pass of every prompt should be a replayed trace. Today it costs a flat 320 to 410 ms below the 2,048-row bucket (~3,155 eagerly dispatched ops against 15 to 150 ms of device work: docs/tp4-prefill-2.md section 3.2), 6 percent of a returning turn at 120k and about twice that once exact resume has taken the first chunk. The expected saving is 120 to 215 ms a tail pass (ESTIMATE, docs/tp4-prefill3.md section 4); the expectation is arithmetic on the PROD fits, not a measurement. H0 is the fit gate, A1 and A2 and AP1 the exactness gates; L1 and L2 size the arena; T1-T4 and R1-R2 read the saving. Every result is UNQUALIFIED.
+# THE NEW DEVICE FACTS: (1) a PREFILL trace in the served stack (the first since the chunk trace was dropped: four traces of ~3,400 ops over persistent buffers, the K/V pad blocks written to NP1's scratch page, the tap outputs retained); (2) the pad rows of the GDN layers made inert through the gates (claim C1: the chunk op with valid_len = bucket leaves the same recurrent state, byte for byte, as with valid_len = the real count) and the conv state selected by a one-hot matmul pair (claim C2); (3) an arena of ballast DRAM freed for the captures and allocated again after them. The audits of A1 and A2 settle C1 and C2; H0 settles the fit.
+# P0. PRODUCTION: the owner stops the node agent and unserves production BEFORE X0 and restores it after Z; nothing in this pack does either. B0 is a build and may run while production serves. No other window driver may be alive and no privileged builder container may be up during a card job.
+# P0. The CPU suite is green on the pushed branch head (gh workflow run qwen-cpu-suite.yml -f ref=<sha>) and each tag is pushed on THAT commit (the throwaway commit carries only .github/c2-serving-job.env). Push ONE tag at a time and wait for its run to finish; queued tags are cancelled. Never cancel a running card job.
+# P0. SWIFT IS ON THE CARD HOST AND ITS CONVERTED CACHE IS BUILT: python3 scripts/ci/qwen_c2_checkpoint.py check --hub <the hub directory> --repo ukisai/Swift-1.5-Qwen3.8-27b --revision b4c84d42903a8646b25857eb2827288d92ed85a4 exits 0, and the Swift window's W0 (or the production first boot) has built the keyed weight cache, so every smoke job here logs "weight cache ...: found". This pack builds nothing of it.
+# P0. GRID: the four cards expose a 13x10 compute grid since the firmware unlock. Read it from the run, never assume 11x10: every pair runs on one grid.
+# ARC-ZERO H0 R2
+# ARC PAUSE / RESTORE: the owner scales the rig's ARC runner sets to ZERO (minRunners and maxRunners 0, the normal values written down first, restored by the same patch with the old numbers) BEFORE H0 and restores them AFTER R2, i.e. around every attach (a model load under CI load has hit the platform's load timeout) and every timed job. B0, X0 and Z do not need the pause.
+# THE JOBS, in value order (cut the window at a block end; the GATES block is 6 h 10 min and answers whether the lever is exact and fits): GATES: B0 X0 H0 A1 A2 AP1 (370 min); ARENA LADDER: L1 L2 (60 min); SMOKE ABAB: T1 T2 T3 T4 (280 min); RETURNING TURNS: R1 R2 (180 min); END: Z (10 min). B0 is the WINDOW build.
+# DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every job on the right completed and passed its READ rule; otherwise the driver skips them.
+# NEEDS X0 <- B0
+# NEEDS H0 <- X0
+# NEEDS A1 <- H0
+# NEEDS A2 <- A1
+# NEEDS AP1 <- A2
+# NEEDS L1 <- H0
+# NEEDS L2 <- L1
+# NEEDS T1 <- A1 A2 AP1
+# NEEDS T2 <- T1
+# NEEDS T3 <- T2
+# NEEDS T4 <- T3
+# NEEDS R1 <- AP1
+# NEEDS R2 <- R1
+# READ RULES (each also needs c2_smoke_check clean where it is a smoke job, and no stall; the templates' own headers have the whole text):
+#   B0   'baking the serving default c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-traffic-s4 with a session cap of 8', the provenance report with no problem line, its K64j-OQ graft line, the image id.
+#   X0   four cards present and healthy, the fabric as measured, the 13x10 grid in the run, no other window driver alive; the Swift weight cache found.
+#   H0   (STOP) the engaged line once with uncovered=0, the traces' trace-region bytes and the arena's DRAM recorded, no 'fell back', no stall. A refusal naming the arena, the hole census, the conv op or the hooks is NO-GO.
+#   A1 A2   (STOP) the engaged line, every audit line exact=True (the first eight tails, every 24th and the first two of each bucket), no 'audit mismatch', no 'fell back'. ANY failure is NO-GO and halts the window.
+#   AP1  (STOP) the tier-timed plan PASS on c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-pf3-s5-audit and every audited tail exact=True at 125k and 245k of context.
+#   L1 L2   the attach passes (uncovered=0) or fails by name: the smallest passing arena is the answer.
+#   T1 T2 T3 T4   pf3_report.py (the tail milliseconds of both arms, both pairs, and the floor T1 against T3), prefill_ladder_report.py (the rungs' TTFT ratio and equal answers). GO: a SAVING in the tail line and no LOSS in a rung.
+#   R1 R2   pf3_report.py on the returning-turn pair: the saving per tail pass at 125k and 245k of context; the plan verdict PASS on both.
+# NO-GO for the traced tail: any stall, any audit mismatch, any fallback line, a text difference against the control, a program compiled after the warm, an engaged line missing on an arm, a nonzero hole census, a LOSS in the tail line. Adopting is the owner's decision: the flag is a gate instrument today and a ship profile needs an owner traffic waiver naming it (docs/tp4-prefill3.md).
+# Time (estimate, minutes): B0 40, X0 20, H0 40, A1 100, A2 80, AP1 90, L1 30, L2 30, T1 70, T2 70, T3 70, T4 70, R1 90, R2 90, Z 10: 900 minutes (15 h 0 min) in all, 860 minutes of cards (X0 to Z).
+B0-build-window stop tp4-pf3-1 40
+X0-status-rescan-reset stop tp4-pf3-1 20
+H0-pf3-footprint-attach stop tp4-pf3-1 40
+A1-pf3-audited-attach stop tp4-pf3-1 100
+A2-pf3-audited-attach-mid stop tp4-pf3-1 80
+AP1-pf3-audited-returning stop tp4-pf3-1 90
+L1-pf3-arena-160 soft tp4-pf3-1 30
+L2-pf3-arena-80 soft tp4-pf3-1 30
+T1-ctl-a soft tp4-pf3-1 70
+T2-pf3-a soft tp4-pf3-1 70
+T3-ctl-b soft tp4-pf3-1 70
+T4-pf3-b soft tp4-pf3-1 70
+R1-ctl-returning soft tp4-pf3-1 90
+R2-pf3-returning soft tp4-pf3-1 90
+Z-reset soft tp4-pf3-1 10

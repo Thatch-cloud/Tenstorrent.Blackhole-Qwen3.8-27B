@@ -225,7 +225,7 @@ class IdentityTests(ProbeCase):
             self.check()
 
     def test_an_unconfigured_model_or_serial_or_a_missing_node_refuses(self):
-        for kwargs, why in (({'model': ''}, 'not configured'), ({'serial': None}, 'not configured'), ({'device': os.path.join(self.directory, 'nope')}, 'does not exist'),
+        for kwargs, why in (({'model': ''}, 'not both configured'), ({'serial': None}, 'not both configured'), ({'device': os.path.join(self.directory, 'nope')}, 'does not exist'),
                             ({'model': 'Other Model'}, 'cannot be shown|another')):
             with self.assertRaisesRegex(probe.Refusal, why):
                 self.check(**kwargs)
@@ -236,6 +236,71 @@ class IdentityTests(ProbeCase):
         self.assertTrue(probe.accepted_names(MODEL, SERIAL).fullmatch('nvme-Fake_NVMe_Model_9000_1TB_FAKESERIAL123_1'))
         self.assertFalse(probe.accepted_names(MODEL, SERIAL).fullmatch('nvme-Fake_NVMe_Model_9000_1TB_FAKESERIAL1234'))
         self.assertFalse(probe.accepted_names(MODEL, SERIAL).fullmatch('nvme-eui.0123456789'))
+
+    # -- the runner's contract: a plain node and the boot unit's status file, no model and serial in the environment
+    def status_file(self, by_id='/dev/disk/by-id/nvme-Fake_NVMe_Model_9000_1TB_FAKESERIAL123_1'):
+        path = os.path.join(self.directory, 'status.json')
+        with open(path, 'w') as handle:
+            json.dump({'by_id': by_id, 'sed': 'opal'}, handle)
+        return path
+
+    def from_status(self, **kwargs):
+        node = os.path.join(self.directory, 'c2-cache-drive')
+        shutil.copy(self.device, node)
+        args = dict(device=node, model=None, serial=None, by_id_dir=os.path.join(self.directory, 'no-by-id'), sysfs=self.sysfs)
+        args.update(kwargs)
+        if 'status_file' not in args:
+            args['status_file'] = self.status_file()
+        return probe.identity_check(**args)
+
+    def test_the_status_files_by_id_must_be_what_the_kernel_says_the_node_is(self):
+        result = self.from_status()
+        self.assertEqual(result['proof'], ['status+sysfs'])
+        self.assertEqual(len(result['fingerprint']), 6)
+        self.assertIn(SERIAL, result['learned'])                       # (so that the scrubber can take it out of every text)
+
+    def test_a_status_file_that_names_another_drive_refuses(self):
+        with self.assertRaisesRegex(probe.Refusal, 'not the one the status file names'):
+            self.from_status(status_file=self.status_file('/dev/disk/by-id/nvme-Other_Model_77777_1'))
+        self.kernel['serial'] = 'SOMEONEELSE'
+        self.write_kernel()
+        with self.assertRaisesRegex(probe.Refusal, 'not the one the status file names'):
+            self.from_status()
+
+    def test_no_status_file_and_no_model_and_serial_refuses_before_anything(self):
+        with self.assertRaisesRegex(probe.Refusal, 'cannot be shown'):
+            self.from_status(status_file=os.path.join(self.directory, 'missing.json'))
+        bad = os.path.join(self.directory, 'bad.json')
+        with open(bad, 'w') as handle:
+            handle.write('[1, 2]')
+        with self.assertRaisesRegex(probe.Refusal, 'cannot be shown'):
+            self.from_status(status_file=bad)
+        with open(bad, 'w') as handle:
+            json.dump({'by_id': ''}, handle)
+        with self.assertRaisesRegex(probe.Refusal, 'cannot be shown'):
+            self.from_status(status_file=bad)
+
+    def test_a_kernel_that_cannot_say_cannot_be_trusted_with_a_status_file_alone(self):
+        self.has_sysfs = False
+        with self.assertRaisesRegex(probe.Refusal, 'unreadable'):
+            self.from_status()
+
+    def test_only_one_of_model_and_serial_refuses(self):
+        with self.assertRaisesRegex(probe.Refusal, 'not both configured'):
+            self.from_status(model=MODEL)
+
+    def test_the_environment_names_of_the_runner_are_the_defaults(self):
+        with mock.patch.dict(os.environ, {'QWEN_PREFIX_NVME_DEVICE': '/dev/c2-cache-drive', 'QWEN_P2PMEM_DEVICES': '0000:41:00.0,0000:42:00.0'}, clear=False):
+            options = probe.parse_options(['--output', 'x.json'])
+        self.assertEqual((options.drive, options.cards), ('/dev/c2-cache-drive', ['0000:41:00.0', '0000:42:00.0']))
+        self.assertEqual(options.status_file, '/run/thatch-cache-drive/status.json')
+
+    def test_what_the_kernel_told_us_never_reaches_a_log(self):
+        options = self.options(drive='/dev/c2-cache-drive', drive_model=None, drive_serial=None, status_file=self.status_file())
+        options.learned = tuple(self.from_status()['learned'])
+        text = probe.scrubber(options)('open failed for %s on Fake_NVMe_Model_9000_1TB_FAKESERIAL123_1 (%s)' % (SERIAL, MODEL))
+        for secret in (SERIAL, MODEL, 'FAKESERIAL123'):
+            self.assertNotIn(secret, text)
 
 
 class ReadingTests(ProbeCase):
@@ -289,7 +354,7 @@ class ReadingTests(ProbeCase):
 
     def test_a_missing_identity_refuses_before_the_mesh(self):
         report = self.run_flow(self.options(drive_serial=None))
-        self.assertIn('not configured', report['refusal'])
+        self.assertIn('not both configured', report['refusal'])
         self.assertEqual(self.ttnn.opened, [])
 
 
@@ -581,62 +646,70 @@ class JobWiringTests(unittest.TestCase):
         self.assertNotRegex(text, r'[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]')
         self.assertNotRegex(text, r'nvme-[A-Za-z0-9]')
         for name in probe.ENV_NAMES:
-            self.assertNotIn(name + '=', text, 'the drive and the cards come from the runner\'s private file, not from the job')
+            self.assertNotIn(name + '=', text, 'the drive and the cards are the runner keys, in their words, not the probe\'s own names')
+        self.assertRegex(text, r'(?m)^C2_NVME_DEVICE=status$')
+        self.assertRegex(text, r'(?m)^C2_P2PMEM=auto$')
+        self.assertEqual((outputs['nvme_device'], outputs['peer_memory']), ('status', 'auto'))
 
-    def test_the_workflow_step_runs_the_script_with_the_drive_and_the_p2pmem_directories(self):
-        self.assertIn('p2p-restore) script=tp4_p2p_restore_probe.py; report=p2p-restore-p3a.json ;;', self.WORKFLOW)
+    def step(self):
         step = self.WORKFLOW[self.WORKFLOW.index('p2pargs=()'):]
-        step = step[:step.index('timeout -k 30 "$limit" docker run')]
-        for word in ('P2P_DRIVE_BY_ID', 'P2P_DRIVE_MODEL', 'P2P_DRIVE_SERIAL', 'P2P_CARDS', '/p2pmem', '--device', 'SYS_ADMIN', 'refusing'):
+        return step[:step.index('# split builds the image')]
+
+    def test_the_workflow_step_runs_the_script_with_the_runner_keys(self):
+        self.assertIn('p2p-restore) script=tp4_p2p_restore_probe.py; report=p2p-restore-p3a.json ;;', self.WORKFLOW)
+        step = self.step()
+        for word in ('C2_NVME_DEVICE', 'C2_P2PMEM', 'QWEN_P2PMEM_DEVICES', '/dev/c2-cache-drive', 'SYS_ADMIN', 'refusing', 'lsblk', '/proc/swaps', 'mdstat', 'holders'):
             self.assertIn(word, step)
         self.assertIn('${p2pargs[@]+"${p2pargs[@]}"}', self.WORKFLOW)
+        self.assertIn('${cache_args[@]+"${cache_args[@]}"}', self.WORKFLOW)       # (the drive and the cards reach docker through the shared plumbing, once)
         self.assertIn('P3A', self.WORKFLOW[self.WORKFLOW.index("grep -E 'FABRIC_PROBE"):][:200])
+        self.assertNotIn('P2P_ENV_FILE', self.WORKFLOW)                           # (no second, private way to name the drive)
+        self.assertNotIn('--privileged', step)
 
-    def test_the_step_reads_a_private_file_with_a_strict_parser_and_checks_the_identity_before_docker(self):
-        step = self.WORKFLOW[self.WORKFLOW.index('p2pargs=()'):]
-        step = step[:step.index('timeout -k 30 "$limit" docker run')]
-        self.assertIn("P2P_ENV_FILE", step)
-        self.assertIn('^(P2P_DRIVE_BY_ID|P2P_DRIVE_MODEL|P2P_DRIVE_SERIAL|P2P_CARDS)=', step)       # (a KEY=VALUE line parser, not `source`)
-        self.assertNotIn('source ', step)
-        self.assertNotIn('. "$', step)
-        self.assertLess(step.index('readlink -f'), step.index('p2pargs=(--device'))
+    def test_the_step_checks_the_drive_before_docker_and_adds_only_one_capability(self):
+        step = self.step()
+        self.assertLess(step.index('lsblk'), step.index('p2pargs=(--cap-add SYS_ADMIN)'))
+        self.assertEqual(step.count('--cap-add'), 1)
+        self.assertLess(self.WORKFLOW.index('c2_cache_drive.py args'), self.WORKFLOW.index('p2pargs=()'))
 
     def test_the_shell_block_refuses_what_it_should_before_docker_is_reached(self):
         import subprocess
+        import textwrap
 
         block = self.WORKFLOW[self.WORKFLOW.index('          p2pargs=()'):self.WORKFLOW.index('          # split builds the image')]
-        import textwrap
-        script = 'set -euo pipefail\nPROBE=p2p-restore\n' + textwrap.dedent(block) + '\necho BLOCK-PASSED\n'
+        self.assertIn('[ -b "$node" ]', block)
         directory = tempfile.mkdtemp(prefix='p3a-shell-')
         self.addCleanup(shutil.rmtree, directory, True)
-        path = os.path.join(directory, 'step.sh')
-        with open(path, 'w') as handle:
-            handle.write(script)
-        env_file = os.path.join(directory, 'private.env')
+        fake_node = os.path.join(directory, 'node')
+        open(fake_node, 'wb').close()
 
-        def run(content=None, mode=0o600):
-            if content is not None:
-                with open(env_file, 'w') as handle:
-                    handle.write(content)
-                os.chmod(env_file, mode)
-            result = subprocess.run(['bash', path], env={'PATH': os.environ['PATH'], 'HOME': directory, 'P2P_ENV_FILE': env_file}, capture_output=True, text=True, timeout=60)
+        def run(nvme='status', p2pmem='auto', cache_args=None, plain_file_is_a_node=False):
+            text = textwrap.dedent(block)
+            if plain_file_is_a_node:
+                # (a CPU test has no block device to hand over: the one test of the later checks lets a plain file stand for it)
+                text = text.replace('[ -b "$node" ]', '[ -e "$node" ]')
+            script = 'set -euo pipefail\nPROBE=p2p-restore\nNVME_DEVICE=%s\nP2PMEM=%s\ncache_args=(%s)\n' % (
+                nvme, p2pmem, ' '.join("'%s'" % arg for arg in (cache_args if cache_args is not None else []))) + text + '\necho BLOCK-PASSED\n'
+            path = os.path.join(directory, 'step.sh')
+            with open(path, 'w') as handle:
+                handle.write(script)
+            result = subprocess.run(['bash', path], env={'PATH': os.environ['PATH']}, capture_output=True, text=True, timeout=60)
             return result.returncode, result.stderr.strip()
 
-        good = 'P2P_DRIVE_BY_ID=/dev/disk/by-id/nvme-Some_Model_SER1\nP2P_DRIVE_MODEL=Some Model\nP2P_DRIVE_SERIAL=SER1\nP2P_CARDS=0000:41:00.0\n'
+        resolved = ['--device', fake_node + ':/dev/c2-cache-drive:rwm', '-e', 'QWEN_PREFIX_NVME_DEVICE=/dev/c2-cache-drive', '-e', 'QWEN_P2PMEM_DEVICES=0000:41:00.0']
         cases = [
-            (None, 0o600, 'no private P3a file'),                                         # (the file does not exist yet)
-            (good, 0o666, 'not the runner user'),
-            (good.replace('SER1\nP2P_CARDS', 'SER1\nEVIL=$(touch pwned)\nP2P_CARDS'), 0o600, 'not one of its four names'),
-            (good.replace('P2P_DRIVE_SERIAL=SER1\n', ''), 0o600, 'P2P_DRIVE_SERIAL is not set'),
-            (good.replace('/dev/disk/by-id/nvme-Some_Model_SER1', '/dev/sda'), 0o600, 'must be named by a /dev/disk/by-id'),
-            (good.replace('P2P_DRIVE_BY_ID=/dev/disk/by-id/nvme-Some_Model_SER1', 'P2P_DRIVE_BY_ID=/dev/disk/by-id/nvme-Not_There_SER1'), 0o600, 'does not resolve to a block device'),
+            (dict(nvme='', p2pmem='auto', cache_args=resolved), 'needs C2_NVME_DEVICE and C2_P2PMEM'),
+            (dict(nvme='status', p2pmem='', cache_args=resolved), 'needs C2_NVME_DEVICE and C2_P2PMEM'),
+            (dict(nvme='/dev/disk/by-id/nvme-Some_Model_SER1', cache_args=resolved), 'needs C2_NVME_DEVICE=status'),
+            (dict(cache_args=['--device', fake_node + ':/dev/c2-cache-drive:rwm']), 'did not resolve to a block device'),    # (a plain file is no block device)
+            (dict(cache_args=resolved[:2]), 'did not resolve to a block device'),
+            (dict(cache_args=resolved[:2], plain_file_is_a_node=True), 'no card publishes p2pmem'),
+            (dict(cache_args=resolved, plain_file_is_a_node=True), 'pool is missing or not whole'),                         # (this host has no p2pmem)
         ]
-        for content, mode, why in cases:
-            code, err = run(content, mode)
+        for kwargs, why in cases:
+            code, err = run(**kwargs)
             self.assertEqual(code, 1, (why, err))
             self.assertIn(why, err)
-        self.assertFalse(os.path.exists(os.path.join(directory, 'pwned')))
-        self.assertNotIn('BLOCK-PASSED', run(good)[1])
 
     def test_the_script_is_in_the_image_free_checkout_mount(self):
         # the fabric step mounts the checkout read-only at /c2 and runs /c2/scripts/ci/<script>: the probe needs no image rebuild, only an image with the device-op extension

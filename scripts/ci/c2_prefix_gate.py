@@ -90,6 +90,12 @@ named as the arm - c2_serving_job.PREFIX_ARM_PLANS - that runs only it, judged e
 
   tiers      tier-attach, tier-returning, tier-timed (tp4/prefix-tiers: the preconverted checkpoints and the host KV tier on a profile that names
              QWEN_PREFIX_HOST_TIER_GIB; docs/prefix-store-hygiene.md), each also a plan of its own.
+  tier-upload, tier-upload-timed, tier-upload-timed-control (+ -8, -c128, -c2048 sweeps)  (tp4/upload-1, docs/tp4-upload1.md; one arm each, on a tier profile): the host tier's
+             upload levers (QWEN_PREFIX_TIER_IO_THREADS / _IO_CHUNK_BLOCKS / _VERIFY_THREADS, qwen_tier_upload), derived onto the profile. tier-upload is the tier-timed cycle at
+             ~64k / 128k / 254k on the AUDITED profile with the levers on (every restored block read back and compared, every returning answer against its cold twin: byte-exact);
+             tier-upload-timed the same cycle UNAUDITED with the levers on and tier-upload-timed-control the same cycle with them off (the ABAB pair: the restore line's ms and
+             GB/s, the returning hit's TTFT); -8 eight threads, -c128 / -c2048 the device call size at 128 / 2048 blocks (the host-cap sweep: a call over 32 MiB a card fell off a
+             cliff in F1). The counters tier_io_* and tier_verify_* print the overlap (device ms against staging ms against wall ms).
   tier-concurrent, tier-concurrent-timed  (one arm each; on a tier profile or on its no-tier control): what the host tier costs the users who are not
              using it (prefix_replay.scenario_tier_concurrent). A session is built and pushed out of the device pool by floods the size of the pool, then
              seven seats decode (about 4k-token coding prompts, ignore_eos, a budget for the whole scenario) and, after a control window of the seats
@@ -100,6 +106,15 @@ named as the arm - c2_serving_job.PREFIX_ARM_PLANS - that runs only it, judged e
              (QWEN_FAST_LEVERN_MAX_DECODE_GAP_S, 8 s); the audited arm (the audits are its cost) prints it. NOT_EXERCISED: a window without all the seats
              decoding across it, no restore line for the returning turn, no spill line inside the long prompt (tier profiles). The seats' text against a
              control boot is compared offline (scripts/ci/tier_concurrent_compare.py <control results> <tier results>), and the two arms' stalls side by side.
+
+  nvme-exact, nvme-timed, nvme-concurrent, nvme-concurrent-whole, nvme-restart  (tp4/kv-nvme-2, docs/tp4-kv-nvme.md section 12; one arm each, on an NVMe profile: make_nvme_profiles,
+             the ship-7 candidate and its audit twin plus the NVMe tier, the host tier's KV share cut to STORE_GIB + 4 so a returning session can only come from the drive; the drive is
+             handed over with --nvme-device, resolved per arm, the R1 readings printed, the arm refused as INFRA unless it is live; --p2pmem maps the cards' p2pmem). nvme-exact: the
+             tier-timed cycle at ~64k / 128k / 254k on the AUDIT twin, every returning answer against its cold twin, each on record as restored from the drive. nvme-timed: the cycle at
+             ~32k / 128k / 254k, timed. nvme-concurrent / -whole: tier-concurrent-timed on the profile as it is (the sliced restore) and with the slice derived off. nvme-restart: a session
+             built and written to the drive survives (a) a graceful stop inside the platform's 10 s grace (exit code not 137, the tier's drain line) and (b) a SIGKILL, and returns in the
+             new process equal to its cold twin. The timed and concurrent arms also run on a host-tier profile without the NVMe tier: the control of the ABAB pair. Every arm served on an
+             NVMe profile, whatever its plan, is judged for the tier too (nvme_findings: the tier on, the drive open, the encryption check passed, no trouble line, no failure counter).
 
 THE FAST PATH'S STICKY SESSIONS (phase 1 on the S2 lineage; --profile c2-packed-prefix --baseline c2-packed,
 the profiles with QWEN_FAST_STICKY_SESSIONS=1 beside QWEN_PREFIX_REUSE=1). The same plans, judged for what
@@ -199,6 +214,7 @@ import traceback
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+import c2_cache_drive  # noqa: E402
 import c2_serving_gate as gate  # noqa: E402
 import c2_smoke_check  # noqa: E402
 import c2_serving_job  # noqa: E402
@@ -308,7 +324,34 @@ DERIVED = dict(
     quota=lambda profile: dict(env=quota_env(profile)),
     # The sliced restore (the tier-concurrent-sliced plans): the profile plus QWEN_PREFIX_TIER_RESTORE_SLICE and its time budget.
     slice=lambda profile: dict(env=slice_env(profile)),
+    # tp4/kv-nvme-2 (docs/tp4-kv-nvme.md section 12). whole: the profile with the sliced restore OFF (a None value deletes the name; the ship-7 profiles carry it), the whole-restore arm of the
+    # concurrent pair. nvmeplain: the restart drill's arm, the tier's write audit off (the audit twin reads every object back after its write, which would time a drain the platform's
+    # grace does not see); every engine audit of the profile stays.
+    whole=dict(env={registry_names.ENV_TIER_RESTORE_SLICE: None, registry_names.ENV_TIER_RESTORE_SLICE_MS: None}),
+    nvmeplain=dict(env={'QWEN_PREFIX_NVME_AUDIT': None}),
 )
+# tp4/upload-1 (docs/tp4-upload1.md): the host tier's upload levers derived onto a tier profile (no profile twin, no census change; the contract admits them on a traffic profile
+# whose waiver names the tier and on any gate-only one). The engine-start zero fill (QWEN_FAST_DEVICE_ZEROS) and the lazy weight loader are in the s5 profiles already and are
+# not derived here. The audited arm runs on the audited tier profile (whose env audits every restored block); the timed arms differ from tier-timed's by the levers alone.
+UPLOAD_THREADS = 4
+UPLOAD_SWEEP_THREADS = 8
+UPLOAD_SWEEP_CHUNKS = (128, 2048)
+UPLOAD_IO_FLAG, UPLOAD_CHUNK_FLAG, UPLOAD_VERIFY_FLAG = 'QWEN_PREFIX_TIER_IO_THREADS', 'QWEN_PREFIX_TIER_IO_CHUNK_BLOCKS', 'QWEN_PREFIX_TIER_VERIFY_THREADS'
+
+
+def upload_env(threads=UPLOAD_THREADS, chunk=0):
+    env = {UPLOAD_IO_FLAG: str(threads), UPLOAD_VERIFY_FLAG: str(threads)}
+    if chunk:
+        env[UPLOAD_CHUNK_FLAG] = str(chunk)
+    return env
+
+
+DERIVED.update(
+    upload1=dict(env=upload_env()),
+    uptime=dict(env=dict(DERIVED['tiertime']['env'], **upload_env())),
+    uptime8=dict(env=dict(DERIVED['tiertime']['env'], **upload_env(UPLOAD_SWEEP_THREADS))),
+    **dict(('uptimec%d' % chunk, dict(env=dict(DERIVED['tiertime']['env'], **upload_env(chunk=chunk)))) for chunk in UPLOAD_SWEEP_CHUNKS))
+UPLOAD_KINDS = ('upload1', 'uptime', 'uptime8') + tuple('uptimec%d' % chunk for chunk in UPLOAD_SWEEP_CHUNKS)
 # (arm, scenario, which profile, derived changes, docker timeout seconds, strict oracle)
 PLAN_ARMS = dict(
     bringup=(('bringup-reference', 'bringup_reference', 'baseline', None, 2400, True),
@@ -353,14 +396,33 @@ PLAN_ARMS = dict(
        'tier-concurrent-sliced': (('tier-concurrent-sliced', 'tier_concurrent', 'prefix', 'slice', 7200, False),),
        'tier-concurrent-timed-sliced': (('tier-concurrent-timed-sliced', 'tier_concurrent_timed', 'prefix', 'slice', 7200, False),),
        'tier-concurrent-timed': (('tier-concurrent-timed', 'tier_concurrent_timed', 'prefix', None, 7200, False),),
+       # tp4/upload-1 (docs/tp4-upload1.md): the upload levers derived onto a tier profile. tier-upload: the audited cycle at ~64k / 128k / 254k (the restores read back byte for byte,
+       # each returning answer against its cold twin); tier-upload-timed / -control: the same cycle unaudited with the levers on / off (the ABAB pair); -8, -c128, -c2048: the
+       # thread count and device-call-size sweeps.
+       'tier-upload': (('tier-upload', 'tier_upload', 'prefix', 'upload1', 9000, False),),
+       'tier-upload-timed': (('tier-upload-timed', 'tier_upload_timed', 'prefix', 'uptime', 7200, False),),
+       'tier-upload-timed-control': (('tier-upload-timed-control', 'tier_upload_timed', 'prefix', 'tiertime', 7200, False),),
+       'tier-upload-timed-8': (('tier-upload-timed-8', 'tier_upload_timed', 'prefix', 'uptime8', 7200, False),),
+       'tier-upload-timed-c128': (('tier-upload-timed-c128', 'tier_upload_timed', 'prefix', 'uptimec128', 7200, False),),
+       'tier-upload-timed-c2048': (('tier-upload-timed-c2048', 'tier_upload_timed', 'prefix', 'uptimec2048', 7200, False),),
        # Exact resume P0 (docs/tp4-exact-resume.md 5.2; prefix_replay.scenario_exact_resume): short returning tool turns on ~9k, ~33k and ~120k contexts,
        # judged (every hit against its cold twin, the oracle's Q strict, the window carry's lines: exact_resume_findings) and timed (the same
        # conversations, no audit: the ABAB's arm, read by exact_resume_compare.py).
+       # tp4/kv-nvme-2 (docs/tp4-kv-nvme.md section 12): the NVMe cold tier below the host tier, on the generated nvme twins (make_nvme_profiles: the host share cut to STORE_GIB + 4,
+       # so every restore comes from the drive). nvme-exact: the audited cycle at ~64k / 128k / 254k, each returning answer against its cold twin (N1). nvme-timed: the timed cycle
+       # at ~32k / 128k / 254k (N2). nvme-concurrent / -whole: what the tier costs the seats beside it, the sliced restore the profile carries and the whole restore (N4). nvme-restart:
+       # a session survives the engine, graceful stop within the platform's grace and SIGKILL (N5). The timed and concurrent arms also run on a tier profile WITHOUT the NVMe tier
+       # (the host-only control of the ABAB pair); every arm served on an NVMe profile is judged by nvme_findings whatever its plan.
+       'nvme-exact': (('nvme-exact', 'nvme_exact', 'prefix', None, 9000, False),),
+       'nvme-timed': (('nvme-timed', 'nvme_timed', 'prefix', None, 7200, False),),
+       'nvme-concurrent': (('nvme-concurrent', 'nvme_concurrent', 'prefix', None, 7200, False),),
+       'nvme-concurrent-whole': (('nvme-concurrent-whole', 'nvme_concurrent', 'prefix', 'whole', 7200, False),),
+       'nvme-restart': (('nvme-restart', 'nvme_restart', 'prefix', 'nvmeplain', 9000, False),),
        'exact-resume': (('exact-resume', 'exact_resume', 'prefix', None, 7200, True),),
        'exact-resume-timed': (('exact-resume-timed', 'exact_resume_timed', 'prefix', None, 7200, False),)}
 )
 # The scenarios that measure rather than judge exactness: no extent audit, no row digests (they would time the audit).
-TIMED_SCENARIOS = ('timing', 'agent_turns', 'levern_hit', 'tier_timed', 'tier_concurrent_timed', 'exact_resume_timed')
+TIMED_SCENARIOS = ('timing', 'agent_turns', 'levern_hit', 'tier_timed', 'tier_upload_timed', 'tier_concurrent_timed', 'exact_resume_timed', 'nvme_timed', 'nvme_concurrent')
 # The scenarios that write the Lever N kill switch on purpose (the engagement rule allows its kill line there).
 LEVERN_DRILL_SCENARIOS = ('levern_faults',)
 # The single-arm plans (c2_serving_job.PREFIX_ARM_PLANS): the arm exactly as its plan runs it.
@@ -399,13 +461,18 @@ def audit_image_problems(arms, anchor):
     return out
 
 
+NVME_SCENARIOS = ('nvme_exact', 'nvme_timed', 'nvme_concurrent', 'nvme_restart')      # tp4/kv-nvme-2; the first three are the host tier's cycles on an NVMe profile, the last the restart drills
 CONCURRENT_SCENARIOS = ('tier_concurrent', 'tier_concurrent_timed')
+CONCURRENT_JUDGED = CONCURRENT_SCENARIOS + ('nvme_concurrent',)        # the stall reading (concurrent_findings) is asked of these
 QUOTA_SCENARIOS = ('tier_quota',)
-TIER_SCENARIOS = ('tier_attach', 'tier_returning', 'tier_timed') + CONCURRENT_SCENARIOS + QUOTA_SCENARIOS
+UPLOAD_SCENARIOS = ('tier_upload', 'tier_upload_timed')
+TIER_SCENARIOS = ('tier_attach', 'tier_returning', 'tier_timed') + UPLOAD_SCENARIOS + CONCURRENT_SCENARIOS + QUOTA_SCENARIOS + NVME_SCENARIOS
 # The tier scenarios in which a session must be seen to leave the device pool and come back from host RAM (the counters and the restore line are asked of them).
-TIER_RESTORE_SCENARIOS = ('tier_returning', 'tier_timed') + CONCURRENT_SCENARIOS
+TIER_RESTORE_SCENARIOS = ('tier_returning', 'tier_timed') + UPLOAD_SCENARIOS + CONCURRENT_JUDGED + ('nvme_exact', 'nvme_timed')     # (nvme_restart: its registry restarts, the counters are the last boot's)
 # The tier arms that also run on a profile WITHOUT the tier: the control of the concurrent pairs (the stall of a cold re-prefill beside the same seats).
 TIER_OPTIONAL_ARMS = ('tier-concurrent', 'tier-concurrent-timed')
+# The NVMe arms that also run on a tier profile WITHOUT the NVMe tier: the host-only control of the ABAB pair (the same requests, the host tier at its production share).
+NVME_OPTIONAL_ARMS = ('nvme-timed', 'nvme-concurrent', 'nvme-concurrent-whole')
 # The scenarios that send one request at a time and wait for it: a decode is never packed with another user's, so the multi-user SDPA launch (W2) has
 # nothing to compare and its audit (QWEN_FAST_TP4_SDPA_AUDIT) logs no line. T1 (run 38082865675) was three IDENTICAL pairs and failed only on that.
 SEQUENTIAL_SCENARIOS = ('tier_attach', 'tier_returning')
@@ -482,6 +549,17 @@ def tier_profile(profile):
                 store_gib=env.get('QWEN_PREFIX_STORE_GIB') or '8')
 
 
+def nvme_profile(profile):
+    """The profile's NVMe tier settings, or None when it does not name QWEN_PREFIX_NVME=1: the device path it asks for, whether the tier's write audit is on, whether it force-formats, the
+    verify mode, and whether the encryption check is on (QWEN_PREFIX_NVME_REQUIRE_SED is on unless a gate turns it off)."""
+    env = dict((str(key), str(value)) for key, value in (profile.get('env') or {}).items())
+    if env.get('QWEN_PREFIX_NVME') != '1':
+        return None
+    return dict(device=env.get('QWEN_PREFIX_NVME_DEVICE'), audit=env.get('QWEN_PREFIX_NVME_AUDIT') == '1', format=env.get('QWEN_PREFIX_NVME_FORMAT') == '1',
+                verify=env.get('QWEN_PREFIX_NVME_VERIFY') or 'sample', require_sed=env.get('QWEN_PREFIX_NVME_REQUIRE_SED') != '0',
+                spill=env.get('QWEN_PREFIX_NVME_SPILL') or 'through')
+
+
 class PlanError(ValueError):
     """A plan the image's profiles cannot run as asked; refused before any container starts."""
 
@@ -545,6 +623,14 @@ def not_applicable(plan, profile, profiles):
                 out.append((arm, 'profile %s names no QWEN_PREFIX_HOST_TIER_GIB: the tier arms run on a tier profile (make_prefix_tier_profiles)' % profile))
             elif not tier['preconverted']:
                 out.append((arm, 'profile %s does not name QWEN_PREFIX_CKPT_PRECONVERTED=1: the tier arms read the preconverted checkpoints' % profile))
+        elif arm.startswith('nvme-'):
+            tier = tier_profile(chosen)
+            if tier is None:
+                out.append((arm, 'profile %s names no QWEN_PREFIX_HOST_TIER_GIB: the NVMe tier sits below the host tier (make_nvme_profiles)' % profile))
+            elif not tier['preconverted']:
+                out.append((arm, 'profile %s does not name QWEN_PREFIX_CKPT_PRECONVERTED=1: the tier arms read the preconverted checkpoints' % profile))
+            elif nvme_profile(chosen) is None and arm not in NVME_OPTIONAL_ARMS:
+                out.append((arm, 'profile %s does not name QWEN_PREFIX_NVME=1: the NVMe arms run on an NVMe profile (make_nvme_profiles)' % profile))
     return out
 
 
@@ -555,7 +641,12 @@ def derive(profiles, base, kind):
     changes = DERIVED[kind]
     if callable(changes):
         changes = changes(profile)
-    profile.setdefault('env', {}).update(changes.get('env') or {})
+    env = profile.setdefault('env', {})
+    for name, value in (changes.get('env') or {}).items():
+        if value is None:
+            env.pop(name, None)             # a derived arm may take a name OUT of the profile (the sliced restore, the NVMe write audit)
+        else:
+            env[name] = value
     profile.setdefault('engine', {}).update(changes.get('engine') or {})
     if changes.get('tt'):
         additional = profile['engine'].setdefault('additional-config', {})
@@ -616,6 +707,10 @@ def plan_arms(plan, profile, baseline, profiles):
                      store_gib=(chosen.get('env') or {}).get('QWEN_PREFIX_STORE_GIB'))
         if scenario in TIER_SCENARIOS:
             entry['tier'] = tier_profile(chosen)      # not None: not_applicable left the arm out of a profile without the tier
+        entry['nvme'] = nvme_profile(chosen)          # not None: the arm is judged for the NVMe tier too (nvme_findings), whatever its plan
+        if entry['nvme'] and entry['nvme']['format'] and scenario == 'nvme_restart':
+            raise PlanError('%s: the profile force-formats the drive (QWEN_PREFIX_NVME_FORMAT=1, the first gate\'s own) and the drill boots the engine again: its second boot would wipe the store it is '
+                            'there to prove; use the non-format twin' % arm)
         s2 = is_s2_profile(chosen)
         sticky = which == 'prefix' and sticky_profile
         if s2 and scenario not in TIMED_SCENARIOS:
@@ -712,13 +807,14 @@ def kvread_mount_arguments(image, mount=None, run=subprocess.run):
 
 
 def server_run(image, name, served, devices, port=PORT, hub=gate.HUB, derived_path=None, digests=False,
-               salt_key_path=None, stats_now=False, env=(), gate_only=False, tt_grid=None, model=None):
+               salt_key_path=None, stats_now=False, env=(), gate_only=False, tt_grid=None, model=None, cache_args=()):
     """`docker run -d` of one serving container: the S1 gate's agent shape (its --rm dropped: the
     reload drill stops and starts the same container), the API on 127.0.0.1:port, a derived
     profiles file when the arm has one, the row digests when asked, the arm's salt key when it has
     one, the gate-only knobs an S2 arm adds (`env`: the extent audit, c2_serving_gate.ARM_ENV_NAMES),
     and the platform's vLLM argv. `tt_grid` (C2_TT_GRID): the compute-grid clamp, c2_serving_gate.agent_shape's. `model` (C2_MODEL_REPO / C2_MODEL_REVISION): the
-    checkpoint pair, agent_shape's; None, the argv is exactly what it was."""
+    checkpoint pair, agent_shape's; None, the argv is exactly what it was. `cache_args` (C2_NVME_DEVICE / C2_P2PMEM, c2_cache_drive.plan): the cache drive and the cards' p2pmem
+    arguments, resolved at run time by the caller; () adds nothing."""
     arguments = [token for token in gate.agent_shape(image, name, served, devices, hub, env, gate_only=gate_only, tt_grid=tt_grid, model=model)
                  if token != '--rm']
     arguments[2:2] = ['-d']
@@ -733,6 +829,7 @@ def server_run(image, name, served, devices, port=PORT, hub=gate.HUB, derived_pa
     if derived_path:
         arguments += ['--mount', 'type=bind,src=%s,dst=%s,readonly' % (derived_path, DERIVED_MOUNT),
                       '-e', 'QWEN_C2_PROFILES=%s' % DERIVED_MOUNT]
+    arguments += list(cache_args)
     platform = list(PLATFORM_ARGS)
     if model:
         platform[platform.index('--model') + 1] = model[0]       # the platform asks for the checkpoint it is served (the contract refuses a mismatch)
@@ -1220,6 +1317,11 @@ STAT_REASONS = dict(
     tier_restore_blocks=('the host tier\'s restore', 'the host tier restored no block'),
     tier_audit_reads=('the restore audit', 'no restored block was read back and compared (QWEN_PREFIX_HOST_TIER_AUDIT=1)'),
     tier_digest_checks=('the restore digest check', 'no block\'s digest was checked at restore'),
+    # tp4/kv-nvme-2: the NVMe tier's counters (qwen_kv_nvme.COUNTER_NAMES), exported only while the tier exists
+    nvme_spill_blocks=('the NVMe tier\'s spill', 'the NVMe tier wrote no block: the writer queued nothing (write-through copies a finished session toward the drive at the next scheduler step)'),
+    nvme_restore_requests=('the NVMe tier\'s restore', 'no request was restored from the drive'),
+    nvme_restore_blocks=('the NVMe tier\'s restore', 'the NVMe tier restored no block'),
+    nvme_ckpt_restored=('the NVMe tier\'s checkpoint restore', 'no GDN checkpoint was read back from the drive: a returning session\'s state came from the host store'),
 )
 
 
@@ -1547,8 +1649,202 @@ def tier_findings(arm, records, events, scanned, stats):
         problems += more_problems
         missing += more_missing
         lines += more_lines
-    elif scenario == 'tier_timed':
+    elif scenario in ('tier_timed', 'nvme_exact', 'nvme_timed') + UPLOAD_SCENARIOS:
         more_problems, more_missing, more_lines = tier_timed_rows(arm, records, events, scanned)
+        problems += more_problems
+        missing += more_missing
+        lines += more_lines
+    return problems, missing, lines
+
+
+def upload_findings(arm, scanned, stats):
+    """The upload levers' reading of an arm that has them (docs/tp4-upload1.md; the lever lines themselves are the smoke table's, lever_engagement_problems): the configuration line
+    is in the log and no fell-back line is, and the restore and the spill went through the threaded IO and the digest checks through the verifier (the registry's tier_io_* and
+    tier_verify_* counters), with the overlap printed: the wall time of the IO calls against the time inside the device calls and the staging work the workers did (which the
+    wall time beats when the two overlap). -> (problems, not exercised, lines)"""
+    problems, missing, lines = [], [], []
+    env = arm.get('served_env') or {}
+    io_threads, verify_threads = env.get(UPLOAD_IO_FLAG), env.get(UPLOAD_VERIFY_FLAG)
+    on = scanned.get('tier_upload_on') or []
+    if not on:
+        missing.append('no "host tier upload on" line: the upload levers were configured and never installed (an image without qwen_tier_upload, or the scheduler graft refused them)')
+    else:
+        lines.append('upload levers: %s' % json.dumps(dict((key, on[0].get(key)) for key in ('io_threads', 'io_chunk_blocks', 'verify_threads', 'io_wrapped'))))
+    for entry in scanned.get('tier_upload_trouble') or ():
+        problems.append('server log line %s: %s' % (entry['index'], entry['line'][:200]))
+    if not stats:
+        return problems, missing, lines
+    if stats.get('tier_io_latched'):
+        problems.append('tier_io_latched=%s: the threaded tier IO failed once and the adapter\'s serial code took over (its "latched off" line names the call and the error)' % stats['tier_io_latched'])
+    if io_threads and arm['scenario'] in TIER_RESTORE_SCENARIOS:
+        for name in ('tier_io_write_blocks', 'tier_io_read_blocks'):
+            if not stats.get(name):
+                missing.append('%s is 0: the %s did not go through the threaded IO' % (name, 'restore' if 'write' in name else 'spill'))
+    if verify_threads and stats.get('tier_digest_checks') and not stats.get('tier_verify_batches'):
+        missing.append('tier_digest_checks=%s and tier_verify_batches=0: the digest checks did not run on the verifier' % stats['tier_digest_checks'])
+    for way, label in (('write', 'restore writes'), ('read', 'spill reads')):
+        blocks, wall = stats.get('tier_io_%s_blocks' % way), stats.get('tier_io_%s_ms' % way)
+        if blocks:
+            device, stage = stats.get('tier_io_%s_device_ms' % way) or 0.0, stats.get('tier_io_%s_stage_ms' % way) or 0.0
+            lines.append('threaded %s: %s blocks in %.1f ms wall; %.1f ms inside device calls, %.1f ms of staging work on the workers (serial would be %.1f ms)' % (
+                label, blocks, wall or 0.0, device, stage, device + stage))
+    if stats.get('tier_verify_batches'):
+        lines.append('parallel digest checks: %s batches, %s blocks, %.1f ms wall' % (stats['tier_verify_batches'], stats.get('tier_verify_blocks'), stats.get('tier_verify_ms') or 0.0))
+    return problems, missing, lines
+
+
+NVME_COPY_STEP_LIMIT_MS = 20.0       # gate N6: the mean cost of one scheduler step's idle copy, on the timed arms
+NVME_BAD_COUNTERS = (
+    ('nvme_latched', 'the NVMe level latched itself off'), ('nvme_device_lost', 'the drive vanished at run time'),
+    ('nvme_refused_zero_retention', 'the tier refused to start on a zero-retention node'), ('nvme_refused_not_encrypted', 'the tier refused a drive it could not show to be encrypted'),
+    ('nvme_unavailable', 'the drive could not be opened'), ('nvme_digest_failures', 'an object failed its digest'), ('nvme_restore_refused_digest', 'a restore refused a block that failed its digest'),
+    ('nvme_restore_failures', 'a restore failed'), ('nvme_ckpt_restore_failures', 'a checkpoint restore failed'), ('nvme_spill_failures', 'a spill batch failed'),
+    ('nvme_ckpt_spill_failures', 'a checkpoint spill failed'), ('nvme_through_failures', 'the idle copy failed'), ('nvme_audit_mismatches', 'the write audit read back different bytes'))
+
+
+def nvme_stat_problems(stats, where):
+    return ['%s=%s %s: %s' % (name, stats[name], where, why) for name, why in NVME_BAD_COUNTERS if stats.get(name)]
+
+
+def nvme_returning_rows(scanned, names):
+    """One line per returning turn of the named (event, tag) pairs: the NVMe restore on record for it (blocks, bytes, GB/s, where it started). -> (not exercised, lines)"""
+    missing, lines = [], []
+    restores = dict((entry.get('tag'), entry) for entry in scanned.get('nvme_restores') or ())
+    for name, tag in names:
+        entry = restores.get(tag)
+        if entry is None:
+            missing.append('%s: no "nvme tier restore" line for the returning turn %s: it was not restored from the drive (the host share held it, or the drive did not)' % (name, tag))
+            continue
+        rate = (entry.get('bytes') or 0) / (entry.get('ms') * 1e6) if entry.get('ms') else None
+        lines.append('%s: the returning turn restored %s blocks (%s GB) from the drive, tokens %s to %s%s' % (
+            name, entry.get('blocks'), gb(entry.get('bytes')), entry.get('from'), entry.get('to'), ' (%.2f GB/s)' % rate if rate else ''))
+    return missing, lines
+
+
+def nvme_restart_rows(arm, events, scanned):
+    """The restart drills' reading (prefix_replay.scenario_nvme_restart): the graceful stop inside the platform's grace and its drain line, the session restored from the drive in the
+    new process, the hard kill's recovery, and the tier coming back at every boot. -> (problems, not exercised, lines)"""
+    problems, missing, lines = [], [], []
+    ran = [name for name in sorted(events) if name.startswith(('nvme-stop-', 'nvme-kill-')) and not name.endswith('-skipped')]
+    if not ran:
+        missing.append('no restart drill ran (%s)' % ((events.get('nvme-restart') or {}).get('reason') or 'the scenario sized none inside the served context'))
+        return problems, missing, lines
+    boots = len(scanned.get('nvme_on') or ())
+    stops = scanned.get('nvme_stops') or []
+    graceful = [name for name in ran if events[name].get('graceful')]
+    if boots < 1 + len(ran):
+        problems.append('the NVMe tier came back %d time(s) after %d restart(s): it was not running in every boot (nvme tier on lines: %d)' % (max(0, boots - 1), len(ran), boots))
+    for name in ran:
+        event = events[name]
+        if not event.get('build_ok'):
+            missing.append('%s: the session could not be built' % name)
+            continue
+        if event.get('graceful'):
+            code, stop_s = event.get('exit_code'), event.get('stop_s')
+            lines.append('%s: stopped in %s s with exit code %s (grace %s s), back to ready in %s s; the drive held %s of the session\'s blocks before the stop (waited %s s)' % (
+                name, stop_s, code, replay.NVME_STOP_GRACE_S, event.get('seconds'), event.get('persist_stored_blocks'), event.get('persist_waited_s')))
+            if code == 137:
+                problems.append('%s: the engine was SIGKILLed after the %d s grace (exit code 137): the drain and the engine\'s own shutdown do not fit the platform\'s grace; lower QWEN_PREFIX_NVME_DRAIN_S or '
+                                'ask for a longer grace (docs/tp4-kv-nvme.md question 10)' % (name, replay.NVME_STOP_GRACE_S))
+            elif stop_s is not None and stop_s > replay.NVME_STOP_GRACE_S + 5:
+                problems.append('%s: docker stop took %s s, past the %d s grace' % (name, stop_s, replay.NVME_STOP_GRACE_S))
+            if event.get('persisted') is False:
+                missing.append('%s: the drive did not hold the session within %s s of its build (stored %s blocks): the persistence claim is not tested' % (
+                    name, event.get('persist_waited_s'), event.get('persist_stored_blocks')))
+        else:
+            lines.append('%s: SIGKILL (exit code %s), back to ready in %s s' % (name, event.get('exit_code'), event.get('seconds')))
+        if not event.get('return_ok'):
+            problems.append('%s: the returning turn %s failed after the restart' % (name, event.get('return_tag')))
+    if graceful:
+        if not stops:
+            problems.append('no "nvme tier stopped" line: the graceful stop never reached the tier\'s drain')
+        for entry in stops:
+            lines.append('nvme tier stopped: drained=%s snapshot=%s latched=%s in %s ms' % (entry.get('drained'), entry.get('snapshot'), entry.get('latched'), entry.get('ms')))
+            if entry.get('latched'):
+                problems.append('server log line %s: the tier was latched off at its stop' % entry.get('index'))
+            if entry.get('drained') == 0:
+                lines.append('note: the drain did not finish inside its budget (a few records of the last seconds are lost; QWEN_PREFIX_NVME_DRAIN_S)')
+    for name in graceful:
+        event = events[name]
+        if event.get('return_ok') and event.get('persisted') is not False:
+            more, more_lines = nvme_returning_rows(scanned, [(name, event.get('return_tag'))])
+            lines += more_lines
+            if more:
+                problems.append('%s: after a graceful stop the session that the drive held was not restored from it (%s)' % (name, more[0]))
+    restores = dict((entry.get('tag'), entry) for entry in scanned.get('nvme_restores') or ())
+    for name in ran:
+        event = events[name]
+        if not event.get('graceful') and event.get('return_ok'):
+            restored = restores.get(event.get('return_tag'))
+            lines.append('%s: the returning turn %s (%s)' % (name, event.get('return_tag'), 'restored %s blocks from the drive' % restored.get('blocks') if restored
+                                                              else 'a cold turn: nothing of it survived the kill, which is allowed'))
+    for entry in scanned.get('nvme_open') or ():
+        lines.append('nvme tier open (boot): entries=%s kv=%s ckpt=%s recovered_records=%s recover_dropped=%s fp_drops=%s at_rest=%s' % (
+            entry.get('entries'), entry.get('kv'), entry.get('ckpt'), entry.get('recovered_records'), entry.get('recover_dropped'), entry.get('fp_drops'), entry.get('at_rest')))
+        if entry.get('fp_drops'):
+            problems.append('server log line %s: the store dropped %s entries of another fingerprint at open: a restart of the SAME image changed the fingerprint' % (entry.get('index'), entry.get('fp_drops')))
+    return problems, missing, lines
+
+
+def nvme_findings(arm, records, events, scanned, stats):
+    """The NVMe cold tier's reading of an arm served on a profile that names QWEN_PREFIX_NVME=1 (every plan; docs/tp4-kv-nvme.md section 12): the tier was installed and the drive opened,
+    no trouble line, the encryption check passed unless the profile turns it off, the write audit read back what it wrote (audited profile), the registry's NVMe counters carry no failure,
+    and on the cycle and concurrent scenarios the returning turn is on record as restored from the DRIVE (the host share is smaller than the sessions, so it has to be); nvme_restart has
+    its own rows. -> (problems, not exercised, lines)"""
+    problems, missing, lines = [], [], []
+    nvme = arm.get('nvme') or {}
+    scenario = arm['scenario']
+    for entry in scanned.get('nvme_trouble') or ():
+        problems.append('server log line %s: %s' % (entry['index'], entry['line'][:200]))
+    on, opened = scanned.get('nvme_on') or [], scanned.get('nvme_open') or []
+    if not on:
+        missing.append('no "nvme tier on" line: the scheduler graft never installed the NVMe tier (the profile names QWEN_PREFIX_NVME=1; a REFUSED or UNAVAILABLE line says why, and is a problem above)')
+    else:
+        lines.append('nvme tier: %s' % json.dumps(dict((key, on[0].get(key)) for key in ('backend', 'ttl_s', 'verify', 'audit', 'spill', 'queue_bytes', 'capacity_bytes', 'drain_s', 'at_rest'))))
+    if not opened:
+        missing.append('no "nvme tier open" line: the drive was never opened')
+    else:
+        lines.append('nvme open: entries=%s kv=%s ckpt=%s recovered_records=%s fp_drops=%s verify=%s audit=%s at_rest=%s fingerprint=%s' % tuple(
+            opened[0].get(key) for key in ('entries', 'kv', 'ckpt', 'recovered_records', 'fp_drops', 'verify', 'audit', 'at_rest', 'fingerprint')))
+        if nvme.get('require_sed') and opened[0].get('at_rest') != 'opal':
+            problems.append('the tier opened with at_rest=%s: the profile leaves the encryption check on (QWEN_PREFIX_NVME_REQUIRE_SED), so the drive must have been shown to be an Opal drive' % opened[0].get('at_rest'))
+        if nvme.get('require_sed') and not scanned.get('nvme_atrest'):
+            problems.append('no "at-rest encryption verified" line although the profile leaves the encryption check on')
+        if nvme.get('format') and opened[0].get('entries'):
+            lines.append('note: the profile force-formats and the drive already held %s entries at open: the first gate is the one that formats' % opened[0].get('entries'))
+    if stats is None:
+        missing.append('no registry stats export: the NVMe counters are not read')
+        return problems, missing, lines
+    lines.append('nvme counters: %s' % json.dumps(dict((key, value) for key, value in sorted(stats.items()) if key.startswith('nvme_') and value), sort_keys=True))
+    problems += nvme_stat_problems(stats, 'at the end')
+    if nvme.get('audit') and scenario != 'nvme_restart' and not stats.get('nvme_audit_reads'):
+        missing.append('nvme_audit_reads is 0: the profile asks for the write audit and no object was read back')
+    steps = stats.get('nvme_through_copy_steps') or 0
+    if steps:
+        mean = (stats.get('nvme_through_copy_ms') or 0.0) / steps
+        lines.append('idle copy (write-through): %s blocks in %s steps, %.1f ms a step on average (the stop rule is %.0f ms on the timed arms)' % (
+            stats.get('nvme_through_copied_blocks'), steps, mean, NVME_COPY_STEP_LIMIT_MS))
+        if mean > NVME_COPY_STEP_LIMIT_MS and scenario in ('nvme_timed', 'nvme_concurrent'):
+            problems.append('the idle copy cost %.1f ms a scheduler step on average, over the %.0f ms stop rule (docs/tp4-kv-nvme.md gate N6)' % (mean, NVME_COPY_STEP_LIMIT_MS))
+    if scenario in ('nvme_exact', 'nvme_timed', 'nvme_concurrent'):
+        wanted = ['nvme_spill_blocks', 'nvme_restore_requests', 'nvme_restore_blocks']
+        if scenario != 'nvme_concurrent':
+            wanted.append('nvme_ckpt_restored')
+        missing += required_stats(stats, wanted)
+    if scenario in ('nvme_exact', 'nvme_timed'):
+        names = sorted((name for name in events if name.startswith('tier-timed-') and name[len('tier-timed-'):].isdigit() and events[name].get('return_ok')),
+                       key=lambda name: int(name[len('tier-timed-'):]))
+        more, more_lines = nvme_returning_rows(scanned, [(name, events[name].get('return_tag')) for name in names])
+        missing += more
+        lines += more_lines
+    elif scenario == 'nvme_concurrent':
+        event = events.get('tier-concurrent') or {}
+        if event.get('return_ok'):
+            more, more_lines = nvme_returning_rows(scanned, [('tier-concurrent', event.get('return_tag'))])
+            missing += more
+            lines += more_lines
+    elif scenario == 'nvme_restart':
+        more_problems, more_missing, more_lines = nvme_restart_rows(arm, events, scanned)
         problems += more_problems
         missing += more_missing
         lines += more_lines
@@ -1592,7 +1888,7 @@ def concurrent_findings(arm, records, events, scanned):
     the arm's cost); the seats' text against a control boot is the offline comparator's (tier_concurrent_compare.py). -> (problems, not exercised, lines)."""
     problems, missing, lines = [], [], []
     event = events.get('tier-concurrent') or {}
-    timed = arm['scenario'] == 'tier_concurrent_timed'
+    timed = arm['scenario'] in ('tier_concurrent_timed', 'nvme_concurrent')
     if not event:
         missing.append('the scenario never reached its measurement (no tier-concurrent event)')
         return problems, missing, lines
@@ -2087,7 +2383,17 @@ def judge_arm(arm, driver, scanned, stats, error, log_text=None, model=None):
         problems += more_problems
         missing += more_missing
         lines += more_lines
-    if arm['scenario'] in CONCURRENT_SCENARIOS:
+    if arm.get('tier') and arm.get('kind') in UPLOAD_KINDS:
+        more_problems, more_missing, more_lines = upload_findings(arm, scanned, stats)
+        problems += more_problems
+        missing += more_missing
+        lines += more_lines
+    if arm.get('nvme'):
+        more_problems, more_missing, more_lines = nvme_findings(arm, records, driver.events, scanned, stats)
+        problems += more_problems
+        missing += more_missing
+        lines += more_lines
+    if arm['scenario'] in CONCURRENT_JUDGED:
         more_problems, more_missing, more_lines = concurrent_findings(arm, records, driver.events, scanned)
         problems += more_problems
         missing += more_missing
@@ -2137,7 +2443,7 @@ def judge_arm(arm, driver, scanned, stats, error, log_text=None, model=None):
             more_problems, more_lines = lifecycle_reservation_findings(records, log_text)
             problems += more_problems
             lines += more_lines
-    elif arm['scenario'] in TIMED_SCENARIOS and arm['prefix'] and arm['scenario'] not in CONCURRENT_SCENARIOS:
+    elif arm['scenario'] in TIMED_SCENARIOS and arm['prefix'] and arm['scenario'] not in CONCURRENT_SCENARIOS and arm['scenario'] != 'nvme_concurrent':
         # The timing arm is not strict (a lost hit is a note), so without this it could pass with every
         # continuation cold and report TTFTs that measure no reuse at all.
         if arm['scenario'] == 'agent_turns':
@@ -2350,12 +2656,28 @@ class Runner(object):
         if arm.get('prefix'):
             salt_key_path = os.path.join(arm_dir, 'salt.key')
             salt_key = write_salt_key(salt_key_path)
+        # C2_NVME_DEVICE / C2_P2PMEM (c2_cache_drive): resolved NOW for this arm (the kernel renumbers nvmeN at every reset), the R1 readings printed, the arm refused as INFRA when the
+        # drive is not live (a card reset's rescan can disable it): nothing is started on a dead drive and the rest of the plan is skipped.
+        cache_args = []
+        if getattr(self, 'cache_drive', None):
+            try:
+                cache = c2_cache_drive.plan(*self.cache_drive)
+            except c2_cache_drive.CacheDriveError as error:
+                self.infra = 'the cache drive cannot be used: %s' % error
+                self.log('[PREFIX-GATE] arm %s: skipped - %s' % (arm['arm'], self.infra))
+                result = dict(verdict='INFRA', reason=self.infra, lines=[])
+                self.arms[arm['arm']] = result
+                return None, result
+            cache_args = cache['arguments']
+            for line in cache['lines']:
+                self.log('[PREFIX-GATE] arm %s: %s' % (arm['arm'], line))
         arguments = server_run(self.image, name, arm['served'], self.devices, self.port, self.hub, derived_path,
                                digests=wants_digests(arm), salt_key_path=salt_key_path,
                                stats_now=bool(arm.get('prefix')), env=arm.get('env') or (),
-                               gate_only=bool(arm.get('gate_only')), tt_grid=getattr(self, 'tt_grid', None), model=getattr(self, 'model', None))
+                               gate_only=bool(arm.get('gate_only')), tt_grid=getattr(self, 'tt_grid', None), model=getattr(self, 'model', None),
+                               cache_args=cache_args)
         with open(os.path.join(arm_dir, 'docker-run.json'), 'w') as handle:
-            json.dump(arguments, handle, indent=1)
+            json.dump(c2_cache_drive.redact(arguments), handle, indent=1)         # uploaded with the results: no PCI address, no host device node
         started = self.clock()
         limit = arm['timeout']
         clipped = False
@@ -2400,10 +2722,14 @@ class Runner(object):
             self.log('[PREFIX-GATE] arm %s: ready after %.0f s' % (arm['arm'], self.clock() - started))
             driver.context_tokens = self.served_context(client, arm, driver)
             kwargs = {}
-            if arm['scenario'] in ('lifecycle_evict', 'lifecycle_tiny', 'tier_returning', 'tier_timed') + CONCURRENT_SCENARIOS + QUOTA_SCENARIOS:
+            if arm['scenario'] in ('lifecycle_evict', 'lifecycle_tiny', 'tier_returning', 'tier_timed') + UPLOAD_SCENARIOS + CONCURRENT_SCENARIOS + QUOTA_SCENARIOS + NVME_SCENARIOS:
                 kwargs['pool_tokens'] = markers.scan(follower.lines()).get('kv_tokens')
             if arm['scenario'] == 'lifecycle_evict':
                 kwargs['restart'] = lambda: self.restart(container, client, follower, driver)
+            if arm['scenario'] == 'nvme_restart':
+                # the graceful drill stops with the platform's grace (a SIGKILL after it is a finding), the hard one kills at once
+                kwargs['restart'] = lambda grace=replay.NVME_STOP_GRACE_S: self.restart(container, client, follower, driver, grace=grace)
+                kwargs['kill'] = lambda: self.restart(container, client, follower, driver, hard=True)
             if arm['scenario'] in TIMED_SCENARIOS and arm['scenario'] not in TIER_SCENARIOS:
                 kwargs.update(agents=self.agents, turns=self.turns)
             if arm.get('full'):
@@ -2510,17 +2836,27 @@ class Runner(object):
                        'to the served one' % (arm['arm'], served, profile))
         return int(used)
 
-    def restart(self, container, client, follower, driver=None):
+    def restart(self, container, client, follower, driver=None, grace=None, hard=False):
         """The reload drill: docker stop (graceful: the image's engine skips tt-metal's teardown),
         docker start, wait for the API (no longer than the arm has left), follow the new log.
-        -> dict(seconds to ready, log_window: the follower's lines from the stop to ready)."""
+        `grace` (seconds): the stop's grace instead of the default 60 (the NVMe drill uses the platform's 10); `hard`: SIGKILL at once instead of a stop.
+        -> dict(seconds to ready, log_window: the follower's lines from the stop to ready, stop_s: how long the stop or kill took,
+        exit_code: the stopped container's, 137 = killed)."""
         left = driver.remaining() if driver is not None else None
         if left is not None and left <= 60:
             raise replay.OutOfTime('no time left for the in-place restart')
         first = follower.mark()
         since = follower.last_time()
         started = self.clock()
-        container.stop()
+        if hard:
+            container.kill()
+        elif grace:
+            container.stop(grace)
+        else:
+            container.stop()
+        stopped = self.clock()
+        reader = getattr(container, 'exit_code', None)
+        exit_code = reader() if callable(reader) else None
         follower.stop()
         container.start()
         follower.start(since=since)
@@ -2528,7 +2864,7 @@ class Runner(object):
         problem = self.wait_ready(client, container, seconds)
         if problem:
             raise replay.EngineDead('after the in-place restart: %s' % problem)
-        return dict(seconds=round(self.clock() - started, 1), log_window=[first, follower.mark()])
+        return dict(seconds=round(self.clock() - started, 1), log_window=[first, follower.mark()], stop_s=round(stopped - started, 1), exit_code=exit_code)
 
     @staticmethod
     def write(arm_dir, driver, scanned, result):
@@ -2630,6 +2966,9 @@ def build_parser():
     parser.add_argument('--model-repo', default=None, help='serve another checkpoint of the same architecture in every arm\'s container '
                         '(qwen-c2-serving.yml C2_MODEL_REPO; needs --model-revision); default: the base, the argv exactly as it was')
     parser.add_argument('--model-revision', default=None, help='the 40-hex commit of --model-repo (C2_MODEL_REVISION)')
+    parser.add_argument('--nvme-device', default='', help='the cache drive for the NVMe tier\'s arms (qwen-c2-serving.yml C2_NVME_DEVICE): a /dev/disk/by-id path or the word `status`; resolved '
+                        'per arm, the R1 readings printed, the arm refused as INFRA unless the controller is live and the namespace above 0 bytes (c2_cache_drive.py); default: no drive')
+    parser.add_argument('--p2pmem', default='', help='PCI addresses (comma separated) or `auto`: the cards whose p2pmem/allocate every arm\'s container may map (C2_P2PMEM; c2_cache_drive.py); default: none')
     parser.add_argument('--tt-grid', choices=c2_serving_job.TT_GRIDS, default=None,
                         help='clamp the compute grid every arm\'s container opens (%s=...; qwen-c2-serving.yml C2_TT_GRID); '
                              'default: not passed' % c2_serving_job.TT_GRID_ENV)
@@ -2645,6 +2984,15 @@ def main(argv=None, devices=None, log=print, runner_factory=None, anchor=None):
             print('refusing: --model-repo and --model-revision go together (C2_MODEL_REPO / C2_MODEL_REVISION)', file=sys.stderr)
             return 2
         model = (options.model_repo, options.model_revision)
+    try:
+        nvme_spec = c2_cache_drive.read_nvme_spec(options.nvme_device)
+        p2pmem_spec = c2_cache_drive.read_p2pmem_spec(options.p2pmem)
+    except c2_cache_drive.CacheDriveError as error:
+        log('refused: %s' % error)
+        return 2
+    if (nvme_spec or p2pmem_spec) and options.cards != 'quad':
+        log('refused: --nvme-device / --p2pmem are for the four-card job (--cards quad)')
+        return 2
     KVREAD_MOUNT = options.kvread_mount or None
     if KVREAD_MOUNT and not options.dry_run:
         problem = kvread_mount_problem(KVREAD_MOUNT)
@@ -2690,6 +3038,11 @@ def main(argv=None, devices=None, log=print, runner_factory=None, anchor=None):
             ran[arm['arm']] = plan
             # the arm's served profile may be gate only (an audit twin): the contract boots it only with QWEN_C2_GATE=1
             arm['gate_only'] = ((arm.get('derived') or profiles)['profiles'].get(arm['served']) or {}).get('gate_only') is True
+    wanted = sorted(arm['arm'] for plan in plans for arm in arms_of[plan] if arm.get('nvme'))
+    if wanted and not nvme_spec:
+        log('refused: %s %s served on a profile that names QWEN_PREFIX_NVME=1 and no cache drive was given (--nvme-device, C2_NVME_DEVICE): the tier would start on nothing' % (
+            ', '.join(wanted), 'is' if len(wanted) == 1 else 'are'))
+        return 2
     worst_case = worst_case_seconds(arms_of)
     if options.budget_seconds is not None and worst_case > options.budget_seconds:
         log('refused: plans %s may take %d s (every arm to its limit), past the %d s this step and job leave: run '
@@ -2715,7 +3068,8 @@ def main(argv=None, devices=None, log=print, runner_factory=None, anchor=None):
                                                       salt_key_path='<results>/%s/salt.key' % arm['arm']
                                                       if arm.get('prefix') else None,
                                                       stats_now=bool(arm.get('prefix')), env=arm.get('env') or (),
-                                                      gate_only=bool(arm.get('gate_only')), tt_grid=options.tt_grid, model=model))))
+                                                      gate_only=bool(arm.get('gate_only')), tt_grid=options.tt_grid, model=model,
+                                                      cache_args=['<the cache drive and p2pmem arguments, resolved per arm at run time>'] if (nvme_spec or p2pmem_spec) else ()))))
         return 0
     if os.environ.get(ALLOW_FULL_AUDIT_ENV) != '1' and any(
             arm['arm'] in AUDIT_COST_ARMS and arm.get('kind') in AUDIT_KINDS for plan in plans for arm in arms_of[plan]):
@@ -2743,6 +3097,10 @@ def main(argv=None, devices=None, log=print, runner_factory=None, anchor=None):
         runner.box_deadline = runner.clock() + options.box_seconds
     runner.tt_grid = options.tt_grid
     runner.model = model
+    runner.cache_drive = (nvme_spec, p2pmem_spec) if (nvme_spec or p2pmem_spec) else None
+    if runner.cache_drive:
+        log('[PREFIX-GATE] cache drive: %s; p2pmem: %s (resolved per arm; the R1 readings are printed before each arm)' % (
+            'given' if nvme_spec else 'none', 'given' if p2pmem_spec else 'none'))
     if model:
         log('[PREFIX-GATE] checkpoint %s@%s in every arm\'s container; every arm\'s log is read for the contract\'s checkpoint lines' % (model[0], model[1][:12]))
     if options.tt_grid:
@@ -2753,6 +3111,8 @@ def main(argv=None, devices=None, log=print, runner_factory=None, anchor=None):
                                        for plan, entries in skipped.items() if entries))
     if options.tt_grid:
         summary['tt_grid'] = options.tt_grid
+    if runner.cache_drive:
+        summary['cache_drive'] = dict(nvme=bool(nvme_spec), p2pmem=bool(p2pmem_spec))
     if model:
         summary['model'] = '%s@%s' % model
     try:

@@ -581,6 +581,18 @@ class Container(object):
     def start(self):
         return self._run(['docker', 'start', self.name], timeout=300)
 
+    def kill(self):
+        """SIGKILL, no grace: the container dies as a power cut would leave the process (the NVMe restart drill's second half)."""
+        return self._run(['docker', 'kill', '--signal', 'KILL', self.name], timeout=120)
+
+    def exit_code(self):
+        """The exit code of the stopped container (137 = SIGKILL, i.e. the stop grace ran out), or None."""
+        code, out = self._run(['docker', 'inspect', '-f', '{{.State.ExitCode}}', self.name], timeout=60)
+        try:
+            return int(out.strip()) if code == 0 else None
+        except ValueError:
+            return None
+
     def rss_gb(self):
         code, out = self._run(['docker', 'stats', '--no-stream', '--format', '{{.MemUsage}}', self.name], timeout=60)
         if code != 0 or not out.strip():
@@ -1939,12 +1951,15 @@ def scenario_levern_faults(driver):
 #                   and the tier's own kill switch (the tier latches off; the next turn is still exact).
 #   tier_timed      TIMED restore at ~32k / 128k / 254k, one cycle per size: the cold prefill's TTFT, the device-resident hit's, then - after floods
 #                   the size of the pool - the returning hit's (restore from host RAM), and its cold twin for exactness.
+#   tier_upload / tier_upload_timed   the tier_timed cycle at ~64k / 128k / 254k (TIER_UPLOAD_SIZES), the audited arm (every restored block read back and compared, the
+#                   returning answer against its cold twin) and the timed one (the restore line's ms is the figure): the upload levers' exactness and timing plans (tp4/upload-1).
 TIER_SESSIONS = 3
 TIER_SESSION_TOKENS = 56000      # the evict arm's longest conversation: the returning turn stays inside a 64k context's headroom too
 TIER_FLOOD_TOKENS = 56000
 TIER_RETURN_INPUT_TOKENS = 1500
 TIER_AGAIN_INPUT_TOKENS = 800
 TIER_TIMED_SIZES = (32000, 128000, 254000)
+TIER_UPLOAD_SIZES = (64000, 128000, 254000)      # tp4/upload-1 (docs/tp4-upload1.md): the same cycle at the sizes the upload levers are judged at
 TIER_TIMED_FLOOD_TOKENS = 120000
 TIER_TIMED_MAX_TOKENS = 128      # short answers: the read is the first token's time
 TIER_FLOOD_MARGIN_FLOODS = 1     # floods beyond the pool's worth: a pool's worth of new tokens reaches the sessions' blocks (they queue behind the never-used ones)
@@ -2024,6 +2039,11 @@ def scenario_tier_returning(driver, pool_tokens=None, sessions=None, session_tok
         removed = tier_drill(driver, False) if driver.container is not None else None
     driver.event('tier-kill', written=written, removed=removed, latched_tag=latched.get('tag'))
     return convs
+
+
+def scenario_tier_upload(driver, pool_tokens=None, sizes=None, flood_tokens=None):
+    """scenario_tier_timed at TIER_UPLOAD_SIZES (the events keep the tier-timed-<size> names the gate's reading expects)."""
+    return scenario_tier_timed(driver, pool_tokens=pool_tokens, sizes=tuple(sizes or TIER_UPLOAD_SIZES), flood_tokens=flood_tokens)
 
 
 def tier_timed_size(driver, nominal):
@@ -2272,6 +2292,112 @@ def scenario_exact_resume(driver, firsts=None, inputs=None, **_):
             driver.answer(conv, hit)
 
 
+# NVME PLANS (docs/tp4-kv-nvme.md section 12). nvme_exact, nvme_timed and nvme_concurrent are the host tier's cycle and concurrent scenarios on a profile that also has the NVMe
+# tier and a host share smaller than the sessions (the generated gate twins cut it to STORE_GIB + 4): the same requests, so the returning turn can only come from the drive. Their
+# names are the judge's (c2_prefix_gate.nvme_findings reads the NVMe lines for every arm served on an NVMe profile, whatever its scenario). nvme_restart is new: the tier's own
+# persistence, a session that survives the engine.
+NVME_RESTART_SIZES = (64000, 128000)
+NVME_RESTART_MAX_TOKENS = TIER_TIMED_MAX_TOKENS
+NVME_PERSIST_TIMEOUT_S = 600.0        # the most the scenario waits for write-through to put a built session on the drive
+NVME_PERSIST_POLL_S = 5.0
+NVME_PERSIST_SHARE = 0.9              # of the session's blocks the drive must be seen to hold before the engine is stopped
+NVME_STOP_GRACE_S = 10                # the platform's SIGTERM-to-SIGKILL grace (docs/tp4-kv-nvme.md question 10): the drain must fit inside it
+NVME_KILL_DELAY_S = 1.0               # between the kick that starts the idle copy and the SIGKILL of the second drill
+NVME_COUNTERS = ('nvme_spill_blocks', 'nvme_queue_bytes', 'nvme_through_backlog_blocks', 'nvme_entries')
+
+
+def nvme_counters(driver):
+    stats = read_stats(driver) or {}
+    return dict((name, stats.get(name) or 0) for name in NVME_COUNTERS)
+
+
+def nvme_kick(driver, label):
+    """A small fresh-salt request: it keeps the scheduler stepping, and write-through copies a finished session toward the drive at the end of a scheduler step (an idle engine runs none)."""
+    kick = driver.conversation(label)
+    return driver.send(kick.body(), 'flood', driver.fresh_salt(), 'nvme-kick', kick, 1)
+
+
+def nvme_persist(driver, label, blocks, before):
+    """Wait until the drive holds the session: the writer has stored at least NVME_PERSIST_SHARE of its blocks since `before`, with its queue and the idle-copy backlog empty (read twice).
+    A kick every poll keeps the scheduler stepping. -> dict(ok, waited_s, stored_blocks, counters)."""
+    started = driver.clock()
+    stable = 0
+    now = before
+    while True:
+        nvme_kick(driver, '%s-kick-%d' % (label, int(driver.clock() - started)))
+        driver.sleep(NVME_PERSIST_POLL_S)
+        now = nvme_counters(driver)
+        stored = now['nvme_spill_blocks'] - before['nvme_spill_blocks']
+        if stored >= NVME_PERSIST_SHARE * blocks and not now['nvme_queue_bytes'] and not now['nvme_through_backlog_blocks']:
+            stable += 1
+            if stable >= 2:
+                break
+        else:
+            stable = 0
+        if driver.clock() - started > NVME_PERSIST_TIMEOUT_S:
+            return dict(ok=False, waited_s=round(driver.clock() - started, 1), stored_blocks=stored, counters=now)
+    return dict(ok=True, waited_s=round(driver.clock() - started, 1), stored_blocks=now['nvme_spill_blocks'] - before['nvme_spill_blocks'], counters=now)
+
+
+def nvme_return(driver, conv, case, label):
+    """The session returns after an engine restart: the next turn as a salted hit, then its cold twin under a fresh salt (a strict pair: the restored answer equals the cold one). -> the hit's record."""
+    conv.extend(TIER_RETURN_INPUT_TOKENS)
+    driver.fit(conv, NVME_RESTART_MAX_TOKENS)
+    body = conv.body()
+    back = driver.send(body, 'hit', conv.salt, label, conv, NVME_RESTART_MAX_TOKENS, continuation=True)
+    driver.answer(conv, back)
+    if back.get('ok'):
+        cold = driver.send(body, 'cold', driver.fresh_salt(), label + '-cold', conv, NVME_RESTART_MAX_TOKENS, continuation=True)
+        strict_pair(driver, case, cold, back, body, conv, NVME_RESTART_MAX_TOKENS, None)
+    return back
+
+
+def scenario_nvme_restart(driver, pool_tokens=None, sizes=None, restart=None, kill=None, **_):
+    """TWO DRILLS on the sizes' sessions (docs/tp4-kv-nvme.md gate N5).
+    (a) the GRACEFUL stop, on the first size: build the session, wait until write-through has put it on the drive, stop the engine with the platform's grace (restart(grace=10): the
+        drain must fit, no SIGKILL), start it again, and return the session. The new engine has an empty device pool and an empty host tier: only the drive can serve the returning turn,
+        and its answer must equal its cold twin's.
+    (b) the HARD kill, on the second size: build the session, start the idle copy (a kick) and SIGKILL the engine a moment later, while the writer may be in a batch; start it again. The
+        store must open and replay its journal; the returning turn is a hit from the drive or a cold turn, but never a different answer.
+    restart(grace) -> dict(seconds, stop_s, exit_code, log_window); kill() -> the same for the hard kill. Without them the scenario records that it could not run."""
+    if restart is None or kill is None:
+        driver.event('nvme-restart', skipped=True, reason='no restart callbacks')
+        return
+    for index, nominal in enumerate(tuple(sizes or NVME_RESTART_SIZES)[:2]):
+        graceful = index == 0
+        name = 'nvme-%s-%d' % ('stop' if graceful else 'kill', nominal)
+        size = tier_timed_size(driver, nominal)
+        if size < 4096:
+            driver.event(name + '-skipped', nominal=nominal, room=size)
+            continue
+        conv = driver.conversation(name)
+        sized_message(driver, conv, 1, size)
+        driver.fit(conv, NVME_RESTART_MAX_TOKENS)
+        before = nvme_counters(driver)
+        built = driver.send(conv.body(), 'hit', conv.salt, name + '-build', conv, NVME_RESTART_MAX_TOKENS)
+        driver.answer(conv, built)
+        event = dict(nominal=nominal, size=size, graceful=graceful, build_tag=built.get('tag'), build_ok=bool(built.get('ok')), before=before)
+        if not built.get('ok'):
+            driver.event(name, **event)
+            continue
+        blocks = int((built.get('prompt_tokens') or size) // judge.BLOCK)
+        if graceful:
+            persisted = nvme_persist(driver, name, blocks, before)
+            event.update(persisted=persisted['ok'], persist_waited_s=persisted['waited_s'], persist_stored_blocks=persisted['stored_blocks'], persist_counters=persisted['counters'])
+            event['stats_before'] = read_stats(driver)
+            info = restart(NVME_STOP_GRACE_S)
+        else:
+            nvme_kick(driver, name + '-kick')
+            driver.sleep(NVME_KILL_DELAY_S)
+            event['stats_before'] = read_stats(driver)
+            info = kill()
+        driver.oracle = judge.Oracle(driver.oracle.capacity, sticky=driver.oracle.sticky, undrop=driver.oracle.undrop, carry=driver.oracle.carry)
+        event.update(seconds=info.get('seconds'), stop_s=info.get('stop_s'), exit_code=info.get('exit_code'), log_window=info.get('log_window'))
+        back = nvme_return(driver, conv, name, name + '-return')
+        event.update(return_tag=back.get('tag'), return_ok=bool(back.get('ok')), return_ttft_s=back.get('ttft_s'), return_prompt_tokens=back.get('prompt_tokens'))
+        driver.event(name, **event)
+
+
 SCENARIOS = dict(bringup_reference=scenario_bringup_reference, bringup_prefix=scenario_bringup_prefix,
                  exactness_traced=lambda driver, **_: scenario_exactness(driver, 'traced'),
                  exactness_audit=lambda driver, **_: scenario_exactness(driver, 'audit'),
@@ -2282,7 +2408,9 @@ SCENARIOS = dict(bringup_reference=scenario_bringup_reference, bringup_prefix=sc
                  levern_hit=lambda driver, **_: scenario_levern_hit(driver),
                  levern_faults=lambda driver, **_: scenario_levern_faults(driver),
                  tier_attach=scenario_tier_attach, tier_returning=scenario_tier_returning, tier_timed=scenario_tier_timed,
+                 tier_upload=scenario_tier_upload, tier_upload_timed=scenario_tier_upload,
                  tier_concurrent=scenario_tier_concurrent, tier_concurrent_timed=scenario_tier_concurrent, tier_quota=scenario_tier_quota,
+                 nvme_exact=scenario_tier_upload, nvme_timed=scenario_tier_timed, nvme_concurrent=scenario_tier_concurrent, nvme_restart=scenario_nvme_restart,
                  exact_resume=scenario_exact_resume, exact_resume_timed=scenario_exact_resume)
 
 

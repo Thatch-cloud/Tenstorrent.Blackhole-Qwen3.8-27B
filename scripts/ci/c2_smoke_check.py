@@ -87,7 +87,7 @@ own SMOKE_JSON line and the container log and exits non-zero on:
     logged a digest line for every prompt of a levern_equal test that ran. The hang shapes (levern_*) are judged as streams, and the exact-length
     rows as completions that counted the prompt they were sent. Nothing here compares the two arms: levern_compare.py does.
 
-  - the production-shaped agent sessions (opt-in tests agent_turns and agent_turns_long, tp4/agent-turns; agent_turns.py judges, agent_turns_problems calls it): a MEASUREMENT with no
+  - the production-shaped agent sessions (opt-in tests agent_turns, agent_turns_long and agent_turns8, tp4/agent-turns; agent_turns.py judges, agent_turns_problems calls it): a MEASUREMENT with no
     speed threshold. Any request that errored or timed out fails, as does one with no tokens or no finish; on a prefix-reuse profile (QWEN_PREFIX_REUSE=1) a salted run must show reuse (the
     usage's cached tokens, or the server's resume point read from the engine lines the run's X-Request-Id tags name) on at least 90% of its returning turns, and an UNSALTED run fails
     unless it asked for no salt (SMOKE_AGENT_SALT=none). The facts line carries the run's rates, its prefill and decode shares of the wall time and the per-live table read from the log.
@@ -153,7 +153,7 @@ PARKED_ROW_TESTS = ('parked_equal', 'parked_budgets')
 PARKED_USER_TESTS = ('parked_churn', 'parked_churn_long', 'parked_abort_reuse', 'parked_turns')
 PARKED_TESTS = PARKED_ROW_TESTS + PARKED_USER_TESTS
 # The production-shaped agent sessions (tp4/agent-turns): judged by agent_turns.judge, which reads the engine log for the shares and the reuse.
-AGENT_TURNS_TESTS = ('agent_turns', 'agent_turns_long')
+AGENT_TURNS_TESTS = ('agent_turns', 'agent_turns_long', 'agent_turns8')
 REPLAY_TESTS = (REPLAY_TEST, 'replay_concurrent8')
 # Four-user streamed tests: their users get the stream rules; the code ones are code answers too (TEXT_TESTS).
 CONCURRENT_TESTS = ('concurrent4', 'concurrent4_v164order', 'concurrent4_steady', 'concurrent4_code', 'concurrent4_code_equal',
@@ -222,7 +222,12 @@ FUSION_LEVERS = (
     ('QWEN_PREFIX_NVME', '1', '[PINDIAG] prefix: nvme tier on', '[PINDIAG] prefix: nvme tier UNAVAILABLE', "NVMe cold tier below the host KV tier (the scheduler graft's install line; a REFUSED line, the zero-retention guard, logs no 'on' line and so fails the arm too)"),  # NVME
     ('QWEN_PREFIX_NVME_P2P', '1', '[PINDIAG] prefix: nvme tier p2p on', '[PINDIAG] prefix: nvme tier p2p UNAVAILABLE', "the peer-to-peer restore (docs/tp4-p2p-host.md): the cards' windows aimed and proved, the staging buffer allocated; a path that could not start logs UNAVAILABLE and the host backend serves"),  # NVME
     ('QWEN_FAST_PREFILL_HANDOFF', '1', '[PINDIAG] prefill handoff engaged', '[PINDIAG] prefill handoff fell back', 'PF2-H device-side GDN slot hand-off of the final step'),  # PF2
+    ('QWEN_FAST_PREFILL_TAIL_TRACE', '1', '[PINDIAG] prefill tail trace engaged', '[PINDIAG] prefill tail trace fell back', 'PF3-T masked tail pass as a trace replay'),  # PF3
+    ('QWEN_FAST_SDPA_PF_KSPLIT', '1', '[PINDIAG] sdpa prefill ksplit engaged', '[PINDIAG] sdpa prefill ksplit fell back', "PF3-K K-split of the tail passes' attention"),  # PF3K
     ('QWEN_PREFIX_TIER_RESTORE_SLICE', '512', '[PINDIAG] prefix: host tier restore slice on', '[PINDIAG] prefix: host tier restore slice fell back', 'sliced host-tier restore'),  # TS
+    ('QWEN_PREFIX_TIER_IO_THREADS', '4', '[PINDIAG] prefix: host tier upload on', '[PINDIAG] prefix: host tier upload fell back', "threaded staging copies of the host tier's raw block IO"),  # UP1
+    ('QWEN_PREFIX_TIER_IO_THREADS', '8', '[PINDIAG] prefix: host tier upload on', '[PINDIAG] prefix: host tier upload fell back', "threaded staging copies of the host tier's raw block IO (8 threads)"),  # UP1
+    ('QWEN_PREFIX_TIER_VERIFY_THREADS', '4', '[PINDIAG] prefix: host tier upload on', '[PINDIAG] prefix: host tier upload fell back', "digest checks of the host tier's restores on worker threads"),  # UP1
     ('QWEN_FAST_MLP_CFG', 'g3u4d3', '[PINDIAG] tp4 mlp gateup engaged route=cfg', '[PINDIAG] tp4 mlp gateup fell back', 'MLP streaming config g3u4d3 (the card-M sweep winner)'),  # WP0
     ('QWEN_FAST_CCL_OPTIONS', 'served', '[PINDIAG] tp4 ccl options engaged', '[PINDIAG] tp4 ccl options fell back', 'CCL options (the served set)'),  # WP5
     ('QWEN_FAST_BATCHED_READS', 'async', '[PINDIAG] tp4 batched reads engaged', '[PINDIAG] tp4 batched reads fell back', 'WPH-3 batched read-backs (asynchronous copies)'),  # WPH
@@ -246,10 +251,12 @@ FUSION_AUDITS = (
     ('QWEN_FAST_SDPA_PF_ONEQ_AUDIT', '[PINDIAG] sdpa prefill oneq audit', 'S1 prefill SDPA one q chunk per core'),  # WPP
     ('QWEN_FAST_GRID13_AUDIT', '[PINDIAG] tp4 grid13 audit', 'M1 matmul grids for the 13x10 compute grid'),  # M1
     ('QWEN_FAST_PREFILL_HANDOFF_AUDIT', '[PINDIAG] prefill handoff audit', 'PF2-H device-side GDN slot hand-off of the final step'),  # PF2
+    ('QWEN_FAST_PREFILL_TAIL_TRACE_AUDIT', '[PINDIAG] prefill tail trace audit', 'PF3-T masked tail pass as a trace replay'),  # PF3
 )
 FUSION_RULES = (
     'exact_resume_smoke',  # ER
     'grid13_smoke',  # M1
+    'ksplit_smoke',  # PF3K
     'toolcall_whitespace_smoke',  # TW
     'w3_wc_smoke',  # W3
     'tp4_shard_argmax_smoke',  # WP0
@@ -2085,7 +2092,7 @@ def levern_adaptive_problems(steps, env, container_text, results=None):
 LEVERN_SCHED_FLAGS = ('QWEN_FAST_LEVERN_OWED_CAP_MS', 'QWEN_FAST_LEVERN_SHORT_SHARE', 'QWEN_FAST_LEVERN_SHORT_WAIT_S')
 LEVERN_SCHED_LINE = '[PINDIAG] lever N sched: '
 # The shapes whose returning turns judge the short pacing: a run that names none of them has not exercised it (no NOT EXERCISED then).
-LEVERN_SCHED_RETURNING_TESTS = ('agent_turns', 'parked_turns', 'concurrent8_skew')
+LEVERN_SCHED_RETURNING_TESTS = ('agent_turns', 'agent_turns8', 'parked_turns', 'concurrent8_skew')
 
 
 def levern_sched_problems(steps, env, container_text, results=None):

@@ -36,7 +36,11 @@ Keys (every one optional but C2_IMAGE_TAG):
                       few real layers; the step mounts the hub read-only for it; SPLIT_PROBE verdict=IDENTICAL|DIFFERS|FAIL, exit 0/2/1;
                       docs/tp4-exact-resume.md 5.3) or split-attribute (the same probe with --attribute: each split again with both segments forced into
                       the 2048 bucket, so a difference is attributed to the segments' programs or to the store at the split; SPLIT_PROBE attribution
-                      lines, docs/tp4-exact-end.md 2) or p2p-restore (tp4_p2p_restore_probe.py, P3a: the cache drive's identity and R1's readings first, then the peer-to-peer
+                      lines, docs/tp4-exact-end.md 2) or h2d (tp4_h2d_probe.py: per-card host->device bandwidth, x16 against x4, each card alone and the four
+                      together, the GDN restore's conversion against its copies, and the relay's one-coordinate host write; H2D_PROBE verdict=MEASURED|...)
+                      or p2p (tp4_p2p_probe.py: ttnn.point_to_point unicast over the fabric, x16 -> x4 relay pairs, every line edge, byte for byte;
+                      P2P_PROBE verdict=MEASURED|...; docs/tp4-fabric-upload.md);
+                      or p2p-restore (tp4_p2p_restore_probe.py, P3a: the cache drive's identity and R1's readings first, then the peer-to-peer
                       restore NVMe -> the cards' staging buffers -> the KV caches, one card first, byte for byte, with a negative arm, the windows and the p2pmem
                       pools released at the end; P3A verdict=PASS|FAIL|NOT-MEASURED, exit 0/1/2; docs/tp4-p2p-host.md section 8. Which drive and which cards come from
                       a PRIVATE file on the runner, never from the job or the repository); needs the fabric action
@@ -159,6 +163,11 @@ Keys (every one optional but C2_IMAGE_TAG):
                       exact-resume (judged) and exact-resume-timed (the ABAB's arm) are the exact-resume P0 returning
                       turns (docs/tp4-exact-resume.md 5.2): short tool turns on ~9k, ~33k and ~120k contexts, every turn a
                       cold/hit pair; exact_resume_compare.py pairs the hits of two timed arms
+                      nvme-exact, nvme-timed, nvme-concurrent, nvme-concurrent-whole and nvme-restart (tp4/kv-nvme-2, docs/tp4-kv-nvme.md section 12; one arm each, on the
+                      generated nvme twins of the ship-7 profile, whose host share is STORE_GIB + 4 so every restore comes from the drive; they need C2_NVME_DEVICE): nvme-exact
+                      the audited cycle at ~64k/128k/254k against the cold twins, nvme-timed the timed cycle at ~32k/128k/254k, nvme-concurrent (the sliced restore the profile
+                      carries) and nvme-concurrent-whole (it derived off) what the tier costs the seats beside it, nvme-restart the session that survives a graceful stop
+                      within the platform's 10 s grace and a SIGKILL. nvme-timed and the two concurrent arms also run on a host-tier profile without the NVMe tier (the ABAB control)
   C2_PREFIX_PROFILE   the prefix-reuse profile it serves (default general-prefix; must be a checkout profile)
   C2_PREFIX_BASELINE  the no-reuse profile it compares against (default general; none: timing without
                       the baseline arm)
@@ -196,6 +205,14 @@ Keys (every one optional but C2_IMAGE_TAG):
                       checkpoint lines (c2_smoke_check.py --expect-checkpoint; the prefix gate runs the same check on every arm's log: c2_prefix_gate.py --model-repo/--model-revision, a
                       missing or foreign checkpoint line fails the arm). Needs C2_CARDS=quad and C2_ACTIONS from status rescan reset smoke taulab prefix with a smoke, a taulab or a prefix
                       in it; the gate, replay, probe, build and push steps are refused (they do not forward it). Unset, every output is empty and no argv changes.
+  C2_NVME_DEVICE      the NVMe cache drive for the NVMe KV tier's gates (docs/tp4-kv-nvme.md section 12; c2_cache_drive.py): a /dev/disk/by-id path, or the word `status` (the by_id the host's
+                      boot unit wrote into its status file). The device is resolved from the link at run time, the R1 readings (controller state, namespace size) are printed and the
+                      job is refused unless the controller is `live` and the namespace above 0 bytes; the container gets --device <resolved>:/dev/c2-cache-drive, the status file
+                      read-only and QWEN_PREFIX_NVME_DEVICE. Quad only; read by the fabric, smoke and prefix steps. Unset: nothing is passed, the containers are what they were.
+                      The job file is committed with the tag and the tag is pushed: `status` keeps the by-id string (it carries the drive's serial) out of it
+  C2_P2PMEM           comma-separated PCI addresses of the cards whose p2pmem the container may map, or the word `auto` (every PCI function that publishes it): the card's
+                      p2pmem/allocate bound read-write into the container (one file each; sysfs stays read-only otherwise), --security-opt apparmor=unconfined (Docker's default AppArmor
+                      profile denies writes under /sys), QWEN_P2PMEM_DEVICES. Quad only; read by the fabric, smoke and prefix steps. Unset: nothing is passed
   C2_TT_GRID          clamp the compute grid tt-metal exposes, as insurance for cards whose firmware no longer soft-harvests Tensix
                       columns (tensix_col_disable_count 2 -> 0, so the unharvested 13x10 core descriptor is selected instead of 11x10):
                       exactly 10,9 (11x10, today's grid, valid on a harvested and an unharvested card), 11,9 (12x10) or 12,9 (13x10),
@@ -221,6 +238,8 @@ import os
 import re
 import sys
 
+import c2_cache_drive
+
 ACTIONS = ('status', 'rmi', 'agentstop', 'platform', 'unserve', 'priority', 'rescan', 'reset', 'fabric', 'cardm', 'drift', 'build', 'probe', 'smoke', 'gate',
            'prefix', 'taulab', 'replay', 'push', 'agentstart')
 CARD_SETS = ('pair', 'quad')
@@ -234,7 +253,7 @@ TP4_MESH_DEVICE = 'P150x4'
 PAIR_MESH_DEVICES = (None, 'P300')
 FABRIC_CONFIGS = ('FABRIC_1D', 'FABRIC_1D_RING')
 FABRIC_PROBES = ('fabric', 'rs-tile', 'mr', 'kvread', 'ccl-sweep', 'ccl-sweep-safe', 'ccl-sweep-core', 'ccl-sweep-p8192', 'ccl-sweep-quick',
-                 'split', 'split-attribute', 'p2p-restore')
+                 'split', 'split-attribute', 'h2d', 'p2p', 'p2p-restore')
 DRAFTER_ID = re.compile(r'[a-z0-9][a-z0-9.-]{2,63}')
 GATE_PLANS = ('bringup', 'matrix', 'memory', 'lifecycle')
 # S2 (s2-design.md 6.3), run on the S2 image (graft K64j) and its c2-packed profiles; c2_serving_gate.py says what
@@ -274,8 +293,12 @@ DECISION = re.compile(r'[A-Za-z0-9_.,:=/+@%#-]{3,200}')
 # The prefix-reuse G1 gates (TT prefix-reuse design 2.2; c2_prefix_gate.py).
 PREFIX_PLANS = ('bringup', 'exactness', 'lifecycle', 'timing', 'agent-turns', 'levern-faults', 'levern-hit', 'read-qualify', 'tiers', 'tier-concurrent', 'tier-concurrent-timed', 'tier-quota',
                 'tier-concurrent-sliced', 'tier-concurrent-timed-sliced',
+                # tp4/upload-1 (docs/tp4-upload1.md): the host tier's upload levers, one arm each
+                'tier-upload', 'tier-upload-timed', 'tier-upload-timed-control', 'tier-upload-timed-8', 'tier-upload-timed-c128', 'tier-upload-timed-c2048',
                 # exact resume P0 (docs/tp4-exact-resume.md 5.2): the judged and the timed returning-turn arms
-                'exact-resume', 'exact-resume-timed')
+                'exact-resume', 'exact-resume-timed',
+                # tp4/kv-nvme-2 (docs/tp4-kv-nvme.md section 12): the NVMe cold tier's gates, one arm each (c2_prefix_gate.PLAN_ARMS)
+                'nvme-exact', 'nvme-timed', 'nvme-concurrent', 'nvme-concurrent-whole', 'nvme-restart')
 # (arm, its plan): each exactness and lifecycle arm is a plan of its own, named as the arm, that runs
 # only it, judged as inside its plan (neither plan has a cross-arm check; c2_prefix_gate.PLAN_ARMS).
 # G1 v47 (run 36246961161) needed the eager arm again without the traced and audit arms' hour.
@@ -569,6 +592,30 @@ def tt_grid_arguments(value):
     return ['-e', '%s=%s' % (TT_GRID_ENV, value)]
 
 
+# C2_NVME_DEVICE / C2_P2PMEM (c2_cache_drive.py): the steps that start a container with the cache drive and the cards' p2pmem. The values themselves are private job config; the
+# job file is committed with the tag and pushed, so `status` and `auto` (resolved on the runner) keep a by-id string and PCI addresses out of it.
+CACHE_DRIVE_STEPS = ('fabric', 'smoke', 'prefix')
+
+
+def read_cache_drive(values, actions, cards):
+    """(nvme_device, p2pmem) for C2_NVME_DEVICE and C2_P2PMEM (module docstring) as the strings to hand the steps ('' when unset: nothing is passed and the containers are what they
+    were), or JobError: a value that is not a /dev/disk/by-id path or `status` (an nvmeN name is refused: the kernel renumbers them), PCI addresses that are malformed or repeated, the
+    pair card set, or none of the steps that use them."""
+    try:
+        nvme = c2_cache_drive.read_nvme_spec(values.get('C2_NVME_DEVICE', ''))
+        p2pmem = c2_cache_drive.read_p2pmem_spec(values.get('C2_P2PMEM', ''))
+    except c2_cache_drive.CacheDriveError as error:
+        raise JobError(str(error))
+    p2pmem = p2pmem if isinstance(p2pmem, str) else ','.join(p2pmem)
+    if not (nvme or p2pmem):
+        return '', ''
+    if cards != 'quad':
+        raise JobError('C2_NVME_DEVICE / C2_P2PMEM serve the four-card job (the drive and the p2pmem of the TP4 cards): set C2_CARDS=quad')
+    if not set(actions) & set(CACHE_DRIVE_STEPS):
+        raise JobError('C2_NVME_DEVICE / C2_P2PMEM are read by the %s steps: C2_ACTIONS has none of them' % ', '.join(CACHE_DRIVE_STEPS))
+    return nvme, p2pmem
+
+
 def read_telemetry(values, actions):
     """(telemetry, interval) for C2_TELEMETRY and C2_TELEMETRY_MS (module docstring): ('', '') when off, ('1', '<ms>') when on, or JobError. Off is the job exactly as it was:
     no key of the telemetry is read beyond refusing an interval that has nothing to time."""
@@ -677,6 +724,7 @@ def read_job(values, profiles, root=ROOT, meshes=None, envs=None):
     if drafter_manifest and 'push' in actions:
         raise JobError('C2_DRAFTER_MANIFEST names a candidate drafter that is not qualified: its image is not pushed')
     tt_grid = read_tt_grid(values)
+    nvme_device, p2pmem = read_cache_drive(values, actions, cards)
     telemetry, telemetry_ms = read_telemetry(values, actions)
     cardm_harness, cardm_args, cardm_env = read_cardm(values, 'cardm' in actions, root=root, tt_grid=tt_grid)
     drafter_candidates = read_drafter_candidates(values, actions)
@@ -688,7 +736,7 @@ def read_job(values, profiles, root=ROOT, meshes=None, envs=None):
                    gate_lengths=','.join(str(length) for length in lengths), gate_max_tokens=str(max_tokens),
                    gate_memory_prompt=str(memory_prompt), gate_memory_users=str(memory_users), replay_profile=replay_profile,
                    replay_served_model=replay_served_model, replay_budget_smoke=budget_smoke, cardm_harness=cardm_harness, cardm_args=cardm_args,
-                   cardm_env=cardm_env, bake_default_profile=bake_profile, bake_graft=bake_graft, drafter_candidates=drafter_candidates, box_minutes=box_minutes, drafter_manifest=drafter_manifest, tt_grid=tt_grid,
+                   cardm_env=cardm_env, bake_default_profile=bake_profile, bake_graft=bake_graft, drafter_candidates=drafter_candidates, box_minutes=box_minutes, drafter_manifest=drafter_manifest, tt_grid=tt_grid, nvme_device=nvme_device, peer_memory=p2pmem,
                    telemetry=telemetry, telemetry_ms=telemetry_ms)
     outputs.update(s2)
     outputs.update(prefix)

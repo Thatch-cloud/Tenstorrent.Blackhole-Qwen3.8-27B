@@ -90,6 +90,7 @@ ENV_P2P = 'QWEN_PREFIX_NVME_P2P'
 ENV_P2P_THREADS = 'QWEN_PREFIX_NVME_P2P_THREADS'
 ENV_P2P_STAGING_MIB = 'QWEN_PREFIX_NVME_P2P_STAGING_MIB'
 ENV_P2PMEM = 'QWEN_PREFIX_NVME_P2PMEM'
+ENV_RUNNER_P2PMEM = 'QWEN_P2PMEM_DEVICES'          # set by the runner (c2_cache_drive.py), not a flag: the fallback for ENV_P2PMEM
 ENV_P2P_UNVERIFIED = 'QWEN_PREFIX_NVME_P2P_ALLOW_UNVERIFIED_MAP'
 NAMES = (ENV_SWITCH, ENV_DEVICE, ENV_TTL_S, ENV_MAX_AGE_S, ENV_MAX_BYTES, ENV_VERIFY, ENV_RESTORE, ENV_FREE_FLOOR, ENV_QUEUE, ENV_THREADS, ENV_FORMAT, ENV_DISCARD,
          ENV_COMPAT, ENV_CMD_DIR, ENV_AUDIT, ENV_SPILL, ENV_THROUGH_BLOCKS, ENV_THROUGH_IDLE_S, ENV_RETENTION_ACK, ENV_ALLOW_ZERO_RETENTION, ENV_DRAIN_S, ENV_REQUIRE_SED, ENV_SED_STATUS,
@@ -165,6 +166,7 @@ FINGERPRINTED_ENV = (
     'QWEN_SDPA_BF8',                      # the served KV and the prefill SDPA operands are bf8 (the dtype also shows in io.fingerprint; the switch is what selects it)
     'QWEN_GDN_PREFILL_MMRS',              # fused out-projection + reduce-scatter in the GDN prefill: a different fp32 summation order, not proven exact
     'QWEN_PREFIX_CKPT_PRECONVERTED',      # the checkpoint object's form (the model's device-ready host tensors, or torch tensors): a stored form restores only as itself
+    'QWEN_FAST_SDPA_PF_KSPLIT',           # K-split SDPA for the 512/1,024-row tail passes (PF3-K): a tolerance class, not a bit comparison - the tail's K/V rows and states inherit the difference
 )
 DRAFTER_FLAG = 'QWEN_FAST_DRAFTER_CHECKPOINT'
 DRAFTER_MODULE = 'drafter_checkpoint'
@@ -334,11 +336,14 @@ def parse(env):
     plan.p2p_staging_bytes = _digits(env, ENV_P2P_STAGING_MIB, DEFAULT_P2P_STAGING_MIB, 2, 4096, problems) << 20
     plan.p2p_unverified_map = _switch(env, ENV_P2P_UNVERIFIED, problems)
     plan.p2pmem = ()
-    listed = env.get(ENV_P2PMEM)
+    listed, source = env.get(ENV_P2PMEM), ENV_P2PMEM
+    if listed in (None, '') and plan.p2p and env.get(ENV_RUNNER_P2PMEM) not in (None, ''):
+        # the runner's own name for the cards whose p2pmem/allocate it bound into the container (c2_cache_drive: C2_P2PMEM); a host-plumbing fact, not a flag, so it is read only when the restore is on
+        listed, source = env.get(ENV_RUNNER_P2PMEM), ENV_RUNNER_P2PMEM
     if listed not in (None, ''):
         names = [name.strip() for name in listed.split(',')]
         if not all(PCI_ADDRESS.fullmatch(name) for name in names):
-            problems.append('%s=%r must be a comma-separated list of PCI addresses (0000:bb:dd.f)' % (ENV_P2PMEM, listed))
+            problems.append('%s=%r must be a comma-separated list of PCI addresses (0000:bb:dd.f)' % (source, listed))
         else:
             plan.p2pmem = tuple(sorted(name.lower() if name.count(':') == 2 else '0000:' + name.lower() for name in names))
     if not plan.p2p:
@@ -493,13 +498,21 @@ def same_drive(status, device, sysfs=store_module.SYSFS, by_id_dir='/dev/disk/by
             verdicts.append(False)                                  # the device IS a by-id name, and another one
         elif os.path.exists(link) and os.path.exists(device):
             verdicts.append(os.path.realpath(link) == os.path.realpath(device))
-    pci = status.get('pci')
+    pci = status.get('pci') or status.get('pci_addr')           # the rig's boot unit writes pci_addr; the first design said pci
     if isinstance(pci, str) and pci:
         try:
             info = os.stat(device)
             real = os.path.realpath(os.path.join(sysfs, 'dev', 'block', '%d:%d' % (os.major(info.st_rdev), os.minor(info.st_rdev))))
             if os.path.isdir(real):
-                verdicts.append(('/%s/' % pci) in (real + '/'))
+                paths = [real]
+                if '/virtual/' in real:
+                    # a multipath head namespace lives under the subsystem (/sys/devices/virtual/nvme-subsystem/...), whose nvmeN children are the controllers and carry the PCI path
+                    parent = os.path.dirname(real)
+                    try:
+                        paths += [os.path.realpath(os.path.join(parent, name)) for name in sorted(os.listdir(parent)) if re.fullmatch(r'nvme[0-9]+', name)]
+                    except OSError:
+                        pass
+                verdicts.append(any(('/%s/' % pci) in (path + '/') for path in paths))
         except OSError:
             pass
     if False in verdicts:
@@ -552,8 +565,10 @@ def status_file_facts(device, status_path, read=None, boot=None, sysfs=store_mod
         raise NotEncrypted('the status file does not say locking is enabled')
     if status.get('locked') is not False:
         raise NotEncrypted('the status file says the drive is locked, or does not say it is not')
+    if status.get('state') not in (None, 'ok'):
+        raise NotEncrypted('the status file\'s own state is %r, not ok' % (status.get('state'),))
     try:
-        stamp = parse_timestamp(status.get('ts'))
+        stamp = parse_timestamp(status['ts'] if status.get('ts') is not None else status.get('timestamp'))      # the rig's boot unit writes timestamp; the first design said ts
         booted = (boot or boot_time)()
     except (ValueError, OSError, TypeError) as error:
         raise NotEncrypted('the status file\'s time (ts) or this boot\'s time cannot be read (%s)' % error)

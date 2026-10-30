@@ -106,6 +106,8 @@ LEAN_ADOPT_MARKER = '[PINDIAG] admission lean adopt '
 # ...and one per rebound admission: A the host checks, the DRAM backstop and the slot adoption, B the placement, the rebind's host refusal check and the first window join,
 # C the rebind itself (ParkedEngineSet.rebind_slot), all measured by the factory's own clock; total_ms is the sum, a part of the 'sticky engine built' line's ms.
 LEAN_SPLIT_MARKER = '[PINDIAG] admission lean split '
+# QWEN_FAST_ADMISSION_LEDGER_TRIM (admission_pipeline.LEDGER_FLAG, duplicated here for the same reason: the test pins them equal): no rebind bracket at all.
+LEDGER_TRIM_FLAG = 'QWEN_FAST_ADMISSION_LEDGER_TRIM'
 # W6a's executed-path marker: the buckets the engine's proposal capture actually holds, read after the build.
 PROPOSAL_BUCKETS_BUILT = '[PINDIAG] proposal buckets built request='
 
@@ -123,6 +125,8 @@ _REBIND_BRACKETED = set()
 def lean_bracket_skipped(slot):
     """Whether the ledger's op=rebind bracket is left out for a rebind onto parked slot `slot`: under QWEN_FAST_ADMISSION_LEAN=1, for every rebind of a slot after its first (the
     bracket of the first one is the record; the DRAM hold and the backstop are the checks). Off, always False and nothing is recorded."""
+    if os.environ.get(LEDGER_TRIM_FLAG) == '1':
+        return True                  # QWEN_FAST_ADMISSION_LEDGER_TRIM (admission_pipeline): the memory ledger ended after the attach, there is no bracket to take
     if not lean_enabled():
         return False
     if slot in _REBIND_BRACKETED:
@@ -196,9 +200,17 @@ def register_dram_admission(pool, *, log=None, parked=None):
         # A mis-set QWEN_FAST_DRAM_*_MB would raise inside a hold decision while serving and read as 'admit': refuse it here.
         raise ValueError('; '.join(problems))
     reserve = dram_reserve_bytes()
-    unregister = admission.register_dram_predicate(
-        admission.dram_predicate(pool, reserve) if parked is None
-        else admission.dram_predicate(pool, reserve, parked=parked.arrival_terms))
+    if os.environ.get(admission.HOLD_REUSE_FLAG) == '1':
+        # QWEN_FAST_ADMISSION_HOLD_REUSE (admission_pipeline): the hold may reuse a recent allocator reading; the reading is valid only while the parked set's slot states are the ones it saw.
+        import admission_pipeline
+
+        admission_pipeline.reset()
+        predicate = admission.dram_predicate(pool, reserve, **({} if parked is None else dict(parked=parked.arrival_terms)),
+                                             signature=lambda: admission_pipeline.parked_signature(parked))
+    else:
+        predicate = (admission.dram_predicate(pool, reserve) if parked is None
+                     else admission.dram_predicate(pool, reserve, parked=parked.arrival_terms))
+    unregister = admission.register_dram_predicate(predicate)
     reading, reason = admission.dram_reading(pool)
     (_log if log is None else log)(
         DRAM_REGISTERED + 'need = engine {} + build margin {} + prefill {} at >= {} prompt tokens + reserve {} bytes '
@@ -496,6 +508,23 @@ def rebind_parked(parked, entry, *, model, pages, state, capture, prompt, seed, 
     return request
 
 
+def attach_lookup(request, prompt, request_id):
+    """QWEN_FAST_LOOKUP_DRAFT (default off; prompt_lookup, docs/tp4-lookup.md): give `request` a host-side lookup over its own token history, which
+    replaces DFlash2's proposal rows on the rounds its policy picks. Called for a built request and, since tp4/stream-1, for a REBOUND one (engine
+    reuse): the lookup is host state on the FastRequest and touches no device, so a parked engine needs nothing from it. Unset, '', '0' or 'off':
+    nothing is imported, built or logged. A malformed policy raises ValueError (never a silent off). The engaged line carries the index build time
+    (it runs on the engine step thread, so every decoding seat waits for it)."""
+    if os.environ.get('QWEN_FAST_LOOKUP_DRAFT', '').strip().lower() in ('', '0', 'off'):
+        return
+    import prompt_lookup
+
+    began = time.perf_counter()
+    request.lookup = prompt_lookup.for_request(prompt, request.session, request_id=request_id)
+    if request.lookup is not None:
+        _log('{} policy={} request={} history={} build_ms={:.1f}', prompt_lookup.ENGAGED, request.lookup.policy, request_id,
+             len(request.lookup.index), (time.perf_counter() - began) * 1000.0)
+
+
 def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, fixtures, eos_ids,
                  collectives=None, buffer_pool=None, shared_weights=None, capture_rows=None, parked=None):
     from dflash_request_runtime import TARGET_TAPS
@@ -635,6 +664,12 @@ def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, 
                     done = time.perf_counter()
                     _log(LEAN_SPLIT_MARKER + 'request={} a_ms={:.1f} b_ms={:.1f} c_ms={:.1f} total_ms={:.1f}', str(state.req_id)[:48], (adopted - entered) * 1000.0,
                          (rebinding - adopted) * 1000.0, (done - rebinding) * 1000.0, (done - entered) * 1000.0)
+                try:
+                    attach_lookup(request, prompt, state.req_id)
+                except BaseException:
+                    # The engine is bound to this request and the capture is released: nothing else owns the slot, so park it as a close does.
+                    request.close(state.req_id)
+                    raise
                 owned.pop_all()
                 return request
             fell_back = True
@@ -794,14 +829,6 @@ def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, 
             publish_prewarm.warm(device, engine)
         request = FastRequest(session, engine, runtime, release_drafter=device.close,
             collect_timings=os.environ.get('QWEN_FAST_PHASE_TIMING') == '1')
-        # QWEN_FAST_LOOKUP_DRAFT (default off): a host-side lookup over this request's token history that replaces
-        # DFlash2's proposal rows on the rounds its policy picks. Unset, nothing is imported or built.
-        if os.environ.get('QWEN_FAST_LOOKUP_DRAFT', '').strip().lower() not in ('', '0', 'off'):
-            import prompt_lookup
-
-            request.lookup = prompt_lookup.for_request(prompt, session, request_id=state.req_id)
-            if request.lookup is not None:
-                _log('{} policy={} request={} history={}', prompt_lookup.ENGAGED, request.lookup.policy, state.req_id,
-                     len(request.lookup.index))
+        attach_lookup(request, prompt, state.req_id)
         owned.pop_all()
     return request

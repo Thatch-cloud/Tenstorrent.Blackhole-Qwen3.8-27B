@@ -29,6 +29,12 @@ calibrates A3 (c2_tau_lab: a candidate that moves tau would fail it by construct
 reference, on 8 turns) is reported beside the verdict as `control_calibration` and is an annotation, not a GO precondition: the
 paired ratio is a within-run comparison and does not need the stack to match an older one.
 
+SPEED (tp4/stream-1; read beside the verdict, never part of it). The lab's own turn records (turns.jsonl: completion tokens, seconds, first-token time) give each turn's decode
+window, so the same paired, same-text turns also say what the candidate did to the decode RATE: the pooled completion tokens per decode second (equal weight per set, like tau) of
+the candidate over the control's, with the same cluster-bootstrap interval. It is the quantity the owner wants (tokens a second a stream), measured at whatever concurrency the lab
+ran (`--in-flight`: 1 is the lone-user lane), and it moves with tau but also with anything the candidate costs a round; a drafter-only switch moves nothing else, so a speed ratio
+under the tau ratio is the candidate's host cost. Absent (`speed` None) when either run has no usable turn timing.
+
 Python 3.7 syntax, stdlib only: it runs on the rig host and in CI.
 """
 import argparse
@@ -70,9 +76,24 @@ def round_dicts(rounds):
     return [dict(zip(keys, entry)) for entry in rounds or []]
 
 
+def recorded_max_tokens(directory, info):
+    """The max_tokens a run was held to, the value the `matched` gate compares: run.json's own (c2_tau_lab.effective_max_tokens: {arm: the budget the lab sent}). A run made before the lab
+    recorded it has None there (it recorded the --max-tokens option, unasked): its turns.jsonl holds what every turn was sent, so the same {arm: highest budget} is read back from there; None
+    where neither exists (and the gate then fails: nothing to hold the two runs to)."""
+    value = info.get('max_tokens')
+    if value is not None:
+        return value, None
+    found = {}
+    for turn in read_jsonl(os.path.join(directory, 'turns.jsonl')):
+        arm, budget = turn.get('arm'), turn.get('max_tokens')
+        if arm and isinstance(budget, int) and not isinstance(budget, bool) and budget > 0:
+            found[arm] = max(found.get(arm, 0), budget)
+    return (found or None), ('turns.jsonl' if found else None)
+
+
 def read_run(directory):
     """({(arm, id): stat plus its set, cluster and output ids} for the thinking-ON primary arms of one results directory, its
-    run.json, the public summary its report kept in report.private.json or None)."""
+    run.json (with max_tokens read back from turns.jsonl where the run did not record it), the public summary its report kept in report.private.json or None)."""
     tapes = read_jsonl(os.path.join(directory, 'tapes.jsonl'))
     outputs = dict(((entry['arm'], entry['id']), entry.get('output_ids')) for entry in read_jsonl(
         os.path.join(directory, 'outputs.jsonl')))
@@ -81,6 +102,10 @@ def read_run(directory):
     if os.path.isfile(path):
         with open(path, encoding='utf-8') as handle:
             info = json.load(handle)
+    if info:
+        info['max_tokens'], source = recorded_max_tokens(directory, info)
+        if source:
+            info['max_tokens_source'] = source
     public = None
     path = os.path.join(directory, 'report.private.json')
     if os.path.isfile(path):
@@ -173,6 +198,42 @@ def interval(items, statistic, seed, resamples=RESAMPLES):
     return point, report.quantile(draws, low), report.quantile(draws, 1.0 - low), len(draws)
 
 
+MIN_SPEED_TOKENS = 16        # a turn shorter than this has no decode window worth a rate
+
+
+def read_turn_speeds(directory):
+    """{(arm, id): (completion tokens, decode seconds)} of a results directory's ok turns that carry a first-token time and a positive decode window."""
+    out = {}
+    for turn in read_jsonl(os.path.join(directory, 'turns.jsonl')):
+        if turn.get('status') != 'ok' or turn.get('arm') not in report.PRIMARY_ARMS:
+            continue
+        tokens, seconds, first = turn.get('completion_tokens'), turn.get('seconds'), turn.get('ttft')
+        if any(type(value) not in (int, float) for value in (tokens, seconds, first)) or tokens < MIN_SPEED_TOKENS or seconds - first <= 0:
+            continue
+        out[(turn['arm'], turn['id'])] = (tokens, seconds - first)
+    return out
+
+
+def speed_rows(items, control_speeds, candidate_speeds):
+    """The paired same-text turns that both runs timed, in the shape pooled() and interval() read (tokens as `e`, decode seconds as `r`)."""
+    rows = []
+    for item in items:
+        if item['key'] in control_speeds and item['key'] in candidate_speeds:
+            base, other = control_speeds[item['key']], candidate_speeds[item['key']]
+            rows.append(dict(set=item['set'], cluster=item['cluster'], weight=1.0, b_e=base[0], b_r=base[1], c_e=other[0], c_r=other[1]))
+    return rows
+
+
+def speed_summary(items, control_speeds, candidate_speeds, seed=0, resamples=RESAMPLES):
+    """The public `speed` of the pair: pooled completion tokens per decode second of each arm and their ratio with its interval; None without a paired timed turn."""
+    rows = speed_rows(items, control_speeds, candidate_speeds)
+    if not rows:
+        return None
+    point, low, high, draws = interval(rows, lambda chosen, side: pooled(chosen, side), seed + 3, resamples)
+    return dict(turns=len(rows), control_tok_s=rounded(pooled(rows, 'b'), 2), candidate_tok_s=rounded(pooled(rows, 'c'), 2), ratio=rounded(point),
+                ci95_low=rounded(low), ci95_high=rounded(high), resamples=draws)
+
+
 def rounded(value, digits=4):
     return None if value is None else round(value, digits)
 
@@ -187,8 +248,8 @@ def gate_no_regression(point, high):
     return 'PASS' if point >= LONG_POINT_FLOOR and high >= 1.0 else 'FAIL'
 
 
-def build(control, candidate, arm, control_info=None, candidate_info=None, control_summary=None, seed=0, resamples=RESAMPLES):
-    """The public summary of the pair: aggregates only."""
+def build(control, candidate, arm, control_info=None, candidate_info=None, control_summary=None, seed=0, resamples=RESAMPLES, speeds=None):
+    """The public summary of the pair: aggregates only. `speeds` is (control speeds, candidate speeds) from read_turn_speeds, or None."""
     if arm not in CANDIDATE_ARMS:
         raise ValueError('the candidate arm is one of %s' % ', '.join(CANDIDATE_ARMS))
     control_info, candidate_info = control_info or {}, candidate_info or {}
@@ -242,15 +303,21 @@ def build(control, candidate, arm, control_info=None, candidate_info=None, contr
                  ci95_low=rounded(p10_low), ci95_high=rounded(p10_high), resamples=p10_draws),
         buckets=buckets, sets=sets, control_calibration=calibration if calibration in ('PASS', 'FAIL', 'NOT_RUN',
                                                                                     'NOT_ESTABLISHED') else None,
+        speed=None if speeds is None else speed_summary(paired_text, speeds[0], speeds[1], seed, resamples),
         rule=dict(long_point_floor=LONG_POINT_FLOOR, min_paired_share=MIN_PAIRED_SHARE, level=LEVEL, min_rounds=MIN_ROUNDS))
 
 
 def summary_lines(public):
     pooled_ = public['pooled']
-    return ['[DRAFTER-PAIR] arm=%s verdict=%s pooled ratio=%s ci95=%s..%s long=%s p10=%s paired=%d same_text=%d gates=%s' % (
+    lines = ['[DRAFTER-PAIR] arm=%s verdict=%s pooled ratio=%s ci95=%s..%s long=%s p10=%s paired=%d same_text=%d gates=%s' % (
         public['arm'], public['verdict'], pooled_['ratio'], pooled_['ci95_low'], pooled_['ci95_high'],
         public['long_bucket']['ratio'], public['p10']['ratio'], public['pairs']['turns'], public['pairs']['same_text'],
         ','.join('%s:%s' % pair_ for pair_ in sorted(public['gates'].items())))]
+    speed = public.get('speed')
+    if speed:
+        lines.append('[DRAFTER-PAIR] speed arm=%s decode tok/s control=%s candidate=%s ratio=%s ci95=%s..%s turns=%d' % (
+            public['arm'], speed['control_tok_s'], speed['candidate_tok_s'], speed['ratio'], speed['ci95_low'], speed['ci95_high'], speed['turns']))
+    return lines
 
 
 def main(argv=None, say=print):
@@ -268,7 +335,9 @@ def main(argv=None, say=print):
     if options.control_summary:
         with open(options.control_summary, encoding='utf-8') as handle:
             summary = json.load(handle)
-    public = build(control, candidate, options.arm, control_info, candidate_info, summary, seed=options.seed)
+    speeds = (read_turn_speeds(options.control), read_turn_speeds(options.candidate))
+    public = build(control, candidate, options.arm, control_info, candidate_info, summary, seed=options.seed,
+                   speeds=speeds if speeds[0] and speeds[1] else None)
     report.assert_public(public)
     if options.out:
         report.write_json(os.path.join(options.out, SUMMARY_NAME), public)

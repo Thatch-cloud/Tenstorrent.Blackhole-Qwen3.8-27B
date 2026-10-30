@@ -12,9 +12,12 @@ name: Qwen C2 serving image
 #            64-row block against its one-tile calls, bit for bit, then the tile-split wrapper): rs-tile-spike.json
 #            C2_FABRIC_PROBE=kvread runs scripts/ci/tp4_kv_read_probe.py (the prefix audit's region read, ttnn.qwen_read_blocks, against the
 #            whole-cache read byte for byte on the pool-sized cache; KV_READ_PROBE verdict=PASS|FAIL): kv-read-probe.json
+#            C2_FABRIC_PROBE=h2d runs scripts/ci/tp4_h2d_probe.py (per-card host->device bandwidth, x16 against x4, the GDN restore split,
+#            the relay's one-coordinate write; H2D_PROBE verdict=...): h2d-probe.json. C2_FABRIC_PROBE=p2p runs scripts/ci/tp4_p2p_probe.py
+#            (ttnn.point_to_point unicast x16 -> x4 and every line edge, byte for byte; P2P_PROBE verdict=...): p2p-probe.json
 #            C2_FABRIC_PROBE=p2p-restore runs scripts/ci/tp4_p2p_restore_probe.py, P3a (docs/tp4-p2p-host.md section 8: the cache drive's identity and R1's readings, then NVMe ->
 #            the cards' staging buffers -> the KV caches, one card first, byte for byte, with a negative arm; P3A verdict=PASS|FAIL|NOT-MEASURED): p2p-restore-p3a.json.
-#            The drive and the cards come from a private file on the runner (P2P_ENV_FILE), never from the repository.
+#            The drive and the cards are the job's C2_NVME_DEVICE=status and C2_P2PMEM (the words `status` and `auto` keep them out of the repository).
 #   cardm  - a single-card qualification harness (C2_CARDM_HARNESS, e.g. optimisation/ttnn-op/k64j/run_card_b.sh)
 #            on card M alone, card B being reserved for another project: QUAL_CARD=card M, ALLOW_SERVING_CARD=1, after
 #            the same refusals as the gate (anything holding M or A, a platform serving container); never card
@@ -77,6 +80,11 @@ name: Qwen C2 serving image
 # C2_TT_GRID (10,9 | 11,9 | 12,9, or unset: nothing is passed) clamps the compute grid tt-metal exposes, as insurance for cards that no longer soft-harvest
 # Tensix columns: every step that opens a card gives its container TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE=<value> - the fabric probe, the pair and four-card smokes,
 # the gate, prefix and tau lab drivers and the replay (--tt-grid), and the cardm harness (QUAL_TT_GRID, which the harness puts into its container).
+# C2_NVME_DEVICE (a /dev/disk/by-id path, or `status`: the by_id of the cache drive's status file) and C2_P2PMEM (PCI addresses, or `auto`) give the fabric, four-card smoke and prefix
+# containers the NVMe cache drive and the cards' p2pmem (scripts/ci/c2_cache_drive.py; docs/tp4-kv-nvme.md section 12): the drive is resolved from its link at run time, the R1 readings
+# (controller state, namespace size) are printed and the job is refused unless the controller is live and the namespace is above 0 bytes; the container gets --device <resolved>:/dev/c2-cache-drive,
+# the status file read-only and QWEN_PREFIX_NVME_DEVICE; p2pmem/allocate of each named card is bound read-write (one file; the rest of sysfs stays read-only) with
+# --security-opt apparmor=unconfined, and QWEN_P2PMEM_DEVICES. Both keys unset: nothing is added. The values are the private job config's: nothing here prints them (the job step masks them).
 # C2_TELEMETRY=1 (and C2_TELEMETRY_MS, default 1000) runs the read-only card telemetry sidecar (scripts/ci/card_telemetry.sh) through the smoke and gate steps: per-chip ARC telemetry
 # (AICLK and the limiter holding it, VCORE, power, current, temperatures, kernel NOP counters) into telemetry-smoke/ and telemetry-gate/ of the results, one summary line per chip
 # in the step's log. It reads over PCIe the table the ARC firmware publishes (the read tt-smi makes), sends no ARC message, and never fails a step.
@@ -114,6 +122,8 @@ jobs:
           set -euo pipefail
           test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
           python3 scripts/ci/c2_serving_job.py .github/c2-serving-job.env >> "$GITHUB_OUTPUT"
+          # C2_NVME_DEVICE / C2_P2PMEM literals (a by-id name carries the drive's serial; PCI addresses) are masked before anything below prints the outputs or a step's env block.
+          python3 scripts/ci/c2_cache_drive.py mask "$GITHUB_OUTPUT"
           cat "$GITHUB_OUTPUT"
           # When the job began: the gate step budgets its plans against what the job's timeout leaves.
           echo "C2_JOB_STARTED=$(date +%s)" >> "$GITHUB_ENV"
@@ -434,6 +444,8 @@ jobs:
           PROBE: ${{ steps.job.outputs.fabric_probe }}
           BOX_MINUTES: ${{ steps.job.outputs.box_minutes }}
           TT_GRID: ${{ steps.job.outputs.tt_grid }}
+          NVME_DEVICE: ${{ steps.job.outputs.nvme_device }}
+          P2PMEM: ${{ steps.job.outputs.peer_memory }}
         run: |
           set -euo pipefail
           # The (1, 4) mesh under the ring descriptor, opened once (one fabric config, one open: a second open in a
@@ -458,6 +470,8 @@ jobs:
             ccl-sweep-quick) script=tp4_ccl_sweep_probe.py; report=ccl-sweep.json; probe_args="--quick --skip-probe-only" ;;
             split) script=tp4_split_probe.py; report=split-probe.json ;;
             split-attribute) script=tp4_split_probe.py; report=split-probe.json; probe_args="--attribute --profile c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-traffic-s4" ;;
+            h2d) script=tp4_h2d_probe.py; report=h2d-probe.json ;;
+            p2p) script=tp4_p2p_probe.py; report=p2p-probe.json ;;
             *) echo "unknown fabric probe: $PROBE" >&2; exit 1 ;;
           esac
           results="$RUNNER_TEMP/c2-results/fabric"
@@ -476,6 +490,13 @@ jobs:
           fi
           devices=()
           for node in $(card_set_devices); do devices+=(--device "$node"); done
+          # C2_NVME_DEVICE / C2_P2PMEM (scripts/ci/c2_cache_drive.py): the cache drive and the cards' p2pmem. A drive that is not live (or reads 0 bytes) refuses the probe here, before the
+          # container; both unset adds nothing.
+          cache_args=()
+          if [ -n "$NVME_DEVICE$P2PMEM" ]; then
+            python3 scripts/ci/c2_cache_drive.py args ${NVME_DEVICE:+--nvme-device "$NVME_DEVICE"} ${P2PMEM:+--p2pmem "$P2PMEM"} --out "$RUNNER_TEMP/cache-drive-fabric.args"
+            mapfile -d '' -t cache_args < "$RUNNER_TEMP/cache-drive-fabric.args"
+          fi
           # kvread qualifies the BAKED extension (qwen_kv_read, optimisation/ttnn-op/kv_region_read). The rig's graft directory is mounted read-only
           # beside it and is NOT on the path: the probe imports the baked module first and falls back to the mount only for an image built before
           # B0 baked the graft, and its report says which ran ('extension_source'), so a mount can never shadow the baked bytes.
@@ -483,52 +504,36 @@ jobs:
           if [ "${PROBE:-fabric}" = kvread ] && [ -s /home/thatch/opgraft-KVR/qwen_kv_read.so ]; then
             kvmount=(-v /home/thatch/opgraft-KVR:/opt/qwen-c2/kvr-mount:ro -e QWEN_KVREAD_DIR=/opt/qwen-c2/kvr-mount)
           fi
-          # p2p is P3a (docs/tp4-p2p-host.md section 8): the peer-to-peer restore against the cache drive, on the cards. WHICH drive and WHICH cards come from a private file on this
-          # runner, P2P_ENV_FILE (KEY=VALUE lines, only P2P_DRIVE_BY_ID, P2P_DRIVE_MODEL, P2P_DRIVE_SERIAL and P2P_CARDS), never from the repository, and never into this log (it is public
-          # when the repository is). The drive's identity is checked here before docker (the by-id name of the configured model and serial must resolve to a block device) and again
-          # inside by the probe (the by-id link and the kernel's own model and serial), before the first byte is written; the cards' p2pmem pools must be whole. The drive's node and the
-          # by-id links go into the container, and the p2pmem directory of each card read-write over the container's read-only sysfs; SYS_ADMIN lets the probe confirm where the pages are.
+          # p2p-restore is P3a (docs/tp4-p2p-host.md section 8): the peer-to-peer restore against the cache drive, on the cards. WHICH drive and WHICH cards are the job's C2_NVME_DEVICE and
+          # C2_P2PMEM (cache_args above: the drive resolved from its link now, R1 printed, the cards' p2pmem/allocate bound, QWEN_PREFIX_NVME_DEVICE and QWEN_P2PMEM_DEVICES set), and only the
+          # words `status` and `auto` are allowed to stand in a tracked job file. This probe WRITES a scratch region of the drive, so it asks for more than the other steps: both keys
+          # (a probe with no drive refuses here), the drive named through the boot unit's status file (the probe proves inside the container, from the kernel, that the node it was handed
+          # is the drive that file names), the node not a mounted filesystem, swap, an array member or held by another block device, and every card's p2pmem pool whole. SYS_ADMIN lets the
+          # probe confirm where the pages of the mapping are (/proc/self/pagemap); no other capability and no privileged mode.
           p2pargs=()
           if [ "${PROBE:-fabric}" = p2p-restore ]; then
-            p2p_env="${P2P_ENV_FILE:-$HOME/.config/qwen-p2p/p3a.env}"
-            [ -f "$p2p_env" ] || { echo 'refusing: the runner has no private P3a file (P2P_ENV_FILE)' >&2; exit 1; }
-            [ "$(stat -c %u "$p2p_env")" = "$(id -u)" ] && [ -z "$(find "$p2p_env" -perm /022)" ] || { echo 'refusing: the private P3a file is not the runner user'"'"'s alone' >&2; exit 1; }
-            declare -A p2p_val=()
-            while IFS= read -r line || [ -n "$line" ]; do
-              case "$line" in ''|'#'*) continue ;; esac
-              if [[ "$line" =~ ^(P2P_DRIVE_BY_ID|P2P_DRIVE_MODEL|P2P_DRIVE_SERIAL|P2P_CARDS)=([A-Za-z0-9._:/,+@\ -]+)$ ]]; then
-                p2p_val["${BASH_REMATCH[1]}"]="${BASH_REMATCH[2]}"
-              else
-                echo 'refusing: a line of the private P3a file is not one of its four names with a plain value' >&2; exit 1
-              fi
-            done < "$p2p_env"
-            for name in P2P_DRIVE_BY_ID P2P_DRIVE_MODEL P2P_DRIVE_SERIAL P2P_CARDS; do
-              [ -n "${p2p_val[$name]:-}" ] || { echo "refusing: $name is not set in the private P3a file" >&2; exit 1; }
+            [ -n "$NVME_DEVICE" ] && [ -n "$P2PMEM" ] || { echo 'refusing: P3a needs C2_NVME_DEVICE and C2_P2PMEM' >&2; exit 1; }
+            [ "$NVME_DEVICE" = status ] || { echo 'refusing: P3a needs C2_NVME_DEVICE=status (the drive named by the boot unit'"'"'s status file, which the probe checks against the kernel)' >&2; exit 1; }
+            node=''; pools=''
+            for arg in "${cache_args[@]}"; do
+              case "$arg" in
+                *:/dev/c2-cache-drive:rwm) node="${arg%:/dev/c2-cache-drive:rwm}" ;;
+                QWEN_P2PMEM_DEVICES=*) pools="${arg#QWEN_P2PMEM_DEVICES=}" ;;
+              esac
             done
-            link="${p2p_val[P2P_DRIVE_BY_ID]}"
-            case "$link" in /dev/disk/by-id/nvme-*) ;; *) echo 'refusing: the drive must be named by a /dev/disk/by-id/nvme-* path' >&2; exit 1 ;; esac
-            node=$(readlink -f "$link")
-            [ -b "$node" ] || { echo 'refusing: the drive'"'"'s by-id link does not resolve to a block device' >&2; exit 1; }
-            tok() { printf '%s' "$1" | sed -E 's/[^A-Za-z0-9]+/_/g; s/^_+//; s/_+$//'; }
-            want="nvme-$(tok "${p2p_val[P2P_DRIVE_MODEL]}")_$(tok "${p2p_val[P2P_DRIVE_SERIAL]}")"
-            [[ "$(basename "$link")" =~ ^"$want"(_[0-9]+)?$ ]] || { echo 'refusing: the drive'"'"'s by-id name is not the configured model and serial' >&2; exit 1; }
-            # the probe writes a scratch region of the drive: it must not be a mounted filesystem, swap, an array member or held by device-mapper
+            [ -b "$node" ] || { echo 'refusing: the drive did not resolve to a block device' >&2; exit 1; }
+            [ -n "$pools" ] || { echo 'refusing: no card publishes p2pmem' >&2; exit 1; }
             nodename=$(basename "$node")
             if [ -n "$(lsblk -nro MOUNTPOINTS "$node" 2>/dev/null | tr -d '[:space:]')" ] || grep -q "^$node " /proc/swaps \
                || grep -q "\b$nodename" /proc/mdstat 2>/dev/null || [ -n "$(ls -A "/sys/block/$nodename/holders" 2>/dev/null)" ]; then
               echo 'refusing: the drive is mounted, in use as swap, in an array or held by another block device' >&2; exit 1
             fi
-            p2p_mounts=()
-            IFS=',' read -r -a p2p_cards <<< "${p2p_val[P2P_CARDS]}"
+            IFS=',' read -r -a p2p_cards <<< "$pools"
             for bdf in "${p2p_cards[@]}"; do
-              bdf="${bdf// /}"
-              [[ "$bdf" =~ ^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$ ]] || { echo 'refusing: P2P_CARDS names something that is not a PCI address' >&2; exit 1; }
               pool="/sys/bus/pci/devices/$bdf/p2pmem"
               [ -r "$pool/size" ] && [ "$(cat "$pool/size")" = "$(cat "$pool/available")" ] || { echo 'refusing: a card'"'"'s p2pmem pool is missing or not whole (the patched module is not loaded for it, or somebody holds it)' >&2; exit 1; }
-              p2p_mounts+=(-v "$pool:$pool")
             done
-            p2pargs=(--device "$node" -v /dev/disk/by-id:/dev/disk/by-id:ro "${p2p_mounts[@]}" --cap-add SYS_ADMIN
-                     -e "P2P_DRIVE_BY_ID=$link" -e "P2P_DRIVE_MODEL=${p2p_val[P2P_DRIVE_MODEL]}" -e "P2P_DRIVE_SERIAL=${p2p_val[P2P_DRIVE_SERIAL]}" -e "P2P_CARDS=${p2p_val[P2P_CARDS]}")
+            p2pargs=(--cap-add SYS_ADMIN)
           fi
           # split builds the image's own model from its first few real layers (docs/tp4-exact-resume.md 5.3): the hub the prefix step mounts, read-only here.
           if [ "${PROBE:-fabric}" = split ] || [ "${PROBE:-fabric}" = split-attribute ]; then
@@ -542,7 +547,7 @@ jobs:
           timeout -k 30 "$limit" docker run --rm --name "$name" --read-only \
             --tmpfs /tmp:rw,exec,nosuid,size=512m --tmpfs /opt/tt-metal/generated:rw,exec,nosuid,size=1g \
             --tmpfs /root/.cache/ttnn:rw,exec,nosuid,size=1g --tmpfs /root/.cache/tt-metal-cache:rw,exec,nosuid,size=8g \
-            --shm-size 4g --memory 80g --cpus 8 "${devices[@]}" \
+            --shm-size 4g --memory 80g --cpus 8 "${devices[@]}" ${cache_args[@]+"${cache_args[@]}"} \
             -v /dev/hugepages-1G:/dev/hugepages-1G --cap-add SYS_NICE \
             -v "$PWD:/c2:ro" -v "$results:/probe-results" ${kvmount[@]+"${kvmount[@]}"} ${p2pargs[@]+"${p2pargs[@]}"} \
             -e MESH_DEVICE=P150x4 -e PYTHONDONTWRITEBYTECODE=1 -e QWEN_C2_SERVING=0 \
@@ -552,7 +557,7 @@ jobs:
             --entrypoint python3 "$image" -B "/c2/scripts/ci/$script" --fabric "$FABRIC" \
             --output "/probe-results/$report" ${probe_args} 2>&1 | tee "$RUNNER_TEMP/c2-results/fabric-probe.log" || status=$?
           sudo -n chown -R "$(id -u):$(id -g)" "$results" 2>/dev/null || true
-          grep -E 'FABRIC_PROBE|TP4_RS_TILE|MR_PROBE|KV_READ_PROBE|CCL_SWEEP|SPLIT_PROBE|P3A' "$RUNNER_TEMP/c2-results/fabric-probe.log" | tail -60 || true
+          grep -E 'FABRIC_PROBE|TP4_RS_TILE|MR_PROBE|KV_READ_PROBE|CCL_SWEEP|SPLIT_PROBE|H2D_PROBE|P2P_PROBE|P3A' "$RUNNER_TEMP/c2-results/fabric-probe.log" | tail -60 || true
           exit "$status"
       - name: Run a qualification harness on card M
         if: contains(steps.job.outputs.actions, 'cardm')
@@ -988,6 +993,8 @@ jobs:
           BOX_MINUTES: ${{ steps.job.outputs.box_minutes }}
           CARDS: ${{ steps.job.outputs.cards }}
           TT_GRID: ${{ steps.job.outputs.tt_grid }}
+          NVME_DEVICE: ${{ steps.job.outputs.nvme_device }}
+          P2PMEM: ${{ steps.job.outputs.peer_memory }}
         run: |
           set -euo pipefail
           # TT prefix-reuse design 2.2 (G1): a serving container per arm in the agent's shape, launched
@@ -1054,6 +1061,7 @@ jobs:
             --baseline "$PREFIX_BASELINE" --agents "$PREFIX_AGENTS" --budget-seconds "$budget" ${box_left:+--box-seconds "$box_left"} \
             ${PREFIX_KVREAD_MOUNT:+--kvread-mount /home/thatch/opgraft-KVR-s0808fix} \
             ${TT_GRID:+--tt-grid "$TT_GRID"} \
+            ${NVME_DEVICE:+--nvme-device "$NVME_DEVICE"} ${P2PMEM:+--p2pmem "$P2PMEM"} \
             ${MODEL_REPO:+--model-repo "$MODEL_REPO" --model-revision "$MODEL_REVISION"} \
             --results "$results" --cards "$CARDS" 2>&1 | tee "$RUNNER_TEMP/c2-results/prefix.log" || status=$?
           # Read the launched argv (memory read-the-launched-argv) and the graft's install line, per arm.
@@ -1183,6 +1191,8 @@ jobs:
           MODEL_REPO: ${{ steps.job.outputs.model_repo }}
           MODEL_REVISION: ${{ steps.job.outputs.model_revision }}
           SERVED_MODEL: ${{ steps.job.outputs.model_served }}
+          NVME_DEVICE: ${{ steps.job.outputs.nvme_device }}
+          P2PMEM: ${{ steps.job.outputs.peer_memory }}
         run: |
           set -euo pipefail
           # The pair smoke's shape on every Blackhole board present (a general-tp4 profile: the contract sets
@@ -1206,6 +1216,13 @@ jobs:
           fi
           devices=()
           for node in $(card_set_devices); do devices+=(--device "$node"); done
+          # C2_NVME_DEVICE / C2_P2PMEM (scripts/ci/c2_cache_drive.py): the cache drive (resolved from its by-id link now, the R1 readings printed, the job refused unless the controller is live and
+          # the namespace above 0 bytes) and the cards' p2pmem; both unset adds nothing and the container is what it was.
+          cache_args=()
+          if [ -n "$NVME_DEVICE$P2PMEM" ]; then
+            python3 scripts/ci/c2_cache_drive.py args ${NVME_DEVICE:+--nvme-device "$NVME_DEVICE"} ${P2PMEM:+--p2pmem "$P2PMEM"} --out "$RUNNER_TEMP/cache-drive-smoke.args"
+            mapfile -d '' -t cache_args < "$RUNNER_TEMP/cache-drive-smoke.args"
+          fi
           # The job's BOX (C2_BOX_MINUTES, c2_serving_job.py), enforced from inside and never by cancelling the run: the wait for the API ends at the box,
           # and the smoke client runs under `timeout` for what the box has left; the trap below still removes the container and saves its log.
           # The box counts from the job's start (C2_JOB_STARTED), so the reset before this step is inside it.
@@ -1216,13 +1233,13 @@ jobs:
           ( while :; do echo "[LOAD] $(date +%s) $(cut -d' ' -f1 /proc/loadavg)" >> "$results/load.log"; sleep 60; done ) &
           load_pid=$!
           . scripts/ci/card_telemetry.sh
-          # agent_turns / agent_turns_long (scripts/ci/agent_turns.py): a prefix-reuse profile keeps a request's cache_salt only when it verifies against the salt key the contract reads, so for
-          # those two tests ONLY the step writes a throwaway key outside the uploaded results, mounts it read-only and points the contract at it (QWEN_PREFIX_SALT_KEY_FILE, as the gate does), and
+          # agent_turns / agent_turns_long / agent_turns8 (scripts/ci/agent_turns.py): a prefix-reuse profile keeps a request's cache_salt only when it verifies against the salt key the contract reads, so for
+          # those three tests ONLY the step writes a throwaway key outside the uploaded results, mounts it read-only and points the contract at it (QWEN_PREFIX_SALT_KEY_FILE, as the gate does), and
           # the smoke client mints its sessions' salts under the same file (SMOKE_SALT_KEY_FILE). Without it the run is unsalted and measures a server with reuse off. Every other job is unchanged.
           salt_key=
           salt_args=()
           case ",$TESTS," in
-            *,agent_turns,*|*,agent_turns_long,*)
+            *,agent_turns,*|*,agent_turns_long,*|*,agent_turns8,*)
               salt_key="$RUNNER_TEMP/c2-smoke-salt.key"
               python3 -c 'import binascii, os, sys; open(sys.argv[1], "wb").write(binascii.hexlify(os.urandom(32)) + b"\n")' "$salt_key"
               chmod 0644 "$salt_key"
@@ -1241,7 +1258,7 @@ jobs:
           docker run -d --name "$name" --read-only \
             --tmpfs /tmp:rw,size=512m --tmpfs /opt/tt-metal/generated:rw,size=1g \
             --tmpfs /root/.cache/ttnn:rw,size=1g --tmpfs /root/.cache/tt-metal-cache:rw,size=8g \
-            --shm-size 4g --memory 80g --cpus 8 "${devices[@]}" ${salt_args[@]+"${salt_args[@]}"} \
+            --shm-size 4g --memory 80g --cpus 8 "${devices[@]}" ${cache_args[@]+"${cache_args[@]}"} ${salt_args[@]+"${salt_args[@]}"} \
             -v /dev/hugepages-1G:/dev/hugepages-1G --cap-add SYS_NICE \
             -v /home/thatch/hf-cache/hub:/models -e HF_HOME=/models -e HF_HUB_CACHE=/models \
             -e MESH_DEVICE=P300 -e QWEN36_BATCHED_DECODE_MODE=host -e VLLM_RPC_TIMEOUT=100000 \

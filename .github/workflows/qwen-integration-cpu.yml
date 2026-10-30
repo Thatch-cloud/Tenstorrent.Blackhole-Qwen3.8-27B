@@ -134,7 +134,7 @@ jobs:
           python -B -m unittest test_c2_image_overlay
           python -B -m unittest test_serving_c2_contract
           python -B -m unittest test_tp4_mesh test_mesh_link_policy test_sampling_link_policy test_projection_link_policy test_model_link_policy
-          python -B -m unittest test_tp4_model_widths test_tp4_fabric_probe test_tp4_rs_tile_spike test_tile_collective_tp test_tp4_u1 test_tp4_exact_window test_tp_agreement test_tp_decode_bench test_c2_cards test_card_set
+          python -B -m unittest test_tp4_model_widths test_tp4_fabric_probe test_fabric_upload test_tp4_rs_tile_spike test_tile_collective_tp test_tp4_u1 test_tp4_exact_window test_tp_agreement test_tp_decode_bench test_c2_cards test_card_set
           python -B -m unittest test_tp_shapes test_tp2_pins test_tp_addresses test_tp4_shard_merges test_gdn_user_batch_tp test_gdn_tp_twins test_extent_attention_replay_tp test_attention_tp_twins test_tp4_verify_configs test_packed_any_admission_tp4 test_c2_packed_tp4_profiles test_c2_packed_tp4_seats8_profiles test_c2_serving_gate_seats8 test_request_width_warm test_gdn_tp4_card_test test_draft_tp4 test_draft_kv_slide_tp test_tp4_speed_window test_speed_window_compare
           python -B -m unittest test_tp4_attach_profile test_tp4_served_literals test_tp4_s2_window test_tp4_serving_shapes test_tp4_closure_literals test_solo_lane
           python -B -m unittest test_record_packed_any_evidence_tp4 test_tp4_s2_serve_window test_tp4_s2_serve_code test_tp4_tonight_window test_tp4_serve4_window test_tp4_serve5_window test_tp4_serve7_window test_tp4_seats8_window test_tp4_seats8_rwarm_window test_tp4_seats8_ship_window test_tp4_sampler_window test_packed_sampler_arms
@@ -168,6 +168,7 @@ jobs:
           python -B -m unittest test_drafter_arms
           python -B -m unittest test_drafter_config_vllm
           python -B -m unittest test_tp4_seats8_census test_seats8_whole_stack test_seats8_profiles_meet_attach test_tp4_next4 test_tp4_next5 test_tp4_next5_jobs test_tp4_quad_blocks test_tp4_dbf16 test_draft_projection_bf8 test_prompt_lookup test_tp4_lookup_window test_lookup_sim
+          python -B -m unittest test_lookup_reuse test_tree_verify test_tree_gain_report test_tp4_stream_1_jobs
           python -B -m unittest test_memory_ledger test_draft_projection_bf8
           python -B -m unittest test_serving_bundle
           python -B -m unittest test_serving_native_install
@@ -295,7 +296,7 @@ jobs:
           # NP9
           python -B -m unittest test_np9_answer32k test_np9_pack
           # NVME
-          python -B -m unittest test_qwen_nvme_store test_qwen_kv_nvme test_qwen_kv_compat test_qwen_p2p_restore test_qwen_p2p_tier test_tp4_p2p_restore_probe
+          python -B -m unittest test_qwen_nvme_store test_qwen_kv_nvme test_qwen_kv_compat test_c2_cache_drive test_nvme_gate test_nvme_profiles test_qwen_p2p_restore test_qwen_p2p_tier test_tp4_p2p_restore_probe
           # O3
           python -B -m unittest test_audit_sampling test_octo3_contract test_octo3_profiles test_octo3_judge test_octo3_pack test_octo3_ship test_block_warm_capture test_capture_trackers
           # P2P
@@ -303,12 +304,21 @@ jobs:
           python -B -m unittest discover -s optimisation/ttnn-op/kv_region_read -p 'test_*.py'
           # PF2
           python -B -m unittest test_prefill_handoff test_prefill_cost_model test_pf2_profiles test_pf2_pack
+          # PF3
+          python -B -m unittest test_prefill_tail_trace test_pf3_profiles test_pf3_report test_pf3_pack
+          # PF3K
+          python -B -m unittest test_sdpa_ksplit_tp test_pf3k_profiles
+          python -B -m unittest discover -s optimisation/ttnn-op/sdpa_prefill_ksplit -p 'test_*.py'
           # RB
           python -B -m unittest test_tap_window_aligned
           # S4
           python -B -m unittest test_ship4_profiles test_ship4_pack
           # S5
           python -B -m unittest test_s5_profiles test_s5_pack
+          # S6
+          python -B -m unittest test_s6_profiles test_s6_pack
+          # S7
+          python -B -m unittest test_s7_profiles test_s7_pack test_sched2_pipeline test_sched2_model test_sched2_profiles test_sched2_pack
           # SCH
           python -B -m unittest test_sched_lean test_sched_spill test_sched_sim test_sched_report test_sched_profiles test_sched_pack
           # SW
@@ -319,6 +329,8 @@ jobs:
           python -B -m unittest test_qwen_prefix_tier_slice test_tier_slice_tools
           # TW
           python -B -m unittest test_c2_toolcall_whitespace
+          # UP1
+          python -B -m unittest test_qwen_tier_upload test_upload1_gate
           # WP0
           python -B -m unittest test_fusion2_pack test_smoke_ladder_only
           # WP1

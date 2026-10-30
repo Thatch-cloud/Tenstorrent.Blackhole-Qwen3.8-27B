@@ -3,11 +3,11 @@
     python3 -B /c2/scripts/ci/tp4_p2p_restore_probe.py --fabric FABRIC_1D --output /probe-results/p2p-restore-p3a.json
 
 What it does, in this order, and what it refuses before it does anything:
-  0. THE DRIVE. Identity first, before a byte is written or a card opened: the drive named by --drive (P2P_DRIVE_BY_ID) must be the one with the model and serial the job config gives
-     (P2P_DRIVE_MODEL, P2P_DRIVE_SERIAL), proved through /dev/disk/by-id (a link of the right name that resolves to the node) and, independently, through the node's sysfs model and
-     serial. Then R1's two readings, printed: the controller state and the namespace size. Anything but `live` (and a non-empty namespace) is a refusal. A drive that carries the NVMe
-     tier's superblock is refused too (--allow-store-overwrite says it is a gate's drive to destroy). The values come from the job's environment, never from a tracked file, and are
-     never printed (the log of a public repository is public): the report carries a short hash of them.
+  0. THE DRIVE. Identity first, before a byte is written or a card opened: the node the runner handed the container (QWEN_PREFIX_NVME_DEVICE, from C2_NVME_DEVICE=status) must be the drive the boot
+     unit's status file names: the model and serial the KERNEL reports for the node, written the way udev writes them, must make exactly the file's by_id name. (With P2P_DRIVE_MODEL and
+     P2P_DRIVE_SERIAL given instead, a hand run: a /dev/disk/by-id link of that model and serial that resolves to the node and, independently, the kernel's model and serial.) Then R1's two
+     readings, printed: the controller state and the namespace size. Anything but `live` (and a non-empty namespace) is a refusal. A drive that carries the NVMe tier's superblock is refused too
+     (--allow-store-overwrite says it is a gate's drive to destroy). Nothing of the drive is printed (the log of a public repository is public): the report carries a short hash of model and serial.
   1. THE MESH AND THE OPS. The (1, 4) mesh as the kv-read probe opens it; the device-op extension's ops must exist (staging alloc and info, the checksum, the copy from staging) with the
      raw block ops of the host tier; the scratch KV caches are allocated as production allocates its own (bfloat8_b tiles, one head per chip). The device-op branch's own card check
      (optimisation/ttnn-op/kv_region_read/p2p_staging_card.py run(): the staging buffer's place and cost, the checksum against the numpy reference, the copy into scratch caches, the banks)
@@ -57,7 +57,8 @@ PACKED_HEAD_BLOCK_BYTES = 17408          # one head's 64 x 256 block packed as b
 STORE_MAGIC = b'QNVMSB01'                # the NVMe tier's superblock (qwen_nvme_store.SB_MAGIC), at byte 0 or 4096
 DEFAULT_BLOCKS = 96
 DEFAULT_SCRATCH_OFFSET = 1 << 30
-ENV_NAMES = ('P2P_DRIVE_BY_ID', 'P2P_DRIVE_MODEL', 'P2P_DRIVE_SERIAL', 'P2P_CARDS')
+ENV_NAMES = ('QWEN_PREFIX_NVME_DEVICE', 'QWEN_P2PMEM_DEVICES', 'P2P_DRIVE_BY_ID', 'P2P_DRIVE_MODEL', 'P2P_DRIVE_SERIAL', 'P2P_CARDS')
+STATUS_FILE = '/run/thatch-cache-drive/status.json'      # the host boot unit's file the runner mounts read-only (scripts/ci/c2_cache_drive.py)
 
 
 class Refusal(Exception):
@@ -72,7 +73,7 @@ def scrubber(options):
     (a path in an OSError, a card in a refusal) is how they would get there."""
     secrets = []
     for value in (options.drive, os.path.basename(options.drive or ''), options.drive_model, options.drive_serial,
-                  model_token(options.drive_model or ''), model_token(options.drive_serial or '')):
+                  model_token(options.drive_model or ''), model_token(options.drive_serial or '')) + tuple(getattr(options, 'learned', ())):
         if value and len(str(value)) >= 3:
             secrets.append(str(value))
     secrets.sort(key=len, reverse=True)
@@ -143,15 +144,18 @@ def sysfs_identity(device, sysfs='/sys'):
     return model, serial
 
 
-def identity_check(device, model, serial, by_id_dir='/dev/disk/by-id', sysfs='/sys'):
+def identity_check(device, model, serial, by_id_dir='/dev/disk/by-id', sysfs='/sys', status_file=STATUS_FILE):
     """Prove that `device` is the drive with this model and serial, or raise Refusal. Two independent looks, at least one positive and none contradicting:
       by-id  a link in /dev/disk/by-id whose name is nvme-<model>_<serial>[_<nsid>] and that resolves to the same node as `device`; a link of that name pointing elsewhere refuses;
       sysfs  the model and serial the kernel reports for the node's controller (found by device number).
-    A device given AS a by-id path that is a plain node (a container that was handed the node under that name) proves nothing by its name alone: only the sysfs look can then."""
-    if not model or not serial:
-        raise Refusal('the drive\'s model and serial are not configured (P2P_DRIVE_MODEL, P2P_DRIVE_SERIAL): not a byte is written to a drive that was not identified')
+    A device given AS a by-id path that is a plain node (a container that was handed the node under that name) proves nothing by its name alone: only the sysfs look can then.
+    No model and serial configured (the runner's keys, C2_NVME_DEVICE=status): identity_from_status."""
     if not device or not os.path.exists(device):
         raise Refusal('the drive node does not exist')
+    if not model and not serial:
+        return identity_from_status(device, status_file, sysfs)
+    if not model or not serial:
+        raise Refusal('the drive\'s model and serial are not both configured (P2P_DRIVE_MODEL, P2P_DRIVE_SERIAL): not a byte is written to a drive that was not identified')
     real = os.path.realpath(device)
     pattern = accepted_names(model, serial)
     positive, why = [], []
@@ -179,6 +183,29 @@ def identity_check(device, model, serial, by_id_dir='/dev/disk/by-id', sysfs='/s
     if not positive:
         raise Refusal('the drive cannot be shown to be the one configured: no /dev/disk/by-id link of its model and serial resolves to the node, and the kernel\'s identity for it is unreadable')
     return {'proof': sorted(set(positive)), 'fingerprint': hashlib.sha256(('%s|%s' % (model_token(model), model_token(serial))).encode()).hexdigest()[:6]}
+
+
+def identity_from_status(device, status_file, sysfs='/sys'):
+    """The runner's contract (scripts/ci/c2_cache_drive.py): the container is handed the drive as a plain node and the boot unit's status file, whose `by_id` names the drive; the host
+    has already resolved that link and checked the file's PCI address against the node. Here, independently: the model and serial the KERNEL reports for the node we were handed, written
+    the way udev writes them, must make exactly that by-id name (nvme-<model>_<serial>[_<nsid>]). The file is the host's statement of which drive the job is for, the kernel's own look
+    is what the node really is; both must agree or nothing is written. -> proof ['status+sysfs']; Refusal."""
+    try:
+        with open(status_file) as handle:
+            status = json.load(handle)
+        by_id = status.get('by_id') if isinstance(status, dict) else None
+    except (OSError, ValueError):
+        by_id = None
+    if not isinstance(by_id, str) or not by_id:
+        raise Refusal('the drive\'s identity cannot be shown: no model and serial are configured (P2P_DRIVE_MODEL, P2P_DRIVE_SERIAL) and the boot unit\'s status file '
+                      'is not readable here (C2_NVME_DEVICE=status gives it to the container)')
+    seen_model, seen_serial = sysfs_identity(device, sysfs)
+    if not seen_model or not seen_serial:
+        raise Refusal('the drive\'s identity cannot be shown: the kernel\'s model and serial for the node are unreadable')
+    if not accepted_names(seen_model, seen_serial).fullmatch(os.path.basename(by_id)):
+        raise Refusal('the drive is not the one the status file names: the kernel reports another model or serial for the node')
+    return {'proof': ['status+sysfs'], 'fingerprint': hashlib.sha256(('%s|%s' % (model_token(seen_model), model_token(seen_serial))).encode()).hexdigest()[:6],
+            'learned': [seen_model, seen_serial, model_token(seen_model), model_token(seen_serial), os.path.basename(by_id)]}
 
 
 def r1_readings(device, sysfs='/sys'):
@@ -209,7 +236,8 @@ def r1_readings(device, sysfs='/sys'):
 
 def check_drive(options, log):
     """Steps 0: identity, then R1's readings, then the tier's superblock. -> the report's drive section; Refusal."""
-    identity = identity_check(options.drive, options.drive_model, options.drive_serial, options.by_id_dir, options.sysfs)
+    identity = identity_check(options.drive, options.drive_model, options.drive_serial, options.by_id_dir, options.sysfs, options.status_file)
+    options.learned = tuple(identity.get('learned', ()))      # (so that nothing the kernel told us reaches a log)
     readings = r1_readings(options.drive, options.sysfs)
     log_line(log, 'drive identity=verified proof=%s fingerprint=%s', '+'.join(identity['proof']), identity['fingerprint'])
     log_line(log, 'R1 controller_state=%s namespace_bytes=%d', readings['state'], readings['namespace_bytes'])
@@ -651,10 +679,13 @@ def build_parser():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument('--fabric', choices=('FABRIC_1D', 'FABRIC_1D_RING'), default='FABRIC_1D')
     parser.add_argument('--output', required=True)
-    parser.add_argument('--drive', default=os.environ.get('P2P_DRIVE_BY_ID'), help='the drive: its /dev/disk/by-id path (default: P2P_DRIVE_BY_ID)')
-    parser.add_argument('--drive-model', default=os.environ.get('P2P_DRIVE_MODEL'), help='the drive\'s model (default: P2P_DRIVE_MODEL; job config, never a tracked file)')
+    parser.add_argument('--drive', default=os.environ.get('QWEN_PREFIX_NVME_DEVICE') or os.environ.get('P2P_DRIVE_BY_ID'),
+                        help='the drive: the node the runner maps into the container (default: QWEN_PREFIX_NVME_DEVICE, set by C2_NVME_DEVICE), or a by-id path (P2P_DRIVE_BY_ID)')
+    parser.add_argument('--drive-model', default=os.environ.get('P2P_DRIVE_MODEL'), help='the drive\'s model (default: P2P_DRIVE_MODEL; job config, never a tracked file); with the serial it replaces the status file')
     parser.add_argument('--drive-serial', default=os.environ.get('P2P_DRIVE_SERIAL'), help='the drive\'s serial (default: P2P_DRIVE_SERIAL)')
-    parser.add_argument('--cards', default=os.environ.get('P2P_CARDS', ''), help='comma-separated PCI addresses of the cards whose p2pmem is published (default: P2P_CARDS); the mesh must run on exactly these')
+    parser.add_argument('--status-file', default=STATUS_FILE, help='the boot unit\'s status file (read-only in the container): without a configured model and serial the kernel\'s own model and serial for the node must make its by_id')
+    parser.add_argument('--cards', default=os.environ.get('QWEN_P2PMEM_DEVICES') or os.environ.get('P2P_CARDS', ''),
+                        help='comma-separated PCI addresses of the cards whose p2pmem is published (default: QWEN_P2PMEM_DEVICES, set by C2_P2PMEM; P2P_CARDS); the mesh must run on exactly these')
     parser.add_argument('--blocks', type=int, default=DEFAULT_BLOCKS, help='KV blocks of the known object (default %d, about 214 MB)' % DEFAULT_BLOCKS)
     parser.add_argument('--caches', type=int, default=32, help='scratch cache tensors (default 32 = the production count; a multiple of 4 so a shard is whole pages)')
     parser.add_argument('--heads-per-chip', type=int, default=1)

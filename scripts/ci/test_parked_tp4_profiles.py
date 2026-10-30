@@ -94,6 +94,37 @@ class PolicyMatrixTests(unittest.TestCase):
                 self.assertIn(name, self.problems(**{name: value})[0])
         self.assertEqual(self.problems(QWEN_FAST_LANE='0', QWEN_FAST_LOOKUP_DRAFT='0', QWEN_GDN_GATE_EXP_ABBA='0'), [])
 
+    def test_a_prompt_lookup_policy_runs_beside_engine_reuse_and_only_a_malformed_one_is_refused(self):
+        # tp4/stream-1: a rebound request attaches the lookup like a built one, so a well-formed policy is no longer refused at the boot
+        for value in ('n3m12', 'N2M2', ' n6m64 ', 'off', '0', ''):
+            with self.subTest(value=value):
+                self.assertEqual(self.problems(QWEN_FAST_LOOKUP_DRAFT=value), [])
+        for value in ('rolling', 'on', '1', 'n1m8', 'n3m2', 'n3m65', 'n3'):
+            with self.subTest(value=value):
+                found = self.problems(QWEN_FAST_LOOKUP_DRAFT=value)
+                self.assertEqual(len(found), 1, found)
+                self.assertIn('QWEN_FAST_LOOKUP_DRAFT', found[0])
+
+    def test_the_boots_lookup_grammar_is_prompt_lookups(self):
+        # serving_fast_policy is also the TT plugin's own copy and cannot import prompt_lookup at the config check, so it repeats the grammar:
+        # every candidate string below is judged the same by both.
+        import itertools
+        import prompt_lookup
+
+        pieces = ('n', 'N', 'm', 'M', '0', '1', '2', '3', '6', '7', '12', '64', '65', ' ', 'x', '-', '\u00b2', '\u0663')
+        candidates = {'n3m12', 'N2M2', ' n6m64 ', 'n2m1', 'n7m8', 'n3m65', 'n3m', 'nm3', 'm3n3', '', 'off', '0', 'rolling', 'n 3m8', 'n-3m8', 'n3m-1'}
+        for count in (1, 2, 3, 4, 5):
+            candidates.update(''.join(parts) for parts in itertools.product(('n', 'm', '3', '12'), repeat=count))
+        candidates.update('n%dm%d' % (n, m) for n in range(0, 9) for m in range(0, 70))
+        candidates.update('n%s%s%s' % (a, 'm', b) for a in pieces for b in pieces)
+        for text in sorted(candidates):
+            try:
+                accepted = prompt_lookup.parse_policy(text) is not None or text.strip().lower() in prompt_lookup.OFF_VALUES
+                accepted = accepted and text.strip().lower() not in prompt_lookup.OFF_VALUES
+            except ValueError:
+                accepted = False
+            self.assertEqual(policy.lookup_policy_wellformed(text), accepted, repr(text))
+
     def test_the_flag_is_strictly_zero_or_one(self):
         for value in ('2', 'true', 'yes', '', ' 1'):
             with self.subTest(value=value):
@@ -280,12 +311,23 @@ class ProfileTests(unittest.TestCase):
         import make_s5_profiles
 
         generated |= set(make_s5_profiles.twin_names())      # (tp4/next-1's audited twins of the ship-5 candidate, test_s5_profiles)
+        import make_s6_profiles
+        import make_s7_profiles
+
+        generated |= set(make_s6_profiles.twin_names() + make_s7_profiles.twin_names())      # (tp4/s6's audited twin of the ship-6 candidate, test_s6_profiles)
+        import make_nvme_profiles
+
+        generated |= set(make_nvme_profiles.twin_names())      # (tp4/kv-nvme-2's NVMe-tier twins of the ship-7 candidate, test_nvme_profiles)
         import make_pf2_profiles
+        import make_pf3_profiles
+        import make_pf3k_profiles
 
         generated |= set(make_pf2_profiles.twin_names())      # (tp4/prefill-2's twins of the approved ship-4 profile, test_pf2_profiles)
+        generated |= set(make_pf3_profiles.twin_names()) | set(make_pf3k_profiles.twin_names())      # (tp4/prefill-3's twins of the ship-5 candidate, test_pf3k_profiles)
         import make_sched_profiles
+        import make_sched2_profiles
 
-        generated |= set(make_sched_profiles.twin_names())      # (tp4/sched-1's, test_sched_profiles)
+        generated |= set(make_sched_profiles.twin_names()) | set(make_sched2_profiles.twin_names())      # (tp4/sched-1's, test_sched_profiles)
         for name, profile in profiles.items():
             env = profile['env']
             named = [flag for flag in env if flag.startswith('QWEN_FAST_PARKED_') or flag in ('QWEN_FAST_GATE_DRAM_BALLAST', 'QWEN_FAST_LEVERN_BUILD_MS')]

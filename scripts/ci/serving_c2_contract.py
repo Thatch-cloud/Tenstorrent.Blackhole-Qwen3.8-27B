@@ -123,6 +123,10 @@ PREFIX_QUOTA_NAMES = PREFIX_QUOTA_TOKENS + PREFIX_QUOTA_GIB
 PREFIX_SLICE_BLOCKS = 'QWEN_PREFIX_TIER_RESTORE_SLICE'
 PREFIX_SLICE_MS = 'QWEN_PREFIX_TIER_RESTORE_SLICE_MS'
 PREFIX_SLICE_NAMES = (PREFIX_SLICE_BLOCKS, PREFIX_SLICE_MS)
+# The upload levers of the tier's host side (qwen_tier_upload.NAMES, pinned equal by test_qwen_tier_upload; docs/tp4-upload1.md): threaded staging copies of the raw block IO and
+# parallel digest checks. Like the sliced restore: default off and byte-identical off, strict, only beside the tier (they change how long the same bytes take to move, never which),
+# and a traffic profile may name them only when its owner traffic waiver names the tier.
+PREFIX_UPLOAD_NAMES = ('QWEN_PREFIX_TIER_IO_THREADS', 'QWEN_PREFIX_TIER_IO_CHUNK_BLOCKS', 'QWEN_PREFIX_TIER_VERIFY_THREADS')
 # The NVMe cold tier below the host tier (qwen_kv_nvme.NAMES and GATE_ONLY, pinned equal by test_qwen_kv_nvme; docs/tp4-kv-nvme.md): a raw-namespace spill of the host tier's evictions and of
 # the checkpoint store's, restored on a miss in both. Default off and byte-identical off, strict, only beside the host tier. It keeps prompt-derived data on a drive for up to its TTL (owner
 # decisions 2026-10-21: all tenants, 1 day), so a TRAFFIC profile may name it only under an owner traffic waiver that names QWEN_PREFIX_NVME=1 (NVME_WAIVABLE_LEVERS), and the names that
@@ -548,7 +552,7 @@ def apply_environment(profile, environ=None):
             environ.pop(name, None)
     # ...and the preconverted checkpoints and the host KV tier (default off, gate only until a qualification record lifts it): an inherited
     # switch must not turn either on under a profile that never named it.
-    for name in PREFIX_TIER_ENV_NAMES + PREFIX_QUOTA_NAMES + PREFIX_SLICE_NAMES + PREFIX_NVME_NAMES:
+    for name in PREFIX_TIER_ENV_NAMES + PREFIX_QUOTA_NAMES + PREFIX_SLICE_NAMES + PREFIX_UPLOAD_NAMES + PREFIX_NVME_NAMES:
         if name not in profile['env']:
             environ.pop(name, None)
     # ...and the engine-start upload levers: an inherited switch must not move the KV pool's or the weights' load path under a profile that never asked.
@@ -647,6 +651,15 @@ def prefix_policy_problems(profile):
             problems.append('%s is set and %s is not: the time budget would be inert' % (PREFIX_SLICE_MS, PREFIX_SLICE_BLOCKS))
     if slice_blocks and not numbers.get(PREFIX_TIER_GIB):
         problems.append('%s names a sliced restore but %s is not set: the restore would be inert' % (PREFIX_SLICE_BLOCKS, PREFIX_TIER_GIB))
+    # The upload levers (qwen_tier_upload.upload_plan refuses all of these at boot): strict values, a call size only beside the IO threads, and the host tier beside them.
+    upload_on = []
+    if any(name in env for name in PREFIX_UPLOAD_NAMES):
+        import qwen_tier_upload
+
+        problems += qwen_tier_upload.flag_problems(env)
+        upload_on = [name for name in PREFIX_UPLOAD_NAMES if env.get(name) not in (None, '', '0')]
+        if upload_on and not numbers.get(PREFIX_TIER_GIB):
+            problems.append('%s name the upload levers of the host tier but %s is not set: there would be nothing to move' % (', '.join(upload_on), PREFIX_TIER_GIB))
     # The NVMe cold tier (qwen_kv_nvme.parse refuses all of these at boot): strict values, its own acknowledgement, and the host tier it sits under.
     nvme_on = False
     if any(name in env for name in PREFIX_NVME_NAMES):
@@ -704,6 +717,8 @@ def prefix_policy_problems(profile):
             unqualified.append(PREFIX_TIER_OFF_PATH)
         if slice_blocks and not waived(profile, PREFIX_TIER_GIB, env):
             problems.append('%s: the sliced restore is the host tier\'s, so a traffic profile may name it only when its %s names the tier (%s)' % (PREFIX_SLICE_BLOCKS, TRAFFIC_WAIVER, PREFIX_TIER_GIB))
+        if upload_on and not waived(profile, PREFIX_TIER_GIB, env):
+            problems.append('%s: the upload levers are the host tier\'s, so a traffic profile may name them only when its %s names the tier (%s)' % (', '.join(upload_on), TRAFFIC_WAIVER, PREFIX_TIER_GIB))
         if nvme_on and not waived(profile, PREFIX_NVME_SWITCH, env):
             problems.append('%s=1: the NVMe tier keeps prompt-derived KV on a drive for up to its TTL (owner decisions 2026-10-21: all tenants, 1 day), so a traffic profile may name it '
                             'only when its %s names it (%s)' % (PREFIX_NVME_SWITCH, TRAFFIC_WAIVER, PREFIX_NVME_SWITCH))
@@ -722,7 +737,7 @@ def prefix_policy_problems(profile):
             problems.append('%s: no qualification record exists for the host KV tier or the preconverted checkpoints, so only a gate-only profile may name them '
                             'active, or a traffic profile whose %s names QWEN_PREFIX_HOST_TIER_GIB and QWEN_PREFIX_CKPT_PRECONVERTED at their values (the audits and '
                             'the kill-switch path are a gate\'s own)' % (', '.join(sorted(unqualified)), TRAFFIC_WAIVER))
-    named = [name for name in sorted(list(PREFIX_POLICY_FLAGS) + [PREFIX_GHOST_FLAG, PREFIX_TIER_OFF_PATH] + list(PREFIX_TIER_NUMBERS) + list(PREFIX_QUOTA_NAMES) + list(PREFIX_SLICE_NAMES) + list(PREFIX_NVME_NAMES))
+    named = [name for name in sorted(list(PREFIX_POLICY_FLAGS) + [PREFIX_GHOST_FLAG, PREFIX_TIER_OFF_PATH] + list(PREFIX_TIER_NUMBERS) + list(PREFIX_QUOTA_NAMES) + list(PREFIX_SLICE_NAMES) + list(PREFIX_UPLOAD_NAMES) + list(PREFIX_NVME_NAMES))
              if name in env]
     if named and not prefix_reuse(profile):
         problems.append('%s set without %s=1: the registry does not exist, so the policy would be inert'
@@ -813,6 +828,41 @@ def sched_problems(profile):
         problems.append('%s must be 0 or 1, got %r' % (LEAN_SWITCH, value))
     elif value == '1' and not gate_profile(profile) and not waived(profile, LEAN_SWITCH, env):
         problems.append('%s=1 is a gate arm (it skips admission checks that no card run has shown unnecessary) and needs a gate-only profile, or a traffic profile whose %s names it' % (LEAN_SWITCH, TRAFFIC_WAIVER))
+    return problems
+
+
+# tp4/sched-2 (docs/tp4-sched2.md; admission_pipeline.py): admission pipelining and the memory-ledger trim. Three switches and the hold's three knobs, all gate arms until the owner decides: a
+# traffic profile carries none of them, whatever its waiver names. Strict, and the same arithmetic as admission_pipeline.problems() (the profile reads its own env here, the process reads
+# its own there; test_sched2_pipeline pins the two to the same verdicts).
+SCHED2_SWITCHES = ('QWEN_FAST_ADMISSION_SEED_FIRST', 'QWEN_FAST_ADMISSION_HOLD_REUSE', 'QWEN_FAST_ADMISSION_LEDGER_TRIM')
+SCHED2_HOLD_KNOBS = {'QWEN_FAST_ADMISSION_HOLD_REUSE_MAX_AGE_MS': (100, 60000), 'QWEN_FAST_ADMISSION_HOLD_REUSE_MAX_REUSES': (1, 16),
+                     'QWEN_FAST_ADMISSION_HOLD_REUSE_DRIFT_MB': (16, 1024)}
+
+
+def sched2_problems(profile):
+    """Every way the profile sets the tp4/sched-2 switches wrongly, [] when none: a value that is not 0 or 1, a knob outside its range or without the hold's switch, a switch without what it rides
+    on (the hold needs the extent replay, seed first engine reuse, the lean admission and Lever N), or any of them in a profile that serves traffic."""
+    env = {key: str(value) for key, value in (profile.get('env') or {}).items()}
+    problems = []
+    for name in SCHED2_SWITCHES:
+        value = env.get(name)
+        if value is not None and value not in ('0', '1'):
+            problems.append('%s must be 0 or 1, got %r' % (name, value))
+        elif value == '1' and not gate_profile(profile) and not (name in SCHED2_WAIVABLE_LEVERS and waived(profile, name, env)):
+            problems.append('%s=1 is a gate arm (docs/tp4-sched2.md: it changes when work happens at an admission, and no card has run it) and needs a gate-only profile%s'
+                            % (name, ', or a traffic profile whose %s names it' % TRAFFIC_WAIVER if name in SCHED2_WAIVABLE_LEVERS else ''))
+    for name, (low, high) in sorted(SCHED2_HOLD_KNOBS.items()):
+        value = env.get(name)
+        if value is None:
+            continue
+        if not value.isascii() or not value.isdigit() or not low <= int(value) <= high:
+            problems.append('%s must be a whole number from %d to %d in plain digits, got %r' % (name, low, high, value))
+        if env.get('QWEN_FAST_ADMISSION_HOLD_REUSE') != '1':
+            problems.append('%s is set without QWEN_FAST_ADMISSION_HOLD_REUSE=1: it would be ignored' % name)
+    if env.get('QWEN_FAST_ADMISSION_HOLD_REUSE') == '1' and env.get('QWEN_FAST_EXTENT_REPLAY') != '1':
+        problems.append('QWEN_FAST_ADMISSION_HOLD_REUSE=1 needs QWEN_FAST_EXTENT_REPLAY=1: the DRAM hold it reuses is registered only there')
+    if env.get('QWEN_FAST_ADMISSION_SEED_FIRST') == '1':
+        problems += ['QWEN_FAST_ADMISSION_SEED_FIRST=1 needs %s=1' % name for name in ('QWEN_FAST_PARKED_ENGINES', 'QWEN_FAST_ADMISSION_LEAN', 'QWEN_FAST_LEVER_N') if env.get(name) != '1']
     return problems
 
 
@@ -914,9 +964,21 @@ TIER_WAIVABLE_ALSO = {'QWEN_PREFIX_HOST_TIER_GIB': ('48',)}
 NVME_WAIVABLE_LEVERS = {'QWEN_PREFIX_NVME': '1'}
 # tp4/sched-1 (docs/tp4-sched-1.md), the two of its levers that return device time to the decoders and trade none away: the lean admission (QWEN_FAST_ADMISSION_LEAN=1: three admission
 # costs off a returning turn's rebind) and the complete spills of the host tier (QWEN_PREFIX_HOST_TIER_SPILL_MODE=complete, only beside the tier, whose default knobs the candidate keeps). The governor knobs
-# (QWEN_FAST_LEVERN_ADAPTIVE*, _OWED_CAP_MS, _SHORT_SHARE, _SHORT_WAIT_S) trade decoder speed for first-token time and stay a gate's own.
+# (QWEN_FAST_LEVERN_ADAPTIVE*, _OWED_CAP_MS, _SHORT_SHARE, _SHORT_WAIT_S) trade decoder speed for first-token time and stay a gate's own, EXCEPT the one switch the ship-6 candidate carries
+# (tp4/s6, docs/tp4-next2.md): QWEN_FAST_LEVERN_ADAPTIVE=1 at its default knobs (the three sub-knobs _DECODERS, _SHARE and _TTFT_S, and the sched-1 pacing knobs, stay a gate's own), only under an owner
+# traffic waiver that names it, as for the levers above.
 NEXT_WAIVABLE_LEVERS = {'QWEN_FAST_SOLO_PACKED': '1', 'QWEN_PREFIX_STICKY_UNDROP': '1', 'QWEN_PREFIX_WINDOW_CARRY': '1',
-                        'QWEN_FAST_ADMISSION_LEAN': '1', 'QWEN_PREFIX_HOST_TIER_SPILL_MODE': 'complete'}
+                        'QWEN_FAST_ADMISSION_LEAN': '1', 'QWEN_PREFIX_HOST_TIER_SPILL_MODE': 'complete', 'QWEN_FAST_LEVERN_ADAPTIVE': '1'}
+# tp4/prefill-3 (docs/tp4-prefill3-ksplit.md): the K-split attention of the tail passes. Its output differs from the oneq call's in the last bits (a different association of the softmax: a
+# tolerance-class numerics change), so a traffic profile carries it only under the owner's traffic waiver that names it; its audit (judged by a statistic against a bound, not bitwise) is a gate's own.
+KSPLIT_SWITCH = 'QWEN_FAST_SDPA_PF_KSPLIT'
+KSPLIT_AUDIT = KSPLIT_SWITCH + '_AUDIT'
+KSPLIT_WAIVABLE_LEVERS = {KSPLIT_SWITCH: '1'}
+NEXT_WAIVABLE_LEVERS.update(KSPLIT_WAIVABLE_LEVERS)
+# tp4/s7 (docs/tp4-s7.md): two of the three tp4/sched-2 switches may serve traffic under an owner traffic waiver that names each at this value (the ship-7 candidate): seed first (the seed token leaves before
+# the bind) and the memory-ledger trim. The hold reuse (QWEN_FAST_ADMISSION_HOLD_REUSE) and its knobs stay a gate's own until a ballast-boundary run has been read.
+SCHED2_WAIVABLE_LEVERS = {'QWEN_FAST_ADMISSION_SEED_FIRST': '1', 'QWEN_FAST_ADMISSION_LEDGER_TRIM': '1'}
+NEXT_WAIVABLE_LEVERS.update(SCHED2_WAIVABLE_LEVERS)
 TRAFFIC_WAIVER_MARKER = 'OWNER TRAFFIC WAIVER'
 # The decision is a sentence that starts with one of these words. PENDING is a REQUEST: the profile boots (gates and G1 provenance boot every
 # profile) and logs the word, but no build may bake it as an image default (c2_serving_job.read_bake, build-c2-serving-image.sh) until the commit
@@ -1128,6 +1190,8 @@ def levern_problems(profile):
         # The traffic arm (stage 1 of the short-window plan): the master switch alone, with its sibling flags and the merged route, may serve traffic
         # (the kill switch levern.off stops it with no restart); the gate instruments never may (they are the gates' own, and a fault is a negative control).
         for name in (LEVERN_AUDIT, 'QWEN_FAST_LEVERN_FAULT', 'QWEN_FAST_LEVERN_KV_READ', 'QWEN_FAST_LEVERN_KV_CROSS_STEPS') + LEVERN_ADAPTIVE_FLAGS:
+            if name in NEXT_WAIVABLE_LEVERS and waived(profile, name, env):
+                continue                                # the adaptive governor's switch, named by the owner traffic waiver at its value (NEXT_WAIVABLE_LEVERS)
             if str(env.get(name, '0')) not in ('0', ''):
                 problems.append('Lever N: %s is a gate instrument and needs a gate-only profile (a traffic profile carries the master switch and the '
                                 'policy flags only)' % name)
@@ -1226,6 +1290,29 @@ def exact_resume_problems(profile):
         problems.append('%s=1 without %s=1' % (EXACT_RESUME_NAMES[1], EXACT_RESUME_NAMES[0]))
     if EXACT_RESUME_NAMES[2] in on and EXACT_RESUME_NAMES[1] not in on:
         problems.append('%s=1 without %s=1' % (EXACT_RESUME_NAMES[2], EXACT_RESUME_NAMES[1]))
+    return problems
+
+
+def ksplit_problems(profile):
+    """[problem] when a profile names the K-split switches wrongly (nothing is checked for a profile that names none): a value that is not '0'/'1', the audit without the switch, the switch
+    without the oneq call it splits (QWEN_FAST_SDPA_PF_ONEQ=1), the audit on a traffic profile (a gate's instrument), and - the numerics waiver - the switch on a TRAFFIC
+    profile whose owner traffic waiver does not name it (a gate-only profile boots it)."""
+    env = {key: str(value) for key, value in (profile.get('env') or {}).items()}
+    named = [name for name in (KSPLIT_SWITCH, KSPLIT_AUDIT) if name in env]
+    if not named:
+        return []
+    problems = ['%s=%r: only 0 or 1' % (name, env[name]) for name in named if env[name] not in ('0', '1')]
+    on, audit = env.get(KSPLIT_SWITCH) == '1', env.get(KSPLIT_AUDIT) == '1'
+    if audit and not on:
+        problems.append('%s=1 without %s=1' % (KSPLIT_AUDIT, KSPLIT_SWITCH))
+    if on and env.get('QWEN_FAST_SDPA_PF_ONEQ') != '1':
+        problems.append('%s=1 splits the oneq call\'s K stream: it needs QWEN_FAST_SDPA_PF_ONEQ=1 (and so the chain, QWEN_FAST_SDPA_PF=1, which the image environment sets)' % KSPLIT_SWITCH)
+    if profile.get('gate_only') is not True:
+        if audit:
+            problems.append('%s=1 is a gate instrument (it doubles the split calls): %s is not gate_only' % (KSPLIT_AUDIT, profile.get('name')))
+        if on and not waived(profile, KSPLIT_SWITCH, env):
+            problems.append('%s=1 is a numerics change (the softmax is merged from partial results: the output differs from the oneq call in the last bits) with no pinned qualification record: '
+                            'gate-only, or the owner\'s %s names it (the numerics waiver is absent): %s is not gate_only' % (KSPLIT_SWITCH, TRAFFIC_WAIVER, profile.get('name')))
     return problems
 
 
@@ -1961,6 +2048,9 @@ def boot(environ=None, orig_argv=None):
     problems = sched_problems(profile)
     if problems:
         raise ValueError('profile %s misuses the tp4/sched-1 switches: %s' % (profile['name'], '; '.join(problems)))
+    problems = sched2_problems(profile)
+    if problems:
+        raise ValueError('profile %s misuses the tp4/sched-2 switches: %s' % (profile['name'], '; '.join(problems)))
     problems = octo_problems(profile, environ)
     if problems:
         raise ValueError('profile %s cannot serve octo-T8: %s' % (profile['name'], '; '.join(problems)))
@@ -1973,6 +2063,9 @@ def boot(environ=None, orig_argv=None):
     problems = exact_resume_problems(profile)
     if problems:
         raise ValueError('profile %s misuses the exact-resume switches: %s' % (profile['name'], '; '.join(problems)))
+    problems = ksplit_problems(profile)
+    if problems:
+        raise ValueError('profile %s misuses the K-split switches: %s' % (profile['name'], '; '.join(problems)))
     problems = drafter_problems(profile)
     if problems:
         raise ValueError('profile %s cannot serve its drafter checkpoint: %s' % (profile['name'], '; '.join(problems)))

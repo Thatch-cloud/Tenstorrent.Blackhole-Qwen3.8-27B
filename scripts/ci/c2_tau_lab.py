@@ -91,6 +91,7 @@ PRODUCTION_TAG = 'tp4-serve-2'
 # when both agree: tp4-serve-2 ran the T1/T2 audits ON, tp4-serve-10 runs them OFF). A later ship adds its tag here.
 PRODUCTION_IMAGES = (('tp4-serve-2', True), ('tp4-serve-10', False))
 LOOKUP_FLAG = 'QWEN_FAST_LOOKUP_DRAFT'
+LOOKUP_SHADOW_FLAG = 'QWEN_FAST_LOOKUP_SHADOW'   # prompt_lookup.SHADOW_FLAG: one SHADOW line per round (logs only; the text and the rows verified are unchanged)
 LOOKUP_POLICY = 'n3m12'            # prompt_lookup's policy string: key length 3, gate 12 (docs/tp4-lookup.md)
 # DRAFTER ARMS (tp4/drafter-arms): which drafter the container serves. The image carries the drafter's fixtures (its tag selects
 # the manifest, drafter_manifest.py) and the derived profile carries only drafter-only flags, which move the proposals and never
@@ -104,7 +105,9 @@ DRAFTER_ARMS = {
     # token history replacing its proposal rows on the rounds the policy picks. The target verifies every row, so the text is the control's
     # and only the accepted length moves. No log line at startup shows it: the lookup logs one engaged line per request, so the CANARY
     # (lookup_problem) is where the arm is held to its markers, not launched_problems.
-    'lookup': dict(manifest='dedf8df6', env=((LOOKUP_FLAG, LOOKUP_POLICY),)),
+    # The arm also carries the SHADOW logging (tp4/stream-1, docs/tp4-tree-verify.md): the container log then holds both candidates of every round, and the run's end
+    # reads it into aggregates (tree_gain_report.py, written beside the public summary as tree-gain-summary.json): what a two-candidate verify would have committed.
+    'lookup': dict(manifest='dedf8df6', env=((LOOKUP_FLAG, LOOKUP_POLICY), (LOOKUP_SHADOW_FLAG, '1'))),
 }
 DRAFTER_BF16_ENGAGED = '[DRAFTER_BF16] engaged'
 LOOKUP_ENGAGED = '[LOOKUP-DRAFT] engaged'      # prompt_lookup.ENGAGED (a literal here: the lab imports nothing of the serving tree)
@@ -509,6 +512,18 @@ def plan_counts(data, arms):
     return dict((arm, len(data.get(arm) or [])) for arm in arms)
 
 
+def effective_max_tokens(arms, manifest, override=None):
+    """{arm: the max_tokens the lab sends for it}, by the rule of Lab.arm_max_tokens: the --max-tokens option, else the data manifest's entry for the arm, else the arm's design default.
+    run.json records THIS (key max_tokens), not the option: the option is None unless asked, and a None in both runs of a pair made drafter_pair_report's `matched` gate fail for every
+    candidate (it holds the two runs to the same max_tokens and a None is nothing to hold them to). A record that carries its own max_tokens (A3's) keeps it; this is the arm's value."""
+    entries = (manifest or {}).get('arms') or {}
+    found = {}
+    for arm in arms:
+        entry = entries.get(arm) if isinstance(entries.get(arm), dict) else {}
+        found[arm] = int(override or entry.get('max_tokens') or ARM_SPEC[arm]['max_tokens'])
+    return found
+
+
 # -- the profile and the container -----------------------------------------------------------------------------------
 
 def derive_profile(profiles, base, arm=None):
@@ -526,10 +541,6 @@ def derive_profile(profiles, base, arm=None):
     if profile.get('gate_only') is True:
         raise LabError('profile %s is gate-only: the lab serves the production profile' % base)
     env = profile.setdefault('env', {})
-    if arm == 'lookup' and str(env.get('QWEN_FAST_PARKED_ENGINES', '0')) == '1':
-        # A rebound engine attaches no prompt lookup (serving_fast_policy.parked_engine_problems refuses the pair at boot): measure the lookup on
-        # a profile that builds its engines per request.
-        raise LabError('profile %s runs engine reuse (QWEN_FAST_PARKED_ENGINES=1), which does not run beside the lookup arm' % base)
     for name, value in LOG_FLAGS:
         if str(env.get(name, value)) != value:
             raise LabError('profile %s sets %s to %s, not %s' % (base, name, env[name], value))
@@ -1299,8 +1310,36 @@ def analyze(options, say, run_info=None):
     if options.counters:
         with open(options.counters, encoding='utf-8') as handle:
             counters = json.load(handle)
-    return report.build_and_write(options.results, options.public, manifest=manifest, counters=counters,
-                                  seed=options.seed, say=say, info=info)
+    summary = report.build_and_write(options.results, options.public, manifest=manifest, counters=counters,
+                                     seed=options.seed, say=say, info=info)
+    tree_gain(options, say)
+    return summary
+
+
+def tree_gain(options, say):
+    """The lookup arm's SHADOW lines (the private server.log) -> tree_gain_report's AGGREGATES: printed as [TREEGAIN] lines and written beside the public
+    summary as tree-gain-summary.json. None for any other arm, a log without the lines or a log that cannot be read; the SHADOW lines carry token ids and never leave
+    the results directory."""
+    if getattr(options, 'drafter_arm', None) != 'lookup':
+        return None
+    path = os.path.join(options.results, 'server.log')
+    try:
+        with open(path, encoding='utf-8', errors='replace') as handle:
+            text = handle.read()
+    except OSError:
+        return None
+    if '[LOOKUP-SHADOW]' not in text:
+        return None
+    import tree_gain_report
+    summary = tree_gain_report.from_text(text)
+    found = tree_gain_report.problems(summary)
+    for line in tree_gain_report.summary_lines(summary):
+        say(line)
+    for problem in found:
+        say('[TREEGAIN] PROBLEM: %s' % problem)
+    if options.public:
+        report.write_json(os.path.join(options.public, 'tree-gain-summary.json'), dict(summary, problems=found))
+    return summary
 
 
 def main(argv=None, say=print, make_stream=None, make_client=None, make_container=None, make_log=None, docker=None,
@@ -1409,7 +1448,8 @@ def main(argv=None, say=print, make_stream=None, make_client=None, make_containe
     info = dict(image_tag=image_tag(options.image), production=production, audits_on=audits, profile=options.profile,
                 drafter_arm=options.drafter_arm, drafter_bf16=dict(DRAFTER_ARMS.get(options.drafter_arm, {}).get('env', ())).get(
                     'QWEN_FAST_DRAFTER_BF16') == '1',
-                derived=derived, seed=options.seed, max_tokens=options.max_tokens, arms=arms, arithmetic_extra=extra, scrub=scrub, data_counts=plan_counts(data, arms),
+                derived=derived, seed=options.seed, max_tokens=effective_max_tokens(arms, manifest, options.max_tokens), max_tokens_asked=options.max_tokens, arms=arms,
+                arithmetic_extra=extra, scrub=scrub, data_counts=plan_counts(data, arms),
                 calibration_corpus=calibration, started=started, counts={})
     status = 1
     lab = None

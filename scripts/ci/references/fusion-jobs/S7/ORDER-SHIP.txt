@@ -1,0 +1,10 @@
+# The order of the tp4/s7 SHIP FLOW (docs/tp4-s7.md; scripts/ci/make_s7_jobs.py): SR replays the platform's serving sequence on the image B0 built, AFTER the window's gates have been read and the owner's conditions are met. The owner traffic waiver of c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-traffic-s7 (id ship7-fx-262k-2026-10-21) is already APPROVED conditionally in the profile (B0 would have been refused otherwise); SR boots the profile BY THE IMAGE DEFAULT (c2_platform_replay). RUN IT FROM A COMMIT WHERE THIS FILE IS ORDER.txt (git mv ORDER-SHIP.txt ORDER.txt).
+# One template per line: <template name without .env> <stop|soft|opt> <image tag> <estimated minutes>. stop: the window halts at the first failure of this job. soft: a failure or a skip does not stop the window (the NEEDS lines skip what depended on it). opt: optional, admitted only if it fits.
+# P0. PRODUCTION: the owner stops the node agent and unserves production BEFORE SR and restores it after, with the cutover pack's own steps. The card jobs of the window are over.
+# P0. The CPU suite is green on the commit that records the approval, and the tag is pushed on THAT commit. Push ONE tag at a time and wait for its run to finish; never cancel a running card job.
+# THE JOB: PLATFORM REPLAY: SR (25 min).
+# DEPENDENCIES (machine-greppable): none: SR needs the image B0 built and the gates read.
+# READ RULES:
+#   SR   'PLATFORM_REPLAY passed=True'; the lever reads of the template's header (the upload, admission pipeline, governor, WC and lookup lines).
+# Time (estimate, minutes): SR 25: 25 minutes (0 h 25 min) in all, 25 minutes of cards.
+SR-platform-replay soft tp4-s7-1 25

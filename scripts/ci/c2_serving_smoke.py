@@ -771,7 +771,7 @@ SHAPE_SEATS = {'np1_live1': 1, 'np1_live2': 2, 'np1_live4': 4, 'concurrent8_skew
                'cold2_254k': COLD2_DECODERS + COLD2_ARRIVALS, 'levern_equal_busy': 7 + 1, 'levern_decoder_finishes': 7 + 1,
                'prefill_ladder_solo': 1, 'prefill_ladder_busy': LADDER_DECODERS + 1, 'prefill_few_decoders': 3,
                'long_answer_solo_4k': 1, 'long_answer_solo_200k': 1, 'long_answer8_4k': 8, 'long_answer8_96k': 8, 'long_answer_prefix': 1,
-               'agent_turns': 6, 'agent_turns_long': 6}
+               'agent_turns': 6, 'agent_turns_long': 6, 'agent_turns8': 8}
 
 
 def cold2_254k():
@@ -1474,7 +1474,7 @@ def server_max_model_len():
 
 
 def agent_turns_test(name):
-    # Opt-in (tp4/agent-turns): agent_turns (6 sessions x 12 returning turns, about 13 minutes) and agent_turns_long (6 x 30, about 24). Six concurrent
+    # Opt-in (tp4/agent-turns): agent_turns (6 sessions x 12 returning turns, about 13 minutes), agent_turns_long (6 x 30, about 24) and agent_turns8 (tp4/s6: 8 x 12, every seat busy, about 15, no new turn after 25). Six concurrent
     # coding-agent sessions, each opening on a real-code context of its own length (64k / 128k / 200k tokens, seed-rotated and jittered, fitted to the server's
     # token count) and then, turn after turn, appending ONE deterministic tool-result + instruction message (150-400 tokens) after the assistant's previous
     # answer verbatim, generating 200-600 tokens and waiting a 1-8 s tool gap. A returning turn appends a few hundred tokens and re-prefills a few thousand
@@ -1510,7 +1510,7 @@ def agent_turns_test(name):
     return entry
 
 
-for _agent_name in ('agent_turns', 'agent_turns_long'):
+for _agent_name in ('agent_turns', 'agent_turns_long', 'agent_turns8'):
     if ONLY and _agent_name in ONLY:
         record(_agent_name, lambda _name=_agent_name: agent_turns_test(_name))
 

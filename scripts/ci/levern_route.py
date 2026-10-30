@@ -103,6 +103,8 @@ PREFIX_ENV = 'QWEN_PREFIX_REUSE'
 STICKY_ENV = 'QWEN_FAST_STICKY_SESSIONS'
 # PF2-H (prefill_handoff.py, docs/tp4-prefill-2.md): the final step hands the GDN state to the decode slot on the device. Read by name here so that, with both unset, the module is never imported.
 HANDOFF_FLAGS = ('QWEN_FAST_PREFILL_HANDOFF', 'QWEN_FAST_PREFILL_HANDOFF_AUDIT')
+# PF3-T (prefill_tail_trace.py, docs/tp4-prefill3.md): the masked tail pass of a prompt is a trace replay. Read by name here so that, with all four unset, the module is never imported.
+TAILTRACE_FLAGS = ('QWEN_FAST_PREFILL_TAIL_TRACE', 'QWEN_FAST_PREFILL_TAIL_TRACE_AUDIT', 'QWEN_FAST_PREFILL_TAIL_TRACE_BUCKETS', 'QWEN_FAST_PREFILL_TAIL_TRACE_ARENA_MB')
 # The warm's merged prompt: [0, 2048) capturing at 2048, [2048, 4096), a CHECKPOINT restore of the 2048 state and [2048, 4096) again, the final
 # step [4096, 6208), and under host parking a park and an unpark around that final step.
 MERGED_WARM_STEPS = 4
@@ -482,6 +484,8 @@ class Handle(object):
         self.environ = None
         # PF2-H: the prefill_handoff.Handoff install() built (None: the flag is not set, the route is byte-for-byte the one without it).
         self.handoff = None
+        # PF3-T: the prefill_tail_trace.TailTrace install() built (None: no flag is set, the model is the model without it).
+        self.tailtrace = None
         self.fault_fired = False
         self.owner_refusals = 0
         self.parks = {}
@@ -499,6 +503,9 @@ class Handle(object):
             vars(self.model).pop(name, None)
         self.parks.clear()
         self.rows.clear()
+        if self.tailtrace is not None:
+            self.tailtrace.uninstall()
+            self.tailtrace = None
         levern_policy.reset_state()
 
 
@@ -575,10 +582,20 @@ def install(runner, model, *, environ=None, log=_log):
         if not route_on:
             raise ValueError('%s is a lever of the Lever N route: it needs %s=1' % (' / '.join(HANDOFF_FLAGS), levern_policy.FLAG))
         handoff = prefill_handoff.Handoff.from_environ(environ)
+    tailtrace = None
+    if any(name in environ for name in TAILTRACE_FLAGS):
+        import prefill_tail_trace
+
+        if not route_on:
+            raise ValueError('%s is a lever of the Lever N route: it needs %s=1' % (' / '.join(TAILTRACE_FLAGS), levern_policy.FLAG))
+        tailtrace = prefill_tail_trace.TailTrace.from_environ(environ)          # (the flags are parsed here; the model is touched last, below)
     handle = Handle(wrapper, model, original, route_on, audit_on, merged=merged,
                     merged_cfg=levern_policy.merged_config(environ) if merged else None)
     handle.handoff = handoff
+    handle.tailtrace = tailtrace
     fault = levern_policy.fault(environ) if route_on else None
+    if tailtrace is not None:
+        tailtrace.install(model, log)               # last of everything that can refuse: a refusal above leaves the model as it was
 
     def prefill_forward(*args, **kwargs):
         step = _take(model)
@@ -623,7 +640,8 @@ def install(runner, model, *, environ=None, log=_log):
     levern_policy.reset_state()
     _publish(model)
     log(levern_policy.ROUTE_INSTALLED_LINE, 'route=%d audit=%d' % (route_on, audit_on) + (' merged=%s' % ','.join(SOURCES) if merged else '')
-        + ('' if handoff is None else ' handoff=%s%s' % ('device' if handoff.device else 'host', ' audit' if handoff.audit else '')))
+        + ('' if handoff is None else ' handoff=%s%s' % ('device' if handoff.device else 'host', ' audit' if handoff.audit else ''))
+        + ('' if tailtrace is None else ' tailtrace=%s%s' % ('traced' if tailtrace.settings.traced else 'timed', ' audit' if tailtrace.settings.audit else '')))
     return handle
 
 
@@ -1087,6 +1105,9 @@ def warm(runner, model, *, environ=None, width=None, slot=0, log=_log):
         finally:
             release(model, WARM_REQUEST)
             vars(model).pop(WROTE_ATTR, None)
+    if handle is not None and handle.tailtrace is not None:
+        # PF3-T: every buffer, program and trace of the traced tails exists before the packed traces, like the route's own (the capture runs under the bound scratch, inside its arena).
+        handle.tailtrace.warm(model, width, log)
     try:
         _ttnn().synchronize_device(model.mesh_device)
     except Exception:

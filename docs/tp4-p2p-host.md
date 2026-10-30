@@ -211,12 +211,15 @@ imports it only when the flag is on.
 `scripts/ci/references/tp4-p2p-jobs/P3a-p2p-restore.env`; `C2_IMAGE_TAG` names an image with the device-op extension). The probe runs from the checkout the step mounts at `/c2`: an image, not a build of this
 commit. Order, and what it refuses before it does anything:
 
-0. **The drive, first.** Identity by model and serial through `/dev/disk/by-id` (a link `nvme-<model>_<serial>[_n]` that resolves to the node; a link of that name pointing elsewhere refuses) and,
-   independently, the kernel's own model and serial for the node; the values come from the job's environment (`P2P_DRIVE_BY_ID`, `P2P_DRIVE_MODEL`, `P2P_DRIVE_SERIAL`, `P2P_CARDS`), which the step reads from
-   **a private file on the runner** (`P2P_ENV_FILE`, owned by the runner user, not group- or world-writable, a strict `KEY=VALUE` parser, never sourced). The step checks the by-id name against the model and serial
-   before `docker run`; the probe checks again inside. Then **R1's readings, printed**: `P3A R1 controller_state=live namespace_bytes=N`. **Anything but `live` (or an empty namespace) refuses, nothing written.**
-   A drive carrying the NVMe tier's superblock refuses unless `--allow-store-overwrite`. The model, serial and PCI addresses are never printed (the Actions log of a public repository is public): the report has an
-   6-hex fingerprint of model and serial. Exception messages (a path in an `OSError`, a card in a refusal) are scrubbed of the drive's path and by-id name, its model, serial and every PCI address before they reach the report or the log.
+0. **The drive, first.** The runner keys do the host side (`scripts/ci/c2_cache_drive.py`, `docs/tp4-kv-nvme.md` section 12 (1)): `C2_NVME_DEVICE=status` resolves the drive from the by-id link of the boot
+   unit's status file **now**, prints `R1 cache drive: controller state=... namespace_bytes=...` and refuses unless `live` and above 0, checks the file's PCI address against the node, and hands the container the node as
+   `/dev/c2-cache-drive` plus the file read-only; `C2_P2PMEM=auto` binds each published card's `p2pmem/allocate` and sets `QWEN_P2PMEM_DEVICES`. This probe writes, so the step asks for more: both keys, the drive named
+   through the status file (a literal by-id string is refused here: the probe could not show in the container which drive it was), the node not a mounted filesystem, swap, an array member or held by another block
+   device, every card's pool whole (`available == size`). Then inside, before any byte: **identity by model and serial**, the kernel's own model and serial for the node, written the way udev writes them, must make exactly
+   the status file's `by_id` name (`nvme-<model>_<serial>[_n]`), or the probe refuses; with `P2P_DRIVE_MODEL` and `P2P_DRIVE_SERIAL` given (a hand run) it checks the by-id link and the kernel against those instead. Then
+   **R1's readings, printed**: `P3A R1 controller_state=live namespace_bytes=N`. **Anything but `live` (or an empty namespace) refuses, nothing written.** A drive carrying the NVMe tier's superblock refuses unless
+   `--allow-store-overwrite`. The model, serial and PCI addresses are never printed (the Actions log of a public repository is public): the report has a 6-hex fingerprint of model and serial. Exception messages
+   (a path in an `OSError`, a card in a refusal) are scrubbed of the drive's path and by-id name, its model, serial (also what the kernel reported) and every PCI address before they reach the report or the log.
 1. The (1, 4) mesh as the kv-read probe opens it; the ops must exist (refusal otherwise); **the device-op branch's own card check (`p2p_staging_card.run()`) runs on the mesh before anything else, and a failure of it is
    the verdict with nothing written** (`--skip-device-ops-check` leaves it out); scratch KV caches allocated as production allocates its own.
 2. N blocks (default 96, ~214 MB) of random bytes in the host tier's layout, laid out chip-major, with their per-chip checksums, **written `O_DIRECT` at `--scratch-offset` (default 1 GiB) only after step 3**.

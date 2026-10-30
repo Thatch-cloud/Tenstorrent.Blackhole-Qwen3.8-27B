@@ -1,5 +1,7 @@
 # tp4/next-1: the ship-5 candidate
 
+Successor: `docs/tp4-next2.md` (the ship-6 candidate, `tp4/s6`: this profile plus W3 WC and the adaptive Lever N governor).
+
 Status: **SHIPPED 2026-10-19.** The owner approved the ship-5 waiver conditional on the window gates; every gate passed on the rebuilt image (section 7) and `c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-traffic-s5` serves Swift-1.5 in production. The first window build is NOT a ship candidate (section 7.1).
 
 ## 1. What is in it

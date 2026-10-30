@@ -7,7 +7,7 @@ the checkpoint to the end of the old prompt is prefilled again), pays an engine 
 On the 2026-10 ship-4 stack the card's wall time in production was ~58% prefill steps, ~36% decode rounds, ~6% other, with 14-22 tok/s a user at
 four to seven live users. This test reproduces that shape deterministically so a card window can read the same numbers.
 
-THE SHAPE (c2_serving_smoke.py: agent_turns, agent_turns_long). `sessions` concurrent sessions (default 6, under the eight seats), each:
+THE SHAPE (c2_serving_smoke.py: agent_turns, agent_turns_long, agent_turns8). `sessions` concurrent sessions (default 6, under the eight seats; agent_turns8 has EIGHT, see VARIANT_SETTINGS), each:
   turn 0   a coding-text context of its own length (the mix cycles 64k / 128k / 200k tokens, rotated and jittered by the seed; fitted to the
            server's own token count where /tokenize answers; real code from the corpus the long-context smokes read) plus a code task, the
            opening request: the cold prefill that builds the session;
@@ -56,9 +56,18 @@ import time
 
 NAME = 'agent_turns'
 LONG_NAME = 'agent_turns_long'
-TESTS = (NAME, LONG_NAME)
-# name -> (sessions, turns): the two named shapes. Environment parameters (settings) override either.
-VARIANTS = {NAME: (6, 12), LONG_NAME: (6, 30)}
+EIGHT_NAME = 'agent_turns8'
+TESTS = (NAME, LONG_NAME, EIGHT_NAME)
+# name -> (sessions, turns): the named shapes. Environment parameters (settings) override any. agent_turns and agent_turns_long are unchanged (the baseline of past results).
+VARIANTS = {NAME: (6, 12), LONG_NAME: (6, 30), EIGHT_NAME: (8, 12)}
+# agent_turns8 (tp4/s6): EIGHT sessions, every seat of the profile busy, weighted like production traffic instead of like agent_turns: production prompts average about 59k tokens (p50 69k, p90 208k)
+# and its answers about 690 tokens, where agent_turns' mix (64k, 128k, 200k) averages 131k and its answers 400. Eight distinct contexts (the mix has eight values and the seed only rotates it, so
+# each appears once; about 545k tokens in all against the 1,055,488-token pool, where eight sessions of the agent_turns mix would be 1.06M and evict each other), answers capped at 300 to 1,080
+# tokens (mean 690), and a 1,500 s budget (no new turn after 25 minutes) so that it fits a 30-minute box. Environment parameters still override each. Compare it with itself (the ship-5 control run
+# on the same name), never with agent_turns.
+EIGHT_MIX = (24000, 32000, 40000, 48000, 56000, 64000, 80000, 200000)
+EIGHT_ANSWER_RANGE = (300, 1080)
+VARIANT_SETTINGS = {EIGHT_NAME: dict(mix=EIGHT_MIX, answer_range=EIGHT_ANSWER_RANGE, budget_s=1500.0)}
 SEED = 20261012
 MIX = (64000, 128000, 200000)            # the context lengths the sessions cycle through (tokens); production prompts: p50 69k, p90 208k
 GAP_RANGE_S = (1.0, 8.0)                 # the tool gap after a turn
@@ -141,7 +150,8 @@ def settings(name, environ=None):
             raise ValueError('SMOKE_AGENT_%s=%r is outside %s..%s' % (key, raw, low, high))
         return value
 
-    mix = tuple(parse_tokens(part) for part in str(environ.get('SMOKE_AGENT_MIX') or '').split(',') if part.strip()) or MIX
+    variant = VARIANT_SETTINGS.get(name, {})
+    mix = tuple(parse_tokens(part) for part in str(environ.get('SMOKE_AGENT_MIX') or '').split(',') if part.strip()) or variant.get('mix', MIX)
     if any(value < 256 or value > 1048576 for value in mix):
         raise ValueError('SMOKE_AGENT_MIX holds a context outside 256..1048576 tokens: %r' % (mix,))
     salt = str(environ.get('SMOKE_AGENT_SALT') or 'auto').strip().lower()
@@ -152,8 +162,8 @@ def settings(name, environ=None):
         raise ValueError('SMOKE_AGENT_NONCE is 4..16 of [0-9a-z], got %r' % nonce)
     return dict(name=name, sessions=read('SESSIONS', int, sessions, 1, MAX_SESSIONS), turns=read('TURNS', int, turns, 1, MAX_TURNS),
                 seed=read('SEED', int, SEED), mix=mix, gap_scale=read('GAP_SCALE', float, 1.0, 0.0, 100.0),
-                gap_range=GAP_RANGE_S, answer_range=ANSWER_RANGE, message_range=MESSAGE_RANGE,
-                budget_s=read('BUDGET_S', float, BUDGET_S, 60.0, 14400.0), timeout_s=read('TIMEOUT_S', float, TIMEOUT_S, 10.0, 7200.0),
+                gap_range=GAP_RANGE_S, answer_range=variant.get('answer_range', ANSWER_RANGE), message_range=MESSAGE_RANGE,
+                budget_s=read('BUDGET_S', float, variant.get('budget_s', BUDGET_S), 60.0, 14400.0), timeout_s=read('TIMEOUT_S', float, TIMEOUT_S, 10.0, 7200.0),
                 stagger_s=read('STAGGER_S', float, STAGGER_S, 0.0, 600.0), ignore_eos=bool(read('IGNORE_EOS', int, 0, 0, 1)),
                 salt_mode=salt, max_context=read('MAX_CONTEXT', int, DEFAULT_MAX_CONTEXT, 4096, 4194304), nonce=nonce)
 

@@ -1208,6 +1208,10 @@ class ProfileTests(unittest.TestCase):
         combined.update({name: {SELECT, READ, KEYED, LEAN} | ({AUDIT} if name.endswith('-audit') else set()) for name in twins_np1.twin_names()})
         import make_s5_profiles as twins_s5      # tp4/next-1: the ship-5 candidate's audited twins (the ship-4 audited twin plus levers); the candidate itself is in fusion.ship_names()
 
+        import make_s6_profiles as twins_s6      # tp4/s6: the ship-6 candidate's audited twin (the ship-5 audited twin plus the governor); the candidate itself is in fusion.ship_names()
+        import make_s7_profiles as twins_s7      # tp4/s6: the ship-6 candidate's audited twin (the ship-5 audited twin plus the governor); the candidate itself is in fusion.ship_names()
+
+        combined.update({name: {SELECT, READ, KEYED, LEAN, AUDIT} for name in twins_s6.twin_names() + twins_s7.twin_names()})
         combined.update({name: {SELECT, READ, KEYED, LEAN, AUDIT} for name in twins_s5.twin_names()})            # (both are audited twins: -s5-audit and its -nowc fallback)
         # tp4/exact-resume (ER, placed from fusion-wp/ER.json): the combined arm / its audited twin plus the exact-resume switches, so the four levers (and the audit flag on the audited twin)
         combined.update({fusion.NAMESPACE + 'all-er': {SELECT, READ, KEYED, LEAN}, fusion.NAMESPACE + 'all-er-audit': {SELECT, READ, KEYED, LEAN, AUDIT}})
@@ -1218,9 +1222,22 @@ class ProfileTests(unittest.TestCase):
         import make_pf2_profiles as twins_pf2
 
         combined.update({name: {SELECT, READ, KEYED, LEAN} | ({AUDIT} if name.endswith('-audit') else set()) for name in twins_pf2.twin_names()})
+        # tp4/prefill-3: the traced-tail twins and the K-split twins are the ship-5 candidate / its audited twin plus flags (test_pf3_profiles, test_pf3k_profiles)
+        import make_pf3_profiles as twins_pf3
+
+        combined.update({name: {SELECT, READ, KEYED, LEAN} | ({AUDIT} if 'audit' in name else set()) for name in twins_pf3.twin_names()})
+        import make_pf3k_profiles as twins_pf3k
+
+        combined.update({name: {SELECT, READ, KEYED, LEAN} | ({AUDIT} if name.endswith('-audit') else set()) for name in twins_pf3k.twin_names()})
         import make_sched_profiles as twins_sched      # tp4/sched-1: the ship candidate / its audited twin plus one flag, so the same round-host flags (test_sched_profiles)
 
         combined.update({name: {SELECT, READ, KEYED, LEAN} | ({AUDIT} if name.endswith('-audit') else set()) for name in twins_sched.twin_names()})
+        import make_sched2_profiles as twins_sched2      # tp4/sched-2: the ship-5 candidate / its audited twin plus the admission switches, so the same round-host flags (test_sched2_profiles)
+
+        combined.update({name: {SELECT, READ, KEYED, LEAN} | ({AUDIT} if name.endswith('-audit') else set()) for name in twins_sched2.twin_names()})
+        import make_nvme_profiles as twins_nvme      # tp4/kv-nvme-2: the ship-7 candidate (the timed twin) / its audited twin (the audited and the first-gate twins) plus the NVMe tier (test_nvme_profiles)
+
+        combined.update({name: {SELECT, READ, KEYED, LEAN} | ({AUDIT} if name != twins_nvme.TIMED else set()) for name in twins_nvme.twin_names()})
         for name, profile in data['profiles'].items():
             if name in self.ADDED:
                 continue

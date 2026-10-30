@@ -54,6 +54,34 @@ copy of 15) and about 36 microseconds with the six committed tokens appended to 
 `test_prompt_lookup` runs the same requests with the flag unset, `off` and `0` and requires identical events, outputs, epochs and no lookup
 log line.
 
+## Beside engine reuse (tp4/stream-1)
+
+Production (ship 5) rebinds a parked engine to every request instead of building one (`QWEN_FAST_PARKED_ENGINES=1`, docs/tp4-engine-reuse.md), and the lookup used to attach only on the build path:
+`serving_fast_policy.parked_engine_problems` refused the pair at the boot and the tau lab refused a base with engine reuse. The lookup is host state on the `FastRequest` (the index, the policy, the log) and
+touches no device, so a parked engine needs nothing from it, and `serving_request_factory.attach_lookup` now runs after `rebind_parked` exactly as it runs after a cold build (one helper, two call sites).
+
+* Flag off (unset, `''`, `0`, `off`): the helper returns before importing anything; a rebound request is the request it was (`test_lookup_reuse` runs a rebound request under all four spellings and holds the tokens,
+  epochs and log lines equal to a run that never heard of the flag).
+* A malformed policy raises `ValueError` after the rebind (the first request meets it, as on the build path); the request is then closed, which parks the slot again, and the next request on that slot serves
+  (held by a test). The boot catches the same mistake earlier: `parked_engine_problems` still refuses a policy `prompt_lookup.parse_policy` would refuse (its grammar is repeated inline because that file is also
+  the TT plugin's own copy, `qwen_fast_policy.py`, which cannot import the experiment scripts; a test holds the two grammars equal over a few thousand strings).
+* The engaged line gains `build_ms=` (the index build runs on the engine step thread right after the rebind, so every decoding seat waits for it: about 0.07 s at the 32,768-token cap, estimate from the
+  laptop figure above; on a rebind that otherwise costs 0.2 to 0.4 s). The tau lab's `lookup` arm derives on the s5 traffic profile (`test_drafter_arms`, `test_tp4_stream_1_jobs`).
+* What is NOT held on a card: the lookup beside the octo block (a seat's 8-row ticket is its draft cut to 7 proposals; `apply` takes the width the ticket has, and `test_lookup_reuse` runs it on the census
+  world's 4-row tickets: three proposals, the lookup's rows cut to them), beside the lone-user round (NP1: the same 16-row ticket) and beside exact resume (the index is built from the full prompt,
+  tail-capped, so a carried turn is the same).
+
+## The shadow: what a two-candidate verify would have committed (QWEN_FAST_LOOKUP_SHADOW)
+
+`QWEN_FAST_LOOKUP_SHADOW=1` (default off, needs the lookup; anything but unset, `''`, `0`, `1` is a `ValueError`) adds one `[LOOKUP-SHADOW]` line after each `[LOOKUP-ROUND]` line: DFlash2's proposal rows,
+the lookup's raw rows, the match length, the source the policy chose and the tokens the round committed. The committed tokens of consecutive rounds are the target's greedy continuation, so for any
+chain a round could have verified the accepted length is known exactly (the longest common prefix with that continuation), and `scripts/ci/tree_gain_report.py` replays both candidates at every logged
+round: what DFlash2 alone, the lookup alone and the better of the two (a two-candidate verify, docs/tp4-tree-verify.md) would have committed, as a per-round mean ("recorded", an upper bound: it counts a long
+commit without removing the rounds it skips) and as a token-conserving walk over the logged starts ("walk", a lower bound: it lands between logged starts on a stale chain). The reading is checked against
+the run: the rounds the run took from DFlash2 must replay to the commits logged (`dflash_replay_mismatches=0`) and the walk of the run's own policy must be the run. The lines carry token ids of the user's
+text and stay in the private container log; the report prints and writes aggregates only. The tau lab's `lookup` arm sets the flag and, at the end of the run, writes `tree-gain-summary.json` beside its public
+summary (`c2_tau_lab.tree_gain`). The paired report (`drafter_pair_report.py`) also reads the decode rate of the paired turns (`speed`: completion tokens per decode second, control against lookup).
+
 ## Log lines and the smoke rule
 
 * `[LOOKUP-DRAFT] engaged policy=n3m12 request=<id> history=<tokens>` once per request.
@@ -97,5 +125,5 @@ Re-run with prompts (private inputs, stdlib only, any python 3.7+):
 ## What this does not settle
 
 The hybrid's gain is about +3% tau at a cost of well under a millisecond, which is worth having but is nowhere near the 8 x 75 bar, which needs a
-drafter that misses half as often. The two-candidate verify (the drafter's block plus a lookup branch, +8% in the same simulation) needs kernel work and is
-not part of this branch.
+drafter that misses half as often. The two-candidate verify (the drafter's block plus a lookup branch, +8% in the same simulation, ESTIMATE on short prompts) is scoped in
+docs/tp4-tree-verify.md; the simulation's figures are estimates until the shadow readout above has run on the production stack.
