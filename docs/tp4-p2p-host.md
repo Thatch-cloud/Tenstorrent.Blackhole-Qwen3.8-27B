@@ -140,7 +140,7 @@ comparison that failed and the retry passed.
 
 `QWEN_PREFIX_NVME_P2P=1` (with the tier's usual names; **gate-only** in `serving_c2_contract`: a traffic profile cannot carry it even under the owner waiver; promoting it is a contract change). Knobs, refused as
 inert unless the switch is on: `QWEN_PREFIX_NVME_P2P_THREADS` (reads in flight over all cards, default 8, 1-64), `QWEN_PREFIX_NVME_P2P_STAGING_MIB` (per card, default 64 = two halves of 32, 2-4096; the card's DRAM cost is 8 times it),
-`QWEN_PREFIX_NVME_P2PMEM` (the PCI addresses of the cards whose p2pmem is published; optional: when given the mesh must run on exactly these cards), `QWEN_PREFIX_NVME_P2P_ALLOW_UNVERIFIED_MAP` (gate-only, see section 2).
+`QWEN_PREFIX_NVME_P2PMEM` (the PCI addresses of the cards whose p2pmem is published; optional, and defaulting to the runner's `QWEN_P2PMEM_DEVICES`: when given the mesh must run on exactly these cards), `QWEN_PREFIX_NVME_P2P_ALLOW_UNVERIFIED_MAP` (gate-only, see section 2).
 `QWEN_PREFIX_NVME_RESTORE=p2p` is refused with a pointer to the flag. `QWEN_PREFIX_NVME_VERIFY` governs the host path's sha256 only: **the P2P path checks every shard on the card whatever it says** (the log line still prints it).
 Every successful restore, P2P or fallback, refreshes the blocks' TTL and LRU clock (`touch_kv`) as the host path does. All four cards need the slice published; fewer is `UNAVAILABLE` (the copy op writes every chip).
 
@@ -240,14 +240,17 @@ The node agent launches the serving container. For the P2P restore it must, in a
 stop grace; `docs/tp4-kv-nvme.md` section 9):
 
 1. **Devices.** `/dev/tenstorrent/*` for all four cards (already) and the cache drive's block node read-write (the tier writes it too).
-2. **sysfs, writable where it must be.** The container's `/sys` is read-only. For **each card with a published slice**, the directory `/sys/bus/pci/devices/<bdf>/p2pmem` must be bind-mounted **read-write**
-   (the engine opens `allocate` `O_RDWR` and maps it shared). `/sys/class/tenstorrent` (the `p2pmem` attributes are root-readable) and `/sys/bus/pci/devices/<bdf>/resource` must stay readable. The agent finds
-   `<bdf>` at launch from the same table the engine uses (`/sys/class/tenstorrent/tenstorrent!N/device`); the nodes renumber on every reset.
+2. **sysfs, writable where it must be.** The container's `/sys` is read-only. For **each card with a published slice**, `/sys/bus/pci/devices/<bdf>/p2pmem/allocate` must be writable (the engine opens it
+   `O_RDWR` and maps it shared). The runner already does this (`scripts/ci/c2_cache_drive.py`, `docs/tp4-kv-nvme.md` section 12 (1)): a bind mount of that one file per card plus `--security-opt apparmor=unconfined`
+   (Docker's default AppArmor profile denies writes under `/sys`); `size` and `available` stay readable through the read-only `/sys`, and so do `/sys/class/tenstorrent` and
+   `/sys/bus/pci/devices/<bdf>/resource`. The node agent must do the same for the serving container, and find `<bdf>` at launch from the table the engine uses
+   (`/sys/class/tenstorrent/tenstorrent!N/device`); the nodes renumber on every reset. A profile of its own that allows `/sys/devices/**/p2pmem/allocate rw` would be narrower than `apparmor=unconfined`.
 3. **Capabilities.** The ioctls need only the open fd, and `O_DIRECT` and the mapping need root in the container; but **`CAP_SYS_ADMIN` is required**: `/proc/self/pagemap` shows physical addresses only with it,
-   and the engine refuses to start (`UNAVAILABLE`) unless it can confirm where the p2pmem mapping sits (`nvme_p2p_map_verified` = 1). A gate that cannot grant it may set the gate-only
-   `QWEN_PREFIX_NVME_P2P_ALLOW_UNVERIFIED_MAP=1`; production should not.
-4. **Environment.** `QWEN_PREFIX_NVME_P2P=1` (a gate profile today), optionally `QWEN_PREFIX_NVME_P2PMEM=<bdf>,<bdf>,...` (the runner's `C2_P2PMEM`) and the staging and thread knobs; plus the tier's existing
-   names (`C2_NVME_DEVICE` -> `QWEN_PREFIX_NVME_DEVICE`).
+   and the engine refuses to start (`UNAVAILABLE`) unless it can confirm where the p2pmem mapping sits (`nvme_p2p_map_verified` = 1). **This is the one place this branch asks for more than the runner contract
+   (`docs/tp4-kv-nvme.md` section 12 (1): "no added capability")**: the P3a step adds `--cap-add SYS_ADMIN` for the probe only; a serving container without it falls back to the host backend. A gate that cannot grant it may
+   set the gate-only `QWEN_PREFIX_NVME_P2P_ALLOW_UNVERIFIED_MAP=1`; production should not. A proof that needs no capability is an open item (a canary that shows the mapping is the BAR and not host RAM).
+4. **Environment.** `QWEN_PREFIX_NVME_P2P=1` (a gate profile today), the cards from `QWEN_P2PMEM_DEVICES=<bdf>,<bdf>,...` (what the runner sets for `C2_P2PMEM`; `QWEN_PREFIX_NVME_P2PMEM` names them explicitly and wins;
+   read only when the restore is on; when given the mesh must run on exactly these cards) and the staging and thread knobs; plus the tier's existing names (`C2_NVME_DEVICE` -> `QWEN_PREFIX_NVME_DEVICE`).
 5. **The kernel module.** The patched tt-kmd (`p2pmem_devices` naming **all four cards**; today two are published and a reboot returns the stock module) installed through DKMS or a boot unit, with
    `p2pmem_size_mb` (default one 4 GiB window; 64 MiB of host RAM per card). A node without it serves from the host backend.
 6. **Reset ordering.** While an engine holds a card, `p2pmem/available` is 0 and a destructive `RESET_DEVICE` returns EBUSY: the agent's reset (and the ZR job) must stop the serving container first and treat EBUSY
@@ -261,8 +264,8 @@ stop grace; `docs/tp4-kv-nvme.md` section 9):
 ## 10. What is untested until cards
 
 Everything in the data path past the CPU tests: that a process in the serving container can take TLB window 202 while the UMD holds the card; the `ALLOCATE_TLB` / `CONFIGURE_TLB` / `EXPORT_TLB_DMABUF` call
-sequence on a live card as `TtLink` makes it (the structs are the probe's, pinned equal in a test); the canary at the allocator's staging address; the bind mount of a sysfs `p2pmem` directory read-write
-over a read-only `/sys`; the pagemap check inside a container; the O_DIRECT reads of 557,056-byte shards into p2pmem at 4 x 8 threads (P1 measured 16 MiB chunks; the per-read size here is smaller and the
+sequence on a live card as `TtLink` makes it (the structs are the probe's, pinned equal in a test); the canary at the allocator's staging address; the bind mount of the one `p2pmem/allocate` file read-write
+over a read-only `/sys` (with `apparmor=unconfined`); the pagemap check inside a container; the O_DIRECT reads of 557,056-byte shards into p2pmem at 4 x 8 threads (P1 measured 16 MiB chunks; the per-read size here is smaller and the
 drive's rate at it is unmeasured); whether a posted write ever trails the drive's completion (the retry exists for it); the device ops themselves and their `row_stride` / `count` forms; the copy's cost beside a
 decode round; the disturbance of a 254k restore on eight live seats (G-C3); a reset with the engine stopped, and the EBUSY paths; the DRAM bank contention of a single-bank staging buffer; the `chipmajor-v1`
 conversion cost on the spill thread and the host fallback's cost under load; the stock-module reboot (the path must come up `UNAVAILABLE`, not crash).
