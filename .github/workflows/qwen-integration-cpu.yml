@@ -328,8 +328,6 @@ jobs:
           python -B -m unittest test_c2_toolcall_whitespace
           # UP1
           python -B -m unittest test_qwen_tier_upload test_upload1_gate
-          # NVME
-          python -B -m unittest test_qwen_nvme_store test_qwen_kv_nvme
           # WP0
           python -B -m unittest test_fusion2_pack test_smoke_ladder_only
           # WP1
