@@ -150,10 +150,11 @@ class ProfileTests(unittest.TestCase):
         self.assertIn('UNVERIFIED on hardware', arm['description'])
 
     def test_the_flag_is_off_everywhere_else_and_the_policy_parses(self):
+        import make_nvme_profiles
         import make_s7_profiles
 
         for name, profile in PROFILES.items():
-            self.assertEqual(FLAG in profile['env'], name in (ARM, SMOKE_ARM, 'c2-packed-tp4-8x262k-best-time-gate-lookup') + make_s7_profiles.owned_names(), name)      # (tp4/s7: the ship-7 candidate carries the lookup under its waiver, its audited twins beside it)
+            self.assertEqual(FLAG in profile['env'], name in (ARM, SMOKE_ARM, 'c2-packed-tp4-8x262k-best-time-gate-lookup') + make_s7_profiles.owned_names() + make_nvme_profiles.twin_names(), name)      # (tp4/s7: the ship-7 candidate carries the lookup under its waiver, its audited twins beside it; tp4/kv-nvme-2's NVMe-tier twins of it too)
         self.assertEqual(repr(prompt_lookup.parse_policy(PROFILES[ARM]['env'][FLAG])), POLICY)
 
     def test_the_default_stays_production(self):

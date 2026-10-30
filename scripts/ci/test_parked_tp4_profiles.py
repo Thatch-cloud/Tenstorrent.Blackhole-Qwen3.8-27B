@@ -315,6 +315,9 @@ class ProfileTests(unittest.TestCase):
         import make_s7_profiles
 
         generated |= set(make_s6_profiles.twin_names() + make_s7_profiles.twin_names())      # (tp4/s6's audited twin of the ship-6 candidate, test_s6_profiles)
+        import make_nvme_profiles
+
+        generated |= set(make_nvme_profiles.twin_names())      # (tp4/kv-nvme-2's NVMe-tier twins of the ship-7 candidate, test_nvme_profiles)
         import make_pf2_profiles
         import make_pf3_profiles
         import make_pf3k_profiles

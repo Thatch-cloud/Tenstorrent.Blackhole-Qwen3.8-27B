@@ -1235,6 +1235,9 @@ class ProfileTests(unittest.TestCase):
         import make_sched2_profiles as twins_sched2      # tp4/sched-2: the ship-5 candidate / its audited twin plus the admission switches, so the same round-host flags (test_sched2_profiles)
 
         combined.update({name: {SELECT, READ, KEYED, LEAN} | ({AUDIT} if name.endswith('-audit') else set()) for name in twins_sched2.twin_names()})
+        import make_nvme_profiles as twins_nvme      # tp4/kv-nvme-2: the ship-7 candidate (the timed twin) / its audited twin (the audited and the first-gate twins) plus the NVMe tier (test_nvme_profiles)
+
+        combined.update({name: {SELECT, READ, KEYED, LEAN} | ({AUDIT} if name != twins_nvme.TIMED else set()) for name in twins_nvme.twin_names()})
         for name, profile in data['profiles'].items():
             if name in self.ADDED:
                 continue
