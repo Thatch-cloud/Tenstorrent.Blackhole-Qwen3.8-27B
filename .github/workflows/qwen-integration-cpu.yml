@@ -296,6 +296,9 @@ jobs:
           python -B -m unittest test_np9_answer32k test_np9_pack
           # NVME
           python -B -m unittest test_qwen_nvme_store test_qwen_kv_nvme test_qwen_kv_compat
+          # P2P (docs/tp4-p2p-restore.md: the staging buffer, scatter and checksum device ops; needs a C++ compiler for the kernel emulation)
+          python -B -m unittest test_pin_kvread_p2p
+          python -B -m unittest discover -s optimisation/ttnn-op/kv_region_read -p 'test_*.py'
           # O3
           python -B -m unittest test_audit_sampling test_octo3_contract test_octo3_profiles test_octo3_judge test_octo3_pack test_octo3_ship test_block_warm_capture test_capture_trackers
           # PF2

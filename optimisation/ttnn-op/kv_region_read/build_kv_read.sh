@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Build ~/opgraft-KVR on the rig HOST: qwen_kv_read.so, the standalone nanobind extension that adds ttnn.qwen_read_blocks (and, from version 2, the raw
-# qwen_read_blocks_raw / qwen_write_blocks_raw / qwen_block_bytes of the host KV tier)
+# qwen_read_blocks_raw / qwen_write_blocks_raw / qwen_block_bytes of the host KV tier; from version 3 the device side of the peer-to-peer restore:
+# qwen_p2p_staging_alloc / _info / _write / _read, qwen_write_blocks_from_staging, qwen_staging_checksum, docs/tp4-p2p-restore.md). Version 3 also
+# SHIPS the two device kernels (qwen_p2p_scatter.cpp, qwen_p2p_checksum.cpp) beside the .so, which JIT-compiles them at its first dispatch, and compiles
+# qwen_p2p_plan.hpp into itself: the build directory is the unit of delivery (the image copies the whole directory), so build version 3 into its OWN
+# directory (bash build_kv_read.sh ~/opgraft-KVR3), then `python3 scripts/ci/pin_kvread.py --dir ~/opgraft-KVR3 --write`.
 # (the prefix audit's region read, docs/prefix-audit-cost.md) WITHOUT replacing any pinned image binary. It is compiled in the
 # ttbuild container against the tt-metal tree the served binaries came from (9f9cd4fd), with the flags ninja uses for the
 # ttnn unity sources, and linked against ttbuild's _ttnncpp.so / libtt_metal.so / nanobind static library; at run time it
@@ -30,7 +34,9 @@ LIBTTMETAL_SHA=3f5a3d585b46b2bef7d7d2c6c34b88d7f4efb679ec051fb4da615f6ec9ccc9ce
 TTNN_SHA=914d09462e27e8f5c9d7df03218c51d159bd25f03b87ebc95103dcd06f01a640
 run() { if [ "${KVR_DRY_RUN:-0}" = 1 ]; then echo "### run: $*"; else "$@"; fi; }
 
-test -s "$here/qwen_kv_read.cpp" || { echo "no qwen_kv_read.cpp beside this script" >&2; exit 2; }
+# The source files of the build: the module, its pure-arithmetic header, and the two device kernels it JIT-compiles at run time.
+SOURCES="qwen_kv_read.cpp qwen_p2p_plan.hpp qwen_p2p_scatter.cpp qwen_p2p_checksum.cpp"
+for f in $SOURCES; do test -s "$here/$f" || { echo "no $f beside this script" >&2; exit 2; }; done
 if [ "$(docker inspect -f '{{.State.Running}}' ttbuild 2>/dev/null || echo missing)" != true ]; then
   echo "ttbuild is not running: starting it (a container start, no device)"
   run docker start ttbuild
@@ -49,7 +55,7 @@ echo "build_kv_read: tt-metal $head, disk ${avail}%, out $out"
 # 1. compile + link in ttbuild (the flags are ninja's own for the ttnn unity sources, minus LTO and -Werror)
 run docker exec ttbuild rm -rf /tmp/kvr
 run docker exec ttbuild mkdir -p /tmp/kvr
-run docker cp "$here/qwen_kv_read.cpp" ttbuild:/tmp/kvr/qwen_kv_read.cpp
+for f in $SOURCES; do run docker cp "$here/$f" "ttbuild:/tmp/kvr/$f"; done
 cat > "$work/inner.sh" <<'EOF'
 set -eu   # no pipefail: grep -m1 closes ninja's pipe
 cd /opt/tt-metal/build_Release
@@ -67,7 +73,7 @@ run docker cp "$work/inner.sh" ttbuild:/tmp/kvr/inner.sh
 run docker exec ttbuild bash /tmp/kvr/inner.sh
 for f in qwen_kv_read.so qwen_kv_read.o; do run docker cp ttbuild:/tmp/kvr/$f "$work/$f"; done
 run docker cp ttbuild:/tmp/kvr/flags.txt "$work/compile-flags.txt"
-cp "$here/qwen_kv_read.cpp" "$here/$(basename "${BASH_SOURCE[0]}")" "$work/"
+for f in $SOURCES "$(basename "${BASH_SOURCE[0]}")"; do cp "$here/$f" "$work/"; done
 [ "${KVR_KEEP_WORK:-0}" = 1 ] || run docker exec ttbuild rm -rf /tmp/kvr
 if [ "${KVR_DRY_RUN:-0}" = 1 ]; then echo "dry run: nothing built"; rm -rf "$work"; exit 0; fi
 sha=$(sha256sum < "$work/qwen_kv_read.so" | cut -c1-64)
@@ -93,7 +99,7 @@ for image in $images; do
   echo "$image: unresolved non-Python symbols: $unresolved"
   test "$unresolved" = 0 || fail=1
   docker run --rm --network none --entrypoint python3 -v "$work:/kvr:ro" -e PYTHONPATH=/kvr "$image" -c \
-    'import ttnn, qwen_kv_read; assert all(callable(getattr(ttnn, n)) for n in ("qwen_read_blocks", "qwen_block_bytes", "qwen_read_blocks_raw", "qwen_write_blocks_raw")); print("IMPORT-OK", qwen_kv_read.QWEN_KV_READ_VERSION)' 2>&1 | grep -E "IMPORT-OK|Error|error" | tail -3 \
+    'import ttnn, qwen_kv_read; assert qwen_kv_read.QWEN_KV_READ_VERSION == "3"; assert all(callable(getattr(ttnn, n)) for n in ("qwen_read_blocks", "qwen_block_bytes", "qwen_read_blocks_raw", "qwen_write_blocks_raw", "qwen_p2p_staging_alloc", "qwen_p2p_staging_info", "qwen_write_blocks_from_staging", "qwen_staging_checksum", "qwen_p2p_staging_write", "qwen_p2p_staging_read")); o = __import__("os").path; d = o.dirname(qwen_kv_read.__file__); assert all(o.getsize(o.join(d, k)) > 0 for k in ("qwen_p2p_scatter.cpp", "qwen_p2p_checksum.cpp")); print("IMPORT-OK", qwen_kv_read.QWEN_KV_READ_VERSION)' 2>&1 | grep -E "IMPORT-OK|Error|error" | tail -3 \
     | tee "$work/import-$tagname.txt"
   grep -q IMPORT-OK "$work/import-$tagname.txt" || { echo "FAIL $image: the module does not import" >&2; fail=1; }
 done

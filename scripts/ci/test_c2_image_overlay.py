@@ -1243,7 +1243,7 @@ class ProvenanceTests(unittest.TestCase):
         self.assertIn('kvread_name=%s' % provenance.KVREAD_NAME, script)
         # the version 2 build lives in its own directory: the version 1 one (which other branches pin and mount) is neither read nor written by this build,
         # the override is a plain path under the home, and the name inside the context and the image does not change with the host directory
-        self.assertIn('kvread=${C2_KVREAD_DIR:-/home/thatch/opgraft-KVR2}', script)
+        self.assertIn('kvread=${C2_KVREAD_DIR:-/home/thatch/opgraft-KVR3}', script)
         self.assertNotIn('kvread=/home/thatch/opgraft-KVR\n', script)
         self.assertIn('C2_KVREAD_DIR $kvread is not a plain path', script)
         self.assertEqual(provenance.KVREAD_NAME, 'opgraft-KVR')

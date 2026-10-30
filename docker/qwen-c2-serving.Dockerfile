@@ -58,13 +58,14 @@ RUN set -eu; g=/opt/qwen-c2/${GRAFT_NAME}; \
 # standalone nanobind extension that adds ttnn.qwen_read_blocks and REPLACES NOTHING (the three pinned binaries above keep their hashes
 # and their QWEN_ strings; this layer sits after their sha checks, which are repeated below). Its directory goes on sys.path through a
 # .pth file, and the audit imports it (qwen_prefix_model_patch). The build fails unless the module imports with no device and sets the names: from
-# version 2 also the raw block ops of the host KV tier (the pin below is the version 2 build).
+# version 2 also the raw block ops of the host KV tier, from version 3 the P2P restore's staging ops and the two device kernels shipped beside the .so
+# (docs/tp4-p2p-restore.md; the pin below is moved to the version 3 build by the host-side pin tool, after the rig build).
 COPY opgraft-KVR/ /opt/qwen-c2/opgraft-KVR/
 RUN set -eu; k=/opt/qwen-c2/opgraft-KVR; \
     test "$(sha256sum < $k/qwen_kv_read.so | cut -c1-64)" = a80db6d93587e70a3214e58b30683f61782d50204e04c58f90cf5c7c1664ec4c; \
     site=$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])'); \
     echo "$k" > "$site/qwen_kv_read_path.pth"; \
-    python3 -c "import ttnn, qwen_kv_read; assert callable(ttnn.qwen_read_blocks) and all(callable(getattr(ttnn, n)) for n in ('qwen_read_blocks_raw', 'qwen_write_blocks_raw', 'qwen_block_bytes')); print('[KVREAD] qwen_kv_read', qwen_kv_read.QWEN_KV_READ_VERSION, qwen_kv_read.__file__)"; \
+    python3 -c "import ttnn, qwen_kv_read; assert callable(ttnn.qwen_read_blocks) and all(callable(getattr(ttnn, n)) for n in ('qwen_read_blocks_raw', 'qwen_write_blocks_raw', 'qwen_block_bytes', 'qwen_p2p_staging_alloc', 'qwen_p2p_staging_info', 'qwen_p2p_staging_write', 'qwen_p2p_staging_read', 'qwen_write_blocks_from_staging', 'qwen_staging_checksum')); assert qwen_kv_read.QWEN_KV_READ_VERSION == '3'; o = __import__('os').path; d = o.dirname(qwen_kv_read.__file__); assert all(o.getsize(o.join(d, f)) > 0 for f in ('qwen_p2p_scatter.cpp', 'qwen_p2p_checksum.cpp')); print('[KVREAD] qwen_kv_read', qwen_kv_read.QWEN_KV_READ_VERSION, qwen_kv_read.__file__)"; \
     test "$(sha256sum < /opt/tt-metal/build_Release/lib/_ttnncpp.so | cut -c1-64)" = "${GRAFT_SHA}"; \
     test "$(sha256sum < /opt/tt-metal/build_Release/lib/libtt_metal.so | cut -c1-64)" = 3f5a3d585b46b2bef7d7d2c6c34b88d7f4efb679ec051fb4da615f6ec9ccc9ce
 

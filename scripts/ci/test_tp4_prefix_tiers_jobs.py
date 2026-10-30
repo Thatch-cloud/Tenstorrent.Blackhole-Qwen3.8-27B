@@ -90,7 +90,7 @@ class PackTests(unittest.TestCase):
         self.assertEqual(values, ['C2_CARDS=quad', 'C2_ACTIONS=build', 'C2_IMAGE_TAG=%s' % TAG, 'C2_PROFILE=c2-packed-tp4'])
         self.assertFalse([line for line in values if '/' in line], 'no path in the job env')
         script = (HERE / 'build-c2-serving-image.sh').read_text(encoding='utf-8')
-        self.assertIn('kvread=${C2_KVREAD_DIR:-/home/thatch/opgraft-KVR2}', script)
+        self.assertIn('kvread=${C2_KVREAD_DIR:-/home/thatch/opgraft-KVR3}', script)
         self.assertIn('kvread_name=opgraft-KVR', script)
         sha = pin_kvread.current_pin()
         for name in pin_kvread.PIN_SITES:

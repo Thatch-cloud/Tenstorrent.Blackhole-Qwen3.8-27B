@@ -7,7 +7,7 @@ The extension (optimisation/ttnn-op/kv_region_read/build_kv_read.sh) is pinned b
 the overlay test, so an image never bakes bytes nobody built and checked. Version 2 (the raw block read and write of the host KV tier) is a new build with a new hash;
 this moves all four in one command instead of four hand edits at the start of a card window. It refuses a build that is not this checkout's source (the directory's copy
 of qwen_kv_read.cpp must be byte-identical to the checkout's), that has no MANIFEST.sha256 (the build writes it only after every check passed) or whose binary does not
-carry the four op names (version 1 has no raw ops). Only the four files that ENFORCE the pin are rewritten (PIN_SITES); the files that merely quote the old hash - the version 1 qualification pack and the audit-cost
+carry the four op names (version 1 has no raw ops); when the checkout's source is version 3 also the six P2P op names and a byte-identical copy of the three P2P files (plan header, two kernels). Only the four files that ENFORCE the pin are rewritten (PIN_SITES); the files that merely quote the old hash - the version 1 qualification pack and the audit-cost
 note, which describe the version 1 build - are listed and left alone, so they stay true.
 """
 
@@ -23,6 +23,11 @@ ROOT = HERE.parent.parent
 CPP = ROOT / 'optimisation' / 'ttnn-op' / 'kv_region_read' / 'qwen_kv_read.cpp'
 SHA256 = re.compile(r'[0-9a-f]{64}')
 OP_NAMES = (b'qwen_read_blocks', b'qwen_read_blocks_raw', b'qwen_write_blocks_raw', b'qwen_block_bytes')
+# Version 3 (docs/tp4-p2p-restore.md): the P2P restore's device ops, and the files the module reads or compiles at run time, which must sit beside the .so.
+# They are required only when the checkout's own qwen_kv_read.cpp is version 3, so a checkout that predates it can still move a version 2 pin.
+P2P_OP_NAMES = (b'qwen_p2p_staging_alloc', b'qwen_p2p_staging_info', b'qwen_p2p_staging_write', b'qwen_p2p_staging_read', b'qwen_write_blocks_from_staging',
+                b'qwen_staging_checksum')
+P2P_FILES = ('qwen_p2p_plan.hpp', 'qwen_p2p_scatter.cpp', 'qwen_p2p_checksum.cpp')
 EXTENSION = 'qwen_kv_read.so'
 SOURCE = 'qwen_kv_read.cpp'
 MANIFEST = 'MANIFEST.sha256'
@@ -56,6 +61,17 @@ def build_problems(directory, cpp=CPP):
     absent = [name.decode('ascii') for name in OP_NAMES if name not in data]
     if absent:
         problems.append('%s does not carry %s: it is not version 2 of the extension' % (binary, ', '.join(absent)))
+    source = Path(cpp)
+    if source.is_file() and P2P_OP_NAMES[0] in source.read_bytes():
+        absent = [name.decode('ascii') for name in P2P_OP_NAMES if name not in data]
+        if absent:
+            problems.append('%s does not carry %s: it is not version 3 of the extension' % (binary, ', '.join(absent)))
+        for name in P2P_FILES:
+            shipped, wanted = directory / name, source.parent / name
+            if not shipped.is_file():
+                problems.append('%s has no %s: the module reads or compiles it at run time and the image copies the whole directory' % (directory, name))
+            elif not wanted.is_file() or sha256_of(shipped) != sha256_of(wanted):
+                problems.append('%s is not this checkout\'s %s (the build is from another source: rebuild)' % (shipped, name))
     return problems
 
 
