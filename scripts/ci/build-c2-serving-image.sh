@@ -59,7 +59,7 @@ esac
 # check look, and the whole directory is copied, so the kernels reach the image with the .so.
 kvread=${C2_KVREAD_DIR:-/home/thatch/opgraft-KVR3}
 kvread_name=opgraft-KVR
-kvread_sha=a80db6d93587e70a3214e58b30683f61782d50204e04c58f90cf5c7c1664ec4c
+kvread_sha=37ae27e09df5028b9b73afec72d9b6f2ed9268305d90b513b9dcaadca3227a2a
 previous_graft=/home/thatch/opgraft-K64i
 previous_graft_sha=cf54d716669be6b71f1d627e74892c90f562495dc9500589408a72b4ddccf4a4
 fixtures=/home/thatch/.cache/qwen-experiments

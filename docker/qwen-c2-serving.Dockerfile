@@ -62,7 +62,7 @@ RUN set -eu; g=/opt/qwen-c2/${GRAFT_NAME}; \
 # (docs/tp4-p2p-restore.md; the pin below is moved to the version 3 build by the host-side pin tool, after the rig build).
 COPY opgraft-KVR/ /opt/qwen-c2/opgraft-KVR/
 RUN set -eu; k=/opt/qwen-c2/opgraft-KVR; \
-    test "$(sha256sum < $k/qwen_kv_read.so | cut -c1-64)" = a80db6d93587e70a3214e58b30683f61782d50204e04c58f90cf5c7c1664ec4c; \
+    test "$(sha256sum < $k/qwen_kv_read.so | cut -c1-64)" = 37ae27e09df5028b9b73afec72d9b6f2ed9268305d90b513b9dcaadca3227a2a; \
     site=$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])'); \
     echo "$k" > "$site/qwen_kv_read_path.pth"; \
     python3 -c "import ttnn, qwen_kv_read; assert callable(ttnn.qwen_read_blocks) and all(callable(getattr(ttnn, n)) for n in ('qwen_read_blocks_raw', 'qwen_write_blocks_raw', 'qwen_block_bytes', 'qwen_p2p_staging_alloc', 'qwen_p2p_staging_info', 'qwen_p2p_staging_write', 'qwen_p2p_staging_read', 'qwen_write_blocks_from_staging', 'qwen_staging_checksum')); assert qwen_kv_read.QWEN_KV_READ_VERSION == '3'; o = __import__('os').path; d = o.dirname(qwen_kv_read.__file__); assert all(o.getsize(o.join(d, f)) > 0 for f in ('qwen_p2p_scatter.cpp', 'qwen_p2p_checksum.cpp')); print('[KVREAD] qwen_kv_read', qwen_kv_read.QWEN_KV_READ_VERSION, qwen_kv_read.__file__)"; \

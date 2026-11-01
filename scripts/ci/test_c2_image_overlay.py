@@ -1230,7 +1230,7 @@ class ProvenanceTests(unittest.TestCase):
     def test_the_extension_pin_is_one_value_in_the_dockerfile_the_build_script_and_g1(self):
         dockerfile = (ROOT / 'docker' / 'qwen-c2-serving.Dockerfile').read_text(encoding='utf-8')
         script = (ROOT / 'scripts' / 'ci' / 'build-c2-serving-image.sh').read_text(encoding='utf-8')
-        sha = 'a80db6d93587e70a3214e58b30683f61782d50204e04c58f90cf5c7c1664ec4c'
+        sha = '37ae27e09df5028b9b73afec72d9b6f2ed9268305d90b513b9dcaadca3227a2a'
         self.assertEqual(provenance.KVREAD_IN_IMAGE, '/opt/qwen-c2/opgraft-KVR')
         self.assertIn('COPY opgraft-KVR/ /opt/qwen-c2/opgraft-KVR/', dockerfile)
         self.assertIn('= %s' % sha, dockerfile)

@@ -92,7 +92,7 @@ GRAFT_IN_IMAGE = '/opt/qwen-c2/' + GRAFT_NAME
 # imports it with no device. G1 holds the image's copy to the context's, and the three pinned binaries (a) to the graft's.
 KVREAD_NAME = 'opgraft-KVR'
 KVREAD_FILE = 'qwen_kv_read.so'
-KVREAD_SHA256 = 'a80db6d93587e70a3214e58b30683f61782d50204e04c58f90cf5c7c1664ec4c'
+KVREAD_SHA256 = '37ae27e09df5028b9b73afec72d9b6f2ed9268305d90b513b9dcaadca3227a2a'
 KVREAD_IN_IMAGE = '/opt/qwen-c2/' + KVREAD_NAME
 # Literals the graft's _ttnncpp.so must carry: the [QWEN-SDPA] factory branches the served modes need (F4
 # flags, F9 KV share, F18 q-slice, F22 K64j's runtime extent) and the tree-scratch patch's variable.
