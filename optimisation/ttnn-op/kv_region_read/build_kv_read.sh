@@ -29,8 +29,11 @@ here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 out=${1:-$HOME/opgraft-KVR}
 images=${KVR_IMAGES:-zot.thatch.local:5000/thatch-serving-tt:latest}
 TTMETAL_HEAD=9f9cd4fd590f4b606bd0981a4fe0b6403eb38ec9
-# The image's pinned binaries (K64j's _ttnncpp.so, the P8 libtt_metal.so, K64j's _ttnn.so) and where they sit.
+# The image's pinned binaries (K64j's _ttnncpp.so, the P8 libtt_metal.so, K64j's _ttnn.so) and where they sit. The images built since the
+# prefill SDPA graft carry K64j-OQ's _ttnncpp.so instead (2b81e28f..., K64j plus the oneq prefill edits: build-c2-serving-image.sh, c2_image_provenance.py);
+# the version 2 module already runs on it, so either is accepted.
 TTNNCPP_SHA=152951c1c0de5c9dfad2d62c295393a43b2ecf353965c55c709da7e539b975b7
+TTNNCPP_OQ_SHA=2b81e28f017ccf0ab50028fbae5eb31dd61cfd8a3159233a1ed785712d024a57
 LIBTTMETAL_SHA=3f5a3d585b46b2bef7d7d2c6c34b88d7f4efb679ec051fb4da615f6ec9ccc9ce
 TTNN_SHA=914d09462e27e8f5c9d7df03218c51d159bd25f03b87ebc95103dcd06f01a640
 run() { if [ "${KVR_DRY_RUN:-0}" = 1 ]; then echo "### run: $*"; else "$@"; fi; }
@@ -94,7 +97,9 @@ for image in $images; do
     sha256sum /opt/tt-metal/build_Release/lib/_ttnncpp.so /opt/tt-metal/build_Release/ttnn/_ttnncpp.so /opt/tt-metal/build_Release/lib/libtt_metal.so /opt/tt-metal/ttnn/ttnn/_ttnn.so
     strings /opt/tt-metal/build_Release/lib/_ttnncpp.so | grep -oE "QWEN_[A-Z0-9_]+|\[QWEN-[A-Z0-9-]+\]" | sort -u | sed "s/^/STRING /"' > "$work/image-$tagname.txt"
   grep '^STRING ' "$work/image-$tagname.txt" | cut -c8- > "$work/qwen-strings-$tagname.txt"
-  for pair in "$TTNNCPP_SHA /opt/tt-metal/build_Release/lib/_ttnncpp.so" "$TTNNCPP_SHA /opt/tt-metal/build_Release/ttnn/_ttnncpp.so" \
+  ttnncpp=$TTNNCPP_SHA
+  grep -q "^$TTNNCPP_OQ_SHA  /opt/tt-metal/build_Release/lib/_ttnncpp.so\$" "$work/image-$tagname.txt" && ttnncpp=$TTNNCPP_OQ_SHA && echo "$image: _ttnncpp.so is K64j-OQ"
+  for pair in "$ttnncpp /opt/tt-metal/build_Release/lib/_ttnncpp.so" "$ttnncpp /opt/tt-metal/build_Release/ttnn/_ttnncpp.so" \
               "$LIBTTMETAL_SHA /opt/tt-metal/build_Release/lib/libtt_metal.so" "$TTNN_SHA /opt/tt-metal/ttnn/ttnn/_ttnn.so"; do
     grep -q "^${pair%% *}  ${pair#* }\$" "$work/image-$tagname.txt" || { echo "FAIL $image: ${pair#* } is not ${pair%% *}" >&2; fail=1; }
   done
