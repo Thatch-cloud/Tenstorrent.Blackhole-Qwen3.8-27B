@@ -45,13 +45,14 @@ if [ "$(docker inspect -f '{{.State.Running}}' ttbuild 2>/dev/null || echo missi
 fi
 head=$(docker exec ttbuild git -C /opt/tt-metal rev-parse HEAD 2>/dev/null || echo unknown)
 [ "${KVR_DRY_RUN:-0}" = 1 ] || test "$head" = "$TTMETAL_HEAD" || { echo "ttbuild's tt-metal is $head, not $TTMETAL_HEAD" >&2; exit 2; }
-avail=$(df --output=pcent / | tail -1 | tr -dc 0-9)
-test "$avail" -lt 80 || { echo "rig root disk is ${avail}% used (limit 80)" >&2; exit 2; }
+# The rig's floor is 150 GiB free on the root disk (it is also the production control plane); the build itself writes a few MB.
+avail=$(( $(df --output=avail -B1G / | tail -1 | tr -dc 0-9) ))
+test "$avail" -ge 150 || { echo "rig root disk has ${avail} GiB free (floor 150)" >&2; exit 2; }
 
 work=$out.partial
 rm -rf "$work"; mkdir -p "$work"
 exec > >(tee "$work/build.log") 2>&1
-echo "build_kv_read: tt-metal $head, disk ${avail}%, out $out"
+echo "build_kv_read: tt-metal $head, disk ${avail} GiB free, out $out"
 
 # 1. compile + link in ttbuild (the flags are ninja's own for the ttnn unity sources, minus LTO and -Werror)
 run docker exec ttbuild rm -rf /tmp/kvr
