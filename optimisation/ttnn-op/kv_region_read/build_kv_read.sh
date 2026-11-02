@@ -138,12 +138,17 @@ rm -rf "$work"; mkdir -p "$work"
 echo "build_kv_read: image $image, container limits $cpus CPUs / $memory, out $out" | tee "$work/build.log"
 sources_tar=$stage/sources.tar
 tar cf "$sources_tar" -C "$here" $SOURCES -C "$stage" inner.sh
+# The container's log goes straight into build.log (and is shown when the container is done: a build is seconds, and a log written through a pipe could still be
+# in flight when the directory is moved); its stdout is the tar of the result.
+ok=0
 if [ -n "$remote" ]; then
   # shellcheck disable=SC2086
-  $remote "$run_command" < "$sources_tar" 2> >(tee -a "$work/build.log" >&2) | tar xf - -C "$work"
+  if $remote "$run_command" < "$sources_tar" 2>> "$work/build.log" | tar xf - -C "$work"; then ok=1; fi
 else
-  bash -c "$run_command" < "$sources_tar" 2> >(tee -a "$work/build.log" >&2) | tar xf - -C "$work"
+  if bash -c "$run_command" < "$sources_tar" 2>> "$work/build.log" | tar xf - -C "$work"; then ok=1; fi
 fi
+cat "$work/build.log" >&2
+[ "$ok" = 1 ] || { echo "build_kv_read: the container (or the transfer of its result) failed: a check did not pass (the log is above, and in $work/build.log)" >&2; exit 1; }
 for f in qwen_kv_read.so qwen_kv_read.o compile-flags.txt image-binaries.txt; do test -s "$work/$f" || { echo "build_kv_read: the container returned no $f: a check failed (see $work/build.log)" >&2; exit 1; }; done
 for f in $SOURCES; do cp "$here/$f" "$work/"; done
 cp "$here/$(basename "${BASH_SOURCE[0]}")" "$work/"
