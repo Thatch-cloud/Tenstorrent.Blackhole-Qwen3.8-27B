@@ -7,7 +7,7 @@ imported by the serving engine; nothing touches a card unless `p2p_probe.py` is 
 | File | What it is |
 |---|---|
 | `p2p_topology.py` | Read-only. For each card and drive: will the kernel allow peer-to-peer DMA between them (`BUS_ADDR` inside a switch, `THRU_HOST_BRIDGE` through the root complex, or not at all), which ports redirect it (ACS), and the boot parameter and `setpci` command that clear the redirect |
-| `p2p_probe.py` | The feasibility probe: `O_DIRECT`-read a file or block-device range into the card through p2pmem, verify it through a second path, time it against the host-bounce path. `--dry-run` prints the plan, `--mock` runs the whole flow on fakes |
+| `p2p_probe.py` | The feasibility probe. Read arm (the default): `O_DIRECT`-read a file or block-device range into the card through p2pmem, verify it through a second path, time it against the host-bounce path. Write arm (`--mode write`): the drive DMA-reads the card's DRAM through the same mapping into a scratch range, which is read back and compared; sweeps write size and queue depth, re-aims the window across the DRAM banks with a canary read after each re-aim, soaks, and reads the PCIe AER counters before and after. `--dry-run` prints the plan, `--mock` runs the whole flow on fakes |
 | `kv_shard_layout.py` | The on-drive layout (one object per card, sector-aligned, header page + shards), the final-layout arithmetic, the card-side digest specification, and a max-min-fair bandwidth model of drives, cards, a switch and ACS redirect |
 | `test_*.py` | CPU tests of all three (`python -B -m unittest discover -s scripts/p2p -p 'test_*.py'`; allowlisted in `qwen-integration-cpu.yml`) |
 
@@ -29,3 +29,26 @@ Typical use (root, the patched driver loaded with `p2pmem_devices=<this card>`, 
     p2p_probe.py --prepare /dev/<blank spare drive> --size 4G --overwrite-device      # or a file on a spare filesystem
     p2p_probe.py --source /dev/<that drive> --size 1G --chunk 16M --threads 4 --baseline --verify sample
     p2p_probe.py --source /dev/<that drive> --size 1G --baseline-only                 # the host-bounce path alone, for CPU-time comparison
+
+## The write arm (`--mode write`)
+
+The other direction: the drive reads the card. An `O_DIRECT` `pwritev` whose iovecs are pieces of the p2pmem mapping makes the drive DMA-read the card's DRAM (non-posted reads of the card's BAR) and write the bytes to a **scratch range of a drive that the operator names and owns**. The CPU first puts a deterministic random pattern into the card through the TLB window; after each batch the probe paints the range with a sentinel beforehand and reads it back with `O_DIRECT` afterwards, so a write that never happened or landed wrong cannot pass. The run stops at the first difference, the first uncorrectable AER increment, a controller that is no longer live, or a canary that does not match (it does not try again to see).
+
+What it measures and checks:
+
+* **Sweep.** Write sizes 696,320 B (one object's share on one card), 2,785,280 B (an object over four cards) and 22,282,240 B (a sub-run of eight objects), each at queue depths 1, 4, 8, 16 and 32 (1 is the drain-bound measurement: one sub-run on its own); rate, per-write p50/p99/max, process and worker CPU. Each write is one `pwritev` of `--iov-bytes` pieces (default 696,320).
+* **Re-aim arm** (`--reaim`). The window is re-aimed at each DRAM bank in turn (`CONFIGURE_TLB` is three posted register writes), and the CPU reads the bank's canary through the uncached mapping before any bio is issued: a non-posted read from the same requester cannot complete before the posted writes landed. Every bank holds a different canary page and a different pattern, so a stale aim shows as a wrong canary and, independently, as wrong bytes on the drive. A canary is checked for every bank before any data is written into the card.
+* **Soak** (`--soak MINUTES`). Back-to-back batches for the time asked, paced to `--soak-max-gbps` (default 2) to spare the drive's endurance, every Nth cycle painted and verified, the last one always; the write-only rate is reported per 30 s bucket so a throttle shows as a falling rate.
+* **AER.** The counters of the card, the drive and every bridge between them and the root port (`aer_dev_*`, `aer_rootport_*` in sysfs) before the run, sampled during it and after it. Correctable increments are reported per function; any uncorrectable increment (the non-fatal file holds the completion timeout) stops the run and fails it. A system without the counters ends UNVERIFIED, not PASS.
+* **Verdict.** `PASS` needs byte-exact, no uncorrectable AER, a sustained rate of at least `--min-write-gbps` (0.25; the soak's write rate, else the slowest sweep cell at queue depth 4 or more), a sub-run that drains within `--drain-ms` (50) and, with `--reaim`, a matching canary after every re-aim.
+
+Refusals, all before the first DMA: a scratch range is always required (`--scratch-start`, `--scratch-size`; the first MiB of a drive is never written, and nothing outside the range ever is: the drive handle is fenced); a range that is not all zeros is refused unless `--i-own-this-scratch-range` is given with the range; a block device that is mounted, swapped, held or in an array, or that someone else has open (`O_EXCL`), is refused; a PCIe link at 2.5 GT/s (Gen1) anywhere between the root port and the card or the drive is refused, as is a drive below `--min-drive-gts` (16); a destination in the top 16 MiB of a 4 GiB window (not DRAM) is refused. `--max-write-gib` is a hard stop on what the run writes to the drive; `--dry-run` prints the plan and an upper bound of the writes without opening anything.
+
+Typical use (root, the patched driver loaded with `p2pmem_devices=<this card>`, nothing serving from the card, a drive whose scratch range may be overwritten, CI and other load off the host):
+
+    p2p_probe.py --mode write --dry-run --scratch-start 16G --scratch-size 2G
+    p2p_probe.py --mode write --device N --target /dev/<the drive> --scratch-start 16G --scratch-size 2G --i-own-this-scratch-range --reaim --json-out w.json
+    p2p_probe.py --mode write --device N --target /dev/<the drive> --scratch-start 16G --scratch-size 2G --i-own-this-scratch-range --no-sweep --soak 5 --json-out soak.json
+
+The read direction at the same sizes and queue depths is the read arm: `--source /dev/<the drive> --source-offset 16G --chunk 696320 --threads QD --size $((696320*QD))`, which now also reports its CPU time.
+Exit status as for the read arm: 0 PASS, 1 FAIL, 2 could not run, 3 UNVERIFIED.

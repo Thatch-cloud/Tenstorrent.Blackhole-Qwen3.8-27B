@@ -25,13 +25,22 @@ stores) is slow; the baseline is indicative of "through host memory", not of the
 
 Exit status: 0 PASS, 1 FAIL (a difference, or below --min-gbps), 2 could not run, 3 UNVERIFIED (--verify none: nothing was checked).
 
+--mode write is the other direction: the drive DMA-reads the card's DRAM through the same p2pmem mapping (an O_DIRECT pwritev whose buffers
+are the mapping) into a scratch range of a drive that the operator names and owns, and the probe reads the range back with O_DIRECT to
+compare it with what it put into the card. It sweeps write sizes and queue depths, re-aims the window across the DRAM banks with a canary
+read after every re-aim, can soak for minutes, and reads the PCIe AER counters of the card, the drive and every bridge between them before
+and after. It refuses a range that is not blank unless --i-own-this-scratch-range is given with the range, refuses a PCIe link at 2.5 GT/s,
+and never writes outside the range it was given. See --help for the flags and the README for a worked example.
+
 Stdlib only.
 """
 
 import argparse
 import concurrent.futures
+import contextlib
 import ctypes
 import fcntl
+import hashlib
 import json
 import mmap
 import os
@@ -40,6 +49,8 @@ import re
 import stat
 import struct
 import sys
+import tempfile
+import threading
 import time
 
 PAGE = 4096
@@ -74,6 +85,7 @@ EXPORT_ARG = struct.Struct('<IIIiQQ')
 FIRST_4G_TLB = 202       # Blackhole: 202 windows of 2 MiB, then 8 of 4 GiB
 ORDERINGS = {'relaxed': 0, 'strict': 1, 'posted': 2}
 NOC_COORDINATE_LIMIT = 64        # the TLB register's x and y fields are 6 bits wide
+WINDOW_DRAM_LIMIT = 0xFF000000   # the top 16 MiB of a 4 GiB window is not DRAM (a pattern written there does not read back)
 
 FS_IOC_FIEMAP = 0xC020660B
 FIEMAP_FLAG_SYNC = 1
@@ -87,6 +99,8 @@ FIEMAP_HAZARDS = 0x2 | 0x4 | 0x8 | 0x80 | 0x200 | 0x400 | 0x800
 
 PASS, FAIL, UNVERIFIED = 'PASS', 'FAIL', 'UNVERIFIED'
 EXIT_CODES = {PASS: 0, FAIL: 1, UNVERIFIED: 3}
+NOTE_WRITE_FILL = ('the card is filled and its canaries are read through the CPU mapping of the window (--cpu-map), which is slow; the DMA itself goes '
+                   'through the p2pmem mapping and the drive')
 NOTE_UNCACHED = ('CPU access through the window is uncached once the range is p2pmem (the kernel maps it uncached and reserves the range): the '
                  'verification is slow and the host-bounce baseline is indicative only, not the UMD DMA path')
 
@@ -144,6 +158,9 @@ def make_plan(info, size, dest_offset, chunk, source_offset, noc_x, noc_y, noc_a
     # Byte x of the slice is at BAR4 offset info['offset'] + x, hence at window offset (that - window_base), hence at NOC address
     # noc_addr + that: the window is configured with `noc_addr` as its base.
     window_offset = info['offset'] - window_base
+    if window_offset + dest_offset + size > WINDOW_DRAM_LIMIT:
+        raise ProbeError('the destination ends at window offset %#x: the top 16 MiB of a 4 GiB window (from %#x) is not DRAM; keep every '
+                         'address below it (a 4 GiB bank leaves about 3 GiB above a 1 GiB offset)' % (window_offset + dest_offset + size, WINDOW_DRAM_LIMIT))
     return {
         'window': window,
         'window_bar4_offset': window_base,
@@ -394,6 +411,10 @@ class TtCard(object):
     def other_openers(self):
         return other_openers(self.index)
 
+    def pci_chain(self):
+        """The PCI functions from the root port down to this card (for the link speeds and the AER counters)."""
+        return pci_chain(self.pci_dir)
+
     def _sysfs(self, name):
         try:
             with open(os.path.join(self.class_dir, 'p2pmem', name)) as handle:
@@ -454,10 +475,10 @@ class TtCard(object):
                 except OSError as error:
                     raise ProbeError('ALLOCATE_TLB failed before window %d came up (%s): another process holds it'
                                      % (wanted, error)) from error
-                tlb_id, _, _, mmap_wc, _ = ALLOCATE_OUT.unpack_from(buf, ALLOCATE_IN.size)
+                tlb_id, _, mmap_uc, mmap_wc, _ = ALLOCATE_OUT.unpack_from(buf, ALLOCATE_IN.size)
                 if tlb_id == wanted:
                     self.windows[tlb_id] = mmap_wc
-                    return TtWindow(self, tlb_id, mmap_wc)
+                    return TtWindow(self, tlb_id, mmap_wc, mmap_uc)
                 if tlb_id > wanted:
                     self._free(tlb_id)
                     raise ProbeError('window %d is held by another process (the next free one is %d)' % (wanted, tlb_id))
@@ -477,10 +498,11 @@ class TtCard(object):
 
 
 class TtWindow(object):
-    def __init__(self, card, tlb_id, mmap_offset_wc):
+    def __init__(self, card, tlb_id, mmap_offset_wc, mmap_offset_uc=None):
         self.card = card
         self.id = tlb_id
         self.mmap_offset_wc = mmap_offset_wc
+        self.mmap_offset_uc = mmap_offset_uc
         self.pin_fd = None
         self.cpu = None
 
@@ -504,10 +526,13 @@ class TtWindow(object):
         self.pin_fd = EXPORT_ARG.unpack_from(buf, 0)[3]
         return True
 
-    def cpu_window(self, size):
+    def cpu_window(self, size, uc=False):
+        """CPU mapping of the window: write-combining (the default, what the read arm uses) or uncached (what the tier's canary reads use)."""
+        offset = self.mmap_offset_uc if uc else self.mmap_offset_wc
+        if offset is None:
+            raise ProbeError('the driver did not report an uncached mapping offset for window %d' % self.id)
         try:
-            mapping = mmap.mmap(self.card.fd, size, flags=mmap.MAP_SHARED, prot=mmap.PROT_READ | mmap.PROT_WRITE,
-                                offset=self.mmap_offset_wc)
+            mapping = mmap.mmap(self.card.fd, size, flags=mmap.MAP_SHARED, prot=mmap.PROT_READ | mmap.PROT_WRITE, offset=offset)
         except (OSError, ValueError) as error:
             raise ProbeError('cannot map TLB window %d (%s)' % (self.id, error)) from error
         self.cpu = CpuWindow(mapping)
@@ -681,10 +706,13 @@ def run_p2p(card, source, cpu, plan, args, info, report):
                              % (first_bus, expected))
         runs = []
         checks = []
+        cpu_seconds = 0.0
         for _ in range(max(1, args.repeat)):
             # A sentinel before every run: a DMA that stops writing must not pass on what an earlier run left.
             paint_sentinel(cpu, plan, args.verify, args.samples, args.span, args.seed)
+            cpu_before = time.process_time()
             latencies, seconds = timed(lambda: read_all(source, buffer.view, plan, args.threads, plan['dest']['slice_offset']))
+            cpu_seconds += time.process_time() - cpu_before
             runs.append((seconds, latencies))
             checks.append(verify(source, cpu, plan, args.verify, args.samples, args.span, args.seed))
     finally:
@@ -695,7 +723,8 @@ def run_p2p(card, source, cpu, plan, args, info, report):
     report['p2p'] = {'bytes': args.size, 'seconds': median, 'gbps': gbps(args.size, median),
                      'best_gbps': gbps(args.size, seconds_all[0]), 'runs': len(runs), 'threads': args.threads,
                      'chunk': plan['chunk'], 'chunk_p50_ms': percentile(all_latencies, 0.5) * 1e3,
-                     'chunk_p99_ms': percentile(all_latencies, 0.99) * 1e3}
+                     'chunk_p99_ms': percentile(all_latencies, 0.99) * 1e3,
+                     'cpu_seconds': cpu_seconds, 'cpu_fraction': cpu_seconds / max(1e-9, sum(seconds_all))}
     merged = dict(checks[-1])
     merged['mismatches'] = [dict(item, run=number) for number, check in enumerate(checks, 1) for item in check['mismatches']][:8]
     merged['ok'] = None if checks[-1]['ok'] is None else all(check['ok'] for check in checks)
@@ -857,7 +886,7 @@ class MockWindow(object):
         self.card.events.append('pin')
         return self.card.pinnable
 
-    def cpu_window(self, size):
+    def cpu_window(self, size, uc=False):
         return MockCpu(self.card.dram, dead=self.card.selftest_fails)
 
     def close(self):
@@ -918,6 +947,1174 @@ class MockSource(Source):
         return done
 
 
+# -- the write arm: the card's DRAM -> the drive -----------------------------------------------------------------------
+#
+# The drive DMA-reads the card's DRAM through the p2pmem mapping (an O_DIRECT pwritev whose buffers are the mapping), into a scratch
+# range of a drive the operator named and owns. The bytes in the card were put there by the CPU through the TLB window from a
+# deterministic pattern; the probe reads the range back (O_DIRECT, into host memory) and compares. Every refusal that needs no hardware
+# is arithmetic or a sysfs read, and is made before the first DMA.
+
+SHARD_BYTES = 696320                 # one object's share on one card: 10 tensors x 69,632 B (170 pages of 4 KiB)
+OBJECT_BYTES = 4 * SHARD_BYTES       # one object over four cards: 2,785,280 B
+SUBRUN_BYTES = 8 * OBJECT_BYTES      # a spill sub-run of eight objects: 22,282,240 B
+WRITE_SIZES = (SHARD_BYTES, OBJECT_BYTES, SUBRUN_BYTES)
+WRITE_QDS = (1, 4, 8, 16, 32)       # QD 1 is the drain-bound measurement (one sub-run on its own); the sweep proper is 4 to 32
+NUM_BANKS = 8
+MIN_SCRATCH_START = 1 << 20          # the first MiB of a drive holds a partition table, a superblock, the DMA canary block
+GEN1_GTS = 2.5
+SOAK_BUCKET_SECONDS = 30.0
+PCI_FUNCTION = re.compile(r'^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$')
+AER_DEV_FILES = ('aer_dev_correctable', 'aer_dev_nonfatal', 'aer_dev_fatal')
+AER_ROOT_FILES = ('aer_rootport_total_err_cor', 'aer_rootport_total_err_nonfatal', 'aer_rootport_total_err_fatal')
+AER_CORRECTABLE = ('aer_dev_correctable', 'aer_rootport_total_err_cor')
+
+
+class StopRun(ProbeError):
+    """A condition that ends the DMA at once (a canary that does not match, bytes that differ, an uncorrectable AER error, a drive that is no
+    longer live, a spent write budget): the probe stops sending, records what happened and does not try again to see."""
+
+    def __init__(self, kind, message):
+        ProbeError.__init__(self, message)
+        self.kind = kind
+
+
+def parse_int_list(text):
+    """'1,4 8' -> [1, 4, 8] (sizes may carry K/M/G)."""
+    items = [parse_size(part) for part in str(text).replace(',', ' ').split()]
+    if not items:
+        raise ValueError('an empty list')
+    return items
+
+
+def read_text(path):
+    try:
+        with open(path) as handle:
+            return handle.read().strip()
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+# -- PCIe: the chain of functions between a device and the root, their links and their AER counters ---------------------
+
+def pci_chain(path):
+    """The PCI functions from the root port down to the one `path` is under, as directories (the sysfs real path of a device lists every
+    bridge above it as a path component named like a PCI address). [] when the path is not under a PCI function."""
+    parts = os.path.realpath(path).split(os.sep)
+    return [os.sep.join(parts[:index + 1]) for index, part in enumerate(parts) if PCI_FUNCTION.match(part)]
+
+
+def parse_gts(text):
+    """'16.0 GT/s PCIe' -> 16.0; None for 'Unknown speed' or nothing."""
+    found = re.match(r'\s*([0-9]+(?:\.[0-9]+)?)\s*GT/s', text or '')
+    return float(found.group(1)) if found else None
+
+
+def link_info(directory):
+    return {'bdf': os.path.basename(directory),
+            'speed_gts': parse_gts(read_text(os.path.join(directory, 'current_link_speed'))),
+            'max_gts': parse_gts(read_text(os.path.join(directory, 'max_link_speed'))),
+            'width': read_text(os.path.join(directory, 'current_link_width'))}
+
+
+def check_links(label, chain, endpoint_min_gts=0.0, allow_unknown=False):
+    """The links along `chain` (root port first, the device last). A link at 2.5 GT/s (Gen1) is refused whatever the flags: a drive that
+    trained there moves 0.8 GB/s and every figure the probe would report is worthless. A function whose speed cannot be read is refused
+    unless allow_unknown. The last function must also be at least endpoint_min_gts when that is set (the drive: 16 GT/s)."""
+    found = [link_info(directory) for directory in chain]
+    for index, link in enumerate(found):
+        speed = link['speed_gts']
+        if speed is not None and speed <= GEN1_GTS:
+            raise ProbeError('%s: %s trained at %.1f GT/s (Gen1): retrain the link (a drive behind a switch port needs the port\'s target speed '
+                             'set and a retrain) before any DMA; every rate measured on it would be 0.8 GB/s' % (label, link['bdf'], speed))
+        if speed is None and not allow_unknown:
+            raise ProbeError('%s: the speed of %s cannot be read (current_link_speed missing or unknown): cannot prove the link is not Gen1; '
+                             '--allow-unknown-link goes on' % (label, link['bdf']))
+        if index == len(found) - 1 and endpoint_min_gts and speed is not None and speed < endpoint_min_gts:
+            raise ProbeError('%s: %s runs at %.1f GT/s, below the %.1f GT/s the cache drive must hold (--min-drive-gts)' % (
+                label, link['bdf'], speed, endpoint_min_gts))
+    return found
+
+
+def parse_aer_counters(text):
+    counters = {}
+    for line in (text or '').splitlines():
+        fields = line.split()
+        if len(fields) == 2 and fields[1].isdigit():
+            counters[fields[0]] = int(fields[1])
+    return counters
+
+
+def read_aer(directory):
+    """Every AER counter file a function has: {file name: {counter: value}}; {} for a function without AER."""
+    found = {}
+    for name in AER_DEV_FILES:
+        text = read_text(os.path.join(directory, name))
+        if text is not None:
+            found[name] = parse_aer_counters(text)
+    for name in AER_ROOT_FILES:
+        text = read_text(os.path.join(directory, name))
+        if text is not None and text.split() and text.split()[0].isdigit():
+            found[name] = {'total': int(text.split()[0])}
+    return found
+
+
+def snapshot_aer(functions):
+    return {os.path.basename(directory): read_aer(directory) for directory in functions}
+
+
+def aer_delta(before, after):
+    """What grew between two snapshots. Correctable = aer_dev_correctable and the root port's correctable total; everything else
+    (non-fatal, which holds the completion timeout, and fatal) is uncorrectable. TOTAL_* lines repeat the counters above them and are not
+    summed. `measured` is False when no function had any AER counter in both snapshots (the kernel without AER, or no files), which is not a
+    clean bill."""
+    per_function = {}
+    correctable = uncorrectable = 0
+    measured = False
+    for bdf, files in after.items():
+        was = before.get(bdf, {})
+        grew = {}
+        for name, counters in files.items():
+            if name not in was:
+                continue
+            measured = True
+            for counter, value in counters.items():
+                if counter.startswith('TOTAL_'):
+                    continue
+                step = value - was[name].get(counter, value)
+                if step > 0:
+                    grew['%s.%s' % (name, counter)] = step
+                    if name in AER_CORRECTABLE:
+                        correctable += step
+                    else:
+                        uncorrectable += step
+        if grew:
+            per_function[bdf] = grew
+    return {'measured': measured, 'correctable': correctable, 'uncorrectable': uncorrectable, 'by_function': per_function}
+
+
+def nvme_states(function_directory):
+    """The state of every NVMe controller under a PCI function ('live' is the only good one)."""
+    states = []
+    base = os.path.join(function_directory, 'nvme')
+    try:
+        names = sorted(os.listdir(base))
+    except OSError:
+        return states
+    for name in names:
+        state = read_text(os.path.join(base, name, 'state'))
+        if state is not None:
+            states.append(state)
+    return states
+
+
+# -- the drive end -----------------------------------------------------------------------------------------------------
+
+class Sink(object):
+    """The drive (or a file standing in for it), opened O_DIRECT for writing and reading. A block device is opened O_EXCL as well, which
+    the kernel refuses (EBUSY) while anything mounts or holds it. `allow(start, end)` fences every write: nothing outside [start, end) is
+    ever written, whatever the caller computes."""
+
+    def __init__(self, path, direct=True):
+        self.path = path
+        self.direct = direct
+        flags = os.O_RDWR | (getattr(os, 'O_DIRECT', 0) if direct else 0)
+        if stat.S_ISBLK(os.stat(path).st_mode):
+            flags |= os.O_EXCL
+        self.fd = os.open(path, flags)
+        try:
+            info = os.fstat(self.fd)
+            self.is_block = stat.S_ISBLK(info.st_mode)
+            self.length = os.lseek(self.fd, 0, os.SEEK_END) if self.is_block else info.st_size
+            self.rdev = info.st_rdev if self.is_block else None
+        except OSError:
+            os.close(self.fd)
+            raise
+        self.fence = None
+        self.written = 0
+        self.lock = threading.Lock()
+
+    def allow(self, start, end):
+        self.fence = (start, end)
+
+    def sysfs_dir(self, sys_dev_block='/sys/dev/block'):
+        """The sysfs directory of the block device, or None (a regular file has none)."""
+        if not self.is_block:
+            return None
+        path = os.path.join(sys_dev_block, '%d:%d' % (os.major(self.rdev), os.minor(self.rdev)))
+        return os.path.realpath(path) if os.path.exists(path) else None
+
+    def pci_chain(self):
+        """The PCI functions above the drive. With NVMe multipath the visible namespace hangs off the subsystem, not off a PCI function, so
+        the controllers beside it are followed to theirs."""
+        block = self.sysfs_dir()
+        if not block:
+            return []
+        chain = pci_chain(block)
+        if chain:
+            return chain
+        subsystem = os.path.dirname(block)
+        try:
+            names = sorted(name for name in os.listdir(subsystem) if re.match(r'^nvme[0-9]+$', name))
+        except OSError:
+            return []
+        for name in names:
+            chain = pci_chain(os.path.join(subsystem, name))
+            if chain:
+                return chain
+        return []
+
+    def _check_fence(self, offset, nbytes):
+        if self.fence is None:
+            raise ProbeError('internal error: a write was attempted before the scratch range was fenced')
+        if offset < self.fence[0] or offset + nbytes > self.fence[1]:
+            raise ProbeError('internal error: a write of %d bytes at %d falls outside the scratch range [%d, %d): refused' % (
+                nbytes, offset, self.fence[0], self.fence[1]))
+
+    def write_iov(self, views, offset):
+        """pwritev of `views` (buffers of the p2pmem mapping, in order) at `offset`; a short write is continued."""
+        total = sum(len(view) for view in views)
+        self._check_fence(offset, total)
+        done = 0
+        pending = list(views)
+        temporary = []
+        try:
+            while True:
+                try:
+                    count = os.pwritev(self.fd, pending, offset + done)
+                except OSError as error:
+                    raise ProbeError('write of %d bytes at drive offset %d failed: %s%s' % (
+                        total - done, offset + done, error,
+                        ' (the kernel refused peer-to-peer DMA from this memory: see dmesg and p2p_topology.py)' if error.errno == 121 else '')) from error
+                if count <= 0:
+                    raise ProbeError('short write to the drive at %d (%d of %d bytes)' % (offset + done, done, total))
+                done += count
+                if done >= total:
+                    break
+                skip, rest = count, []
+                for view in pending:
+                    if skip >= len(view):
+                        skip -= len(view)
+                        continue
+                    if skip:
+                        view = view[skip:]
+                        temporary.append(view)
+                    rest.append(view)
+                    skip = 0
+                pending = rest
+        finally:
+            for piece in temporary:
+                piece.release()
+        with self.lock:
+            self.written += total
+        return total
+
+    def write_buf(self, view, offset):
+        return self.write_iov([view], offset)
+
+    def read_into(self, view, offset):
+        """O_DIRECT read exactly len(view) bytes at `offset` into `view` (page-aligned host memory)."""
+        total = len(view)
+        done = 0
+        while done < total:
+            rest = view[done:]
+            try:
+                count = os.preadv(self.fd, [rest], offset + done)
+            except OSError as error:
+                raise ProbeError('read of %d bytes at drive offset %d failed: %s' % (total - done, offset + done, error)) from error
+            finally:
+                rest.release()
+            if count <= 0:
+                raise ProbeError('short read from the drive at %d (%d of %d bytes)' % (offset + done, done, total))
+            done += count
+        return done
+
+    def close(self):
+        os.close(self.fd)
+
+
+def first_nonzero_in_range(sink, start, size, chunk=8 << 20):
+    """Offset (from `start`) of the first byte of the range that is not zero, or None. Reads the whole range with O_DIRECT."""
+    buffer = mmap.mmap(-1, chunk)
+    zeros = bytes(chunk)
+    try:
+        for done in range(0, size, chunk):
+            count = min(chunk, size - done)
+            with memoryview(buffer)[:count] as view:
+                sink.read_into(view, start + done)
+            if buffer[:count] != zeros[:count]:
+                block = next(index for index in range(0, count, PAGE) if buffer[index:index + PAGE] != zeros[:min(PAGE, count - index)])
+                return done + block + next(i for i, byte in enumerate(buffer[block:block + PAGE]) if byte)
+    finally:
+        buffer.close()
+    return None
+
+
+class Scratch(object):
+    """The range [start, start+size) the probe may write, handed out in order and wrapping, so a long run spreads over all of it."""
+
+    def __init__(self, start, size):
+        self.start, self.size, self.cursor = start, size, 0
+
+    def take(self, nbytes):
+        if nbytes > self.size:
+            raise ProbeError('the scratch range (%d bytes) is smaller than one batch (%d bytes)' % (self.size, nbytes))
+        if self.cursor + nbytes > self.size:
+            self.cursor = 0
+        offset = self.start + self.cursor
+        self.cursor += nbytes
+        return offset
+
+
+# -- what is in the card, and what the drive must therefore hold ---------------------------------------------------------
+
+def canary_page(seed, bank):
+    """The first page of a bank's region: a value no other bank has, repeated over the page."""
+    digest = hashlib.sha256(b'p2p-canary:%d:%d' % (seed, bank)).digest()
+    return digest * (PAGE // len(digest))
+
+
+def bank_pattern(seed, bank, size):
+    return random.Random('p2p-bank:%d:%d' % (seed, bank)).randbytes(size)
+
+
+def required_scratch(args):
+    """The smallest scratch range that holds the largest batch any arm writes."""
+    need = 0
+    if not args.no_sweep:
+        need = max(need, max(args.sizes) * max(args.qds))
+    if args.reaim:
+        need = max(need, args.reaim_ops * args.reaim_op_bytes)
+    if args.soak > 0:
+        need = max(need, args.soak_size * args.soak_qd)
+    return need
+
+
+def check_write_args(args):
+    """Every refusal that needs neither the card nor the drive."""
+    for name, values in (('--sizes', args.sizes), ('--qd', args.qds), ('--banks', args.banks)):
+        if not values:
+            raise ProbeError('%s is empty' % name)
+    for size in list(args.sizes) + [args.reaim_op_bytes, args.soak_size, args.iov_bytes]:
+        if size < 0 or size % PAGE:
+            raise ProbeError('size %d is not a multiple of the %d-byte sector O_DIRECT needs' % (size, PAGE))
+    if (not args.no_sweep and any(size <= 0 for size in args.sizes)) or (args.soak > 0 and args.soak_size <= 0):
+        raise ProbeError('--sizes and --soak-size must be positive')
+    if any(qd < 1 for qd in list(args.qds) + [args.soak_qd]):
+        raise ProbeError('a queue depth is at least 1')
+    if any(not 0 <= bank < NUM_BANKS for bank in list(args.banks) + [args.bank]):
+        raise ProbeError('a Blackhole has DRAM banks 0-7')
+    iov_max = 1024
+    for size in (list(args.sizes) if not args.no_sweep else []) + ([args.reaim_op_bytes] if args.reaim else []) + ([args.soak_size] if args.soak > 0 else []):
+        pieces = 1 if not args.iov_bytes else -(-size // args.iov_bytes)
+        if pieces > iov_max:
+            raise ProbeError('a %d-byte write in pieces of %d bytes is %d iovecs; the kernel takes %d' % (size, args.iov_bytes, pieces, iov_max))
+    if args.region % PAGE or args.region <= 0:
+        raise ProbeError('--region %d must be a positive multiple of %d' % (args.region, PAGE))
+    largest = max(([] if args.no_sweep else list(args.sizes)) + ([args.soak_size] if args.soak > 0 else []) or [0])
+    if args.region < largest:
+        raise ProbeError('--region %d must hold at least the largest write (%d)' % (args.region, largest))
+    if args.soak < 0 or args.arm_seconds < 0 or args.soak_max_gbps < 0 or args.max_write_gib <= 0:
+        raise ProbeError('--soak, --arm-seconds and --soak-max-gbps must not be negative, --max-write-gib must be positive')
+    if args.reaim and (args.reaim_rounds < 1 or args.reaim_ops < 1 or args.reaim_op_bytes < PAGE):
+        raise ProbeError('--reaim needs at least one round of at least one write of at least a page')
+    if args.no_sweep and not args.reaim and args.soak <= 0:
+        raise ProbeError('nothing to do: --no-sweep with neither --reaim nor --soak')
+    if args.own_scratch and (args.scratch_start is None or args.scratch_size is None):
+        raise ProbeError('--i-own-this-scratch-range needs the range itself: --scratch-start and --scratch-size')
+    if args.scratch_start is None or args.scratch_size is None:
+        raise ProbeError('--scratch-start and --scratch-size are required: the probe writes only to a range that was named')
+    if args.scratch_start % PAGE or args.scratch_size % PAGE or args.scratch_size <= 0:
+        raise ProbeError('the scratch range must start and be sized in multiples of %d bytes' % PAGE)
+    if args.scratch_start < MIN_SCRATCH_START:
+        raise ProbeError('the scratch range starts at %d: the first MiB of the drive holds its partition table or superblock and is never written' % args.scratch_start)
+    need = required_scratch(args)
+    if args.scratch_size < need:
+        raise ProbeError('the scratch range (%d bytes) is smaller than the largest batch (%d bytes = queue depth x write size): widen it or lower --qd/--sizes'
+                         % (args.scratch_size, need))
+    if args.cpu_map not in ('uc', 'wc'):
+        raise ProbeError('--cpu-map is uc or wc')
+
+
+def write_plan(args, info):
+    """The geometry of the card side: one region per bank, [canary page][data], at the same window offset in every bank. The bank the sweep
+    and the soak write from holds --region bytes of data (or what the re-aim arm needs, if more); the other banks hold what the re-aim arm
+    writes from them."""
+    reaim_data = args.reaim_ops * args.reaim_op_bytes if args.reaim else 0
+    primary = args.region if (not args.no_sweep or args.soak > 0) else 0
+    data_bytes = {bank: reaim_data for bank in (args.banks if args.reaim else [])}
+    data_bytes[args.bank] = max(primary, reaim_data, PAGE)
+    region = PAGE + max(data_bytes.values())
+    plan = make_plan(info, region, args.dest_offset, PAGE, 0, args.noc_x, args.noc_y, args.noc_addr, ORDERINGS[args.ordering])
+    plan['banks'] = {str(bank): {'noc': list(dram_bank_xy(bank)), 'data_bytes': data_bytes[bank]} for bank in sorted(data_bytes)}
+    plan['region_bytes'] = region
+    return plan, data_bytes
+
+
+# -- the write run -----------------------------------------------------------------------------------------------------
+
+class AerMonitor(object):
+    """AER counters of the card, the drive and every bridge between them and the root, read before the run, sampled during it and read
+    after it. An uncorrectable increment (non-fatal, which holds the completion timeout, or fatal) stops the DMA at once."""
+
+    def __init__(self, functions, drive_function=None):
+        self.functions = list(dict.fromkeys(functions))
+        self.drive_function = drive_function
+        self.before = snapshot_aer(self.functions)
+        self.last = None
+        self.samples = []
+        self.stamp = time.monotonic()
+
+    def delta(self):
+        return aer_delta(self.before, snapshot_aer(self.functions))
+
+    def check(self, force=False, interval=0.0):
+        if not force and time.monotonic() - self.stamp < interval:
+            return None
+        self.stamp = time.monotonic()
+        delta = self.delta()
+        self.last = delta
+        self.samples.append({'t': time.time(), 'correctable': delta['correctable'], 'uncorrectable': delta['uncorrectable']})
+        if delta['uncorrectable']:
+            raise StopRun('aer', 'uncorrectable PCIe AER error(s) appeared: %s' % json.dumps(delta['by_function'], sort_keys=True))
+        if self.drive_function:
+            states = nvme_states(self.drive_function)
+            if any(state != 'live' for state in states):
+                raise StopRun('drive', 'the NVMe controller is no longer live: %s' % states)
+        return delta
+
+
+class Budget(object):
+    def __init__(self, limit_bytes):
+        self.limit = limit_bytes
+        self.spent = 0
+
+    def spend(self, nbytes):
+        if self.spent + nbytes > self.limit:
+            raise StopRun('budget', 'the write budget (%.0f GiB, --max-write-gib) is spent: stopping before it is exceeded' % (self.limit / GIB))
+        self.spent += nbytes
+
+
+class Aimer(object):
+    """Aims the window at a DRAM bank and proves it: CONFIGURE_TLB is three posted register writes, so the proof is a CPU read of the
+    bank's canary through the window, a non-posted read from the same requester that cannot complete before the writes landed. The value must
+    be that bank's canary; if not, the window is somewhere else and no bio may be issued."""
+
+    def __init__(self, window, cpu, plan, canaries):
+        self.window, self.cpu, self.plan, self.canaries = window, cpu, plan, canaries
+        self.base = plan['dest']['window_offset']
+        self.bank = None
+        self.records = []
+
+    def aim(self, bank):
+        x, y = dram_bank_xy(bank)
+        noc = self.plan['noc']
+        began = time.perf_counter()
+        self.window.configure(x, y, noc['addr'], noc['ordering'])
+        configured = time.perf_counter()
+        got = self.cpu.read(self.base, 8)
+        done = time.perf_counter()
+        record = {'bank': bank, 'configure_ms': (configured - began) * 1e3, 'canary_ms': (done - configured) * 1e3, 'ok': got == self.canaries[bank][:8]}
+        self.records.append(record)
+        if not record['ok']:
+            record['matches_bank'] = [other for other, page in sorted(self.canaries.items()) if page[:8] == got]
+            raise StopRun('canary', 'after aiming the window at bank %d the canary read %s, which is %s: the window is not where it was aimed' % (
+                bank, got.hex(), 'bank %s\'s' % record['matches_bank'] if record['matches_bank'] else 'no bank\'s'))
+        self.bank = bank
+        return record
+
+
+class WriteRun(object):
+    """The state the arms share: the drive, the scratch range, the p2pmem mapping, the card-side patterns and the monitors."""
+
+    def __init__(self, args, sink, scratch, buffer, plan, patterns, aimer, aer, budget):
+        self.args, self.sink, self.scratch, self.buffer, self.plan = args, sink, scratch, buffer, plan
+        self.patterns, self.aimer, self.aer, self.budget = patterns, aimer, aer, budget
+        self.data_base = plan['dest']['slice_offset'] + PAGE
+        self.iov = args.iov_bytes
+        self.verify_on = args.write_verify == 'full'
+        self.sentinel = mmap.mmap(-1, 8 << 20)
+        self.sentinel[:] = bytes([SENTINEL]) * len(self.sentinel)
+        self.readback = None
+        self.p2w_bytes = 0
+        self.sentinel_bytes = 0
+        self.last_mismatch = None
+        self.cpu = {'threads': {}}
+        self.lock = threading.Lock()
+
+    def close(self):
+        for name in ('sentinel', 'readback'):
+            mapped = getattr(self, name)
+            if mapped is not None:
+                mapped.close()
+                setattr(self, name, None)
+
+    # one write: pieces of the mapping, in order, as the iovecs of one pwritev
+    def _one(self, op):
+        slice_offset, nbytes, drive_offset = op
+        began_cpu, began = time.thread_time(), time.perf_counter()
+        with contextlib.ExitStack() as stack:
+            piece = stack.enter_context(self.buffer.view[slice_offset:slice_offset + nbytes])
+            step = self.iov or nbytes
+            views = [stack.enter_context(piece[start:start + step]) for start in range(0, nbytes, step)]
+            self.sink.write_iov(views, drive_offset)
+        elapsed = time.perf_counter() - began
+        used = time.thread_time() - began_cpu
+        with self.lock:
+            ident = threading.get_ident()
+            self.cpu['threads'][ident] = self.cpu['threads'].get(ident, 0.0) + used
+        return elapsed
+
+    def batch(self, pool, ops):
+        """Run the writes concurrently; returns (wall seconds, per-write seconds). The bytes are charged to the budget first."""
+        total = sum(op[1] for op in ops)
+        self.budget.spend(total)
+        began = time.perf_counter()
+        latencies = list(pool.map(self._one, ops))
+        wall = time.perf_counter() - began
+        self.p2w_bytes += total
+        return wall, latencies
+
+    def paint(self, offset, nbytes):
+        """Overwrite [offset, +nbytes) of the scratch range with a sentinel, so a write that never happened cannot pass on what was there."""
+        done = 0
+        while done < nbytes:
+            count = min(nbytes - done, len(self.sentinel))
+            self.budget.spend(count)
+            with memoryview(self.sentinel)[:count] as view:
+                self.sink.write_buf(view, offset + done)
+            done += count
+        self.sentinel_bytes += nbytes
+
+    def verify(self, label, bank, drive_offset, nbytes, count, slots):
+        """Read `count` consecutive writes of `nbytes` back from `drive_offset` and compare each with the pattern of the card slot it came from
+        (write j came from slot j mod slots). Raises StopRun at the first difference, after recording where."""
+        if self.readback is None or len(self.readback) < nbytes:
+            if self.readback is not None:
+                self.readback.close()
+            self.readback = mmap.mmap(-1, max(nbytes, 1 << 20))
+        compared = 0
+        for index in range(count):
+            slot = index % slots
+            expected = memoryview(self.patterns[bank])[slot * nbytes:(slot + 1) * nbytes]
+            with memoryview(self.readback)[:nbytes] as view:
+                self.sink.read_into(view, drive_offset + index * nbytes)
+                if view != expected:
+                    raise StopRun('mismatch', self._mismatch(label, bank, index, slot, drive_offset + index * nbytes, view, expected))
+            expected.release()
+            compared += nbytes
+        return {'ops': count, 'bytes': compared, 'ok': True}
+
+    def _mismatch(self, label, bank, index, slot, drive_offset, view, expected):
+        nbytes = len(expected)
+        bad = [start for start in range(0, nbytes, PAGE) if view[start:start + PAGE] != expected[start:start + PAGE]]
+        pages = len(bad)
+        first = bad[0] + next(i for i in range(PAGE) if view[bad[0] + i] != expected[bad[0] + i])
+        record = {'arm': label, 'bank': bank, 'write': index, 'slot': slot, 'drive_offset': drive_offset + first, 'write_offset': first,
+                  'expected': expected[first], 'found': view[first], 'bad_pages': pages, 'pages': nbytes // PAGE,
+                  'found_is_sentinel': all(view[start] == SENTINEL for start in range(first, min(nbytes, first + 64)))}
+        self.last_mismatch = record
+        expected.release()
+        return 'bytes differ in %s (bank %d, write %d, slot %d): first at drive offset %d, expected %#04x found %#04x, %d of %d pages wrong%s' % (
+            label, bank, index, slot, record['drive_offset'], record['expected'], record['found'], pages, record['pages'],
+            ' (the sentinel: the drive wrote nothing there)' if record['found_is_sentinel'] else '')
+
+
+def summarize_latencies(latencies):
+    if not latencies:
+        return {'p50_ms': None, 'p99_ms': None, 'max_ms': None}
+    return {'p50_ms': percentile(latencies, 0.5) * 1e3, 'p99_ms': percentile(latencies, 0.99) * 1e3, 'max_ms': max(latencies) * 1e3}
+
+
+def run_arm(run, size, qd, seconds, min_batches):
+    """One cell of the sweep: batches of `qd` concurrent writes of `size` bytes from bank `args.bank`, for at least `seconds` of write time."""
+    args = run.args
+    bank = args.bank
+    slots = max(1, len(run.patterns[bank]) // size)
+    label = 'size %d qd %d' % (size, qd)
+    batches, wall_total, latencies = 0, 0.0, []
+    verified, compared = 0, 0
+    process_before = time.process_time()
+    threads_before = dict(run.cpu['threads'])
+    with concurrent.futures.ThreadPoolExecutor(max_workers=qd) as pool:
+        while True:
+            offset = run.scratch.take(qd * size)
+            if run.verify_on:
+                run.paint(offset, qd * size)
+            ops = [(run.data_base + (index % slots) * size, size, offset + index * size) for index in range(qd)]
+            wall, each = run.batch(pool, ops)
+            wall_total += wall
+            latencies += each
+            batches += 1
+            run.aer.check(force=False, interval=args.aer_interval)
+            if run.verify_on:
+                result = run.verify(label, bank, offset, size, qd, slots)
+                verified += result['ops']
+                compared += result['bytes']
+            if wall_total >= seconds and batches >= min_batches:
+                break
+    total = batches * qd * size
+    threads = [value - threads_before.get(ident, 0.0) for ident, value in run.cpu['threads'].items()]
+    cpu = time.process_time() - process_before
+    return dict({'size': size, 'iovecs': 1 if not run.iov else -(-size // run.iov), 'qd': qd, 'bank': bank, 'card_slots': slots,
+                 'batches': batches, 'writes': batches * qd, 'bytes': total, 'seconds': wall_total, 'gbps': gbps(total, wall_total),
+                 'cpu': {'process_seconds': cpu, 'worker_seconds': sum(threads), 'busiest_worker_seconds': max(threads) if threads else 0.0,
+                         'process_fraction_of_write_time': cpu / max(1e-9, wall_total)},
+                 'verify': {'mode': args.write_verify, 'writes': verified, 'bytes': compared, 'ok': True if run.verify_on else None}},
+                **{'write_' + key: value for key, value in summarize_latencies(latencies).items()})
+
+
+def bank_sequence(banks, rounds, seed):
+    """`rounds` banks drawn by shuffled passes over `banks`, never the same bank twice in a row when there is a choice."""
+    rng = random.Random('p2p-reaim:%d' % seed)
+    order = []
+    while len(order) < rounds:
+        passes = list(banks)
+        rng.shuffle(passes)
+        if order and len(passes) > 1 and passes[0] == order[-1]:
+            passes[0], passes[-1] = passes[-1], passes[0]
+        order += passes
+    return order[:rounds]
+
+
+def run_reaim(run):
+    """Re-aim the window to another bank, prove it with the canary, write a few objects from it, and read them back; many times over. The
+    writes of one round finish before the next re-aim, as the tier's I/O scheduler guarantees."""
+    args = run.args
+    order = bank_sequence(args.banks, args.reaim_rounds, args.seed)
+    size, count = args.reaim_op_bytes, args.reaim_ops
+    configure, canary, latencies = [], [], []
+    verified = 0
+    per_bank = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=count) as pool:
+        for bank in order:
+            record = run.aimer.aim(bank)
+            offset = run.scratch.take(count * size)
+            if run.verify_on:
+                run.paint(offset, count * size)
+            ops = [(run.data_base + index * size, size, offset + index * size) for index in range(count)]
+            _, each = run.batch(pool, ops)
+            latencies += each
+            if run.verify_on:
+                verified += run.verify('re-aim round bank %d' % bank, bank, offset, size, count, count)['bytes']
+            configure.append(record['configure_ms'])
+            canary.append(record['canary_ms'])
+            per_bank[str(bank)] = per_bank.get(str(bank), 0) + 1
+            run.aer.check(force=False, interval=args.aer_interval)
+    return dict({'rounds': len(order), 'banks': sorted(set(order)), 'rounds_per_bank': per_bank, 'canary_ok': len(order),
+                 'writes_per_round': count, 'write_size': size, 'bytes': len(order) * count * size,
+                 'configure_ms': {'p50': percentile(configure, 0.5), 'p99': percentile(configure, 0.99), 'max': max(configure)},
+                 'canary_read_ms': {'p50': percentile(canary, 0.5), 'p99': percentile(canary, 0.99), 'max': max(canary)},
+                 'verify': {'mode': args.write_verify, 'bytes': verified, 'ok': True if run.verify_on else None}},
+                **{'write_' + key: value for key, value in summarize_latencies(latencies).items()})
+
+
+def run_soak(run, minutes):
+    """Sustained writes for `minutes`: batches back to back, every Nth one painted first and verified after (the last one always), AER sampled
+    every --aer-interval seconds and the drive's state with it. Reports the write-only rate per 30 s bucket as well as overall, so a throttle
+    shows as a falling rate."""
+    args = run.args
+    size, qd, every = args.soak_size, args.soak_qd, max(1, args.soak_verify_every)
+    bank = args.bank
+    slots = max(1, len(run.patterns[bank]) // size)
+    end = time.monotonic() + minutes * 60.0
+    started = time.monotonic()
+    cycles, write_seconds, latencies, written = 0, 0.0, [], 0
+    buckets = {}
+    verified_cycles, compared = 0, 0
+    process_before = time.process_time()
+    threads_before = dict(run.cpu['threads'])
+    with concurrent.futures.ThreadPoolExecutor(max_workers=qd) as pool:
+        while True:
+            last = time.monotonic() >= end
+            check = run.verify_on and (last or cycles % every == every - 1)
+            offset = run.scratch.take(qd * size)
+            if check:
+                run.paint(offset, qd * size)
+            ops = [(run.data_base + (index % slots) * size, size, offset + index * size) for index in range(qd)]
+            wall, each = run.batch(pool, ops)
+            cycles += 1
+            write_seconds += wall
+            latencies += each
+            written += qd * size
+            slot = int((time.monotonic() - started) // SOAK_BUCKET_SECONDS)
+            bucket = buckets.setdefault(slot, [0, 0.0])
+            bucket[0] += qd * size
+            bucket[1] += wall
+            run.aer.check(force=False, interval=args.aer_interval)
+            if check:
+                compared += run.verify('soak cycle %d' % cycles, bank, offset, size, qd, slots)['bytes']
+                verified_cycles += 1
+            if last:
+                break
+            if args.soak_max_gbps > 0:
+                ahead = written / (args.soak_max_gbps * 1e9) - (time.monotonic() - started)
+                if ahead > 0:
+                    time.sleep(min(ahead, 5.0))
+    threads = [value - threads_before.get(ident, 0.0) for ident, value in run.cpu['threads'].items()]
+    wall = time.monotonic() - started
+    rates = [gbps(count, seconds) for _, (count, seconds) in sorted(buckets.items()) if seconds > 0]
+    return dict({'minutes': minutes, 'wall_seconds': wall, 'cycles': cycles, 'write_size': size, 'qd': qd, 'bank': bank, 'bytes': written,
+                 'write_seconds': write_seconds, 'gbps': gbps(written, write_seconds), 'effective_gbps': gbps(written, wall), 'paced_to_gbps': args.soak_max_gbps or None,
+                 'bucket_gbps': rates, 'min_bucket_gbps': min(rates) if rates else None,
+                 'cpu': {'process_seconds': time.process_time() - process_before, 'worker_seconds': sum(threads),
+                         'busiest_worker_seconds': max(threads) if threads else 0.0},
+                 'verify': {'mode': args.write_verify, 'cycles_verified': verified_cycles, 'every': every, 'bytes': compared,
+                            'ok': True if verified_cycles else None}},
+                **{'write_' + key: value for key, value in summarize_latencies(latencies).items()})
+
+
+def prove_banks(window, aimer, cpu, plan, canaries):
+    """Before any data goes into the card: write each bank's canary page, then aim at every bank again and read its canary back. A window
+    that does not move when told to (the same canary at every bank, or the wrong one) is found here, while only a page has been written."""
+    base = plan['dest']['window_offset']
+    noc = plan['noc']
+    for bank in sorted(canaries):
+        x, y = dram_bank_xy(bank)
+        window.configure(x, y, noc['addr'], noc['ordering'])
+        cpu.write(base, canaries[bank])
+    for bank in sorted(canaries):
+        aimer.aim(bank)
+
+
+def fill_banks(aimer, cpu, plan, patterns):
+    """Put each bank's data pattern into the card through the window (aim and prove the aim, write, read the ends back), after its canary
+    page. The region sits at the same window offset in every bank."""
+    base = plan['dest']['window_offset']
+    checked = {}
+    for bank in sorted(patterns):
+        aimer.aim(bank)
+        data = memoryview(patterns[bank])
+        try:
+            for start in range(0, len(data), 8 << 20):
+                cpu.write(base + PAGE + start, data[start:start + (8 << 20)])
+            tail = max(0, len(data) - PAGE)
+            first = cpu.read(base + PAGE, min(PAGE, len(data))) == bytes(data[:PAGE])
+            last = cpu.read(base + PAGE + tail, len(data) - tail) == bytes(data[tail:])
+        finally:
+            data.release()
+        checked[bank] = bool(first and last)
+        if not checked[bank]:
+            raise StopRun('fill', 'bank %d does not read back what was written into it through the window (first page %s, last page %s): '
+                                  'not writing it to the drive' % (bank, first, last))
+    return checked
+
+
+def run_write_probe(card, sink, args):
+    """The write flow, against a card and a drive (real or mock). Returns the report; raises ProbeError on a failed precondition (before
+    any DMA). From the first DMA on, a stop condition is recorded in the report (`aborted`) and the result is FAIL."""
+    check_write_args(args)
+    scratch_end = args.scratch_start + args.scratch_size
+    if scratch_end > sink.length:
+        raise ProbeError('the scratch range ends at %d, beyond the %d bytes of %s' % (scratch_end, sink.length, sink.path))
+    report = {'mode': 'write', 'notes': [NOTE_WRITE_FILL], 'sweep': [], 'reaim': None, 'soak': None, 'aborted': None, 'mismatch': None}
+    if sink.is_block:
+        reason = block_device_in_use(sink.path)
+        if reason:
+            raise ProbeError('refusing to write to %s: %s' % (sink.path, reason))
+    # the range must be blank, or the operator must say it is theirs
+    if args.own_scratch:
+        blank = None
+        report['notes'].append('--i-own-this-scratch-range: the range was not checked for content')
+    else:
+        found = first_nonzero_in_range(sink, args.scratch_start, args.scratch_size)
+        if found is not None:
+            raise ProbeError('the scratch range [%d, +%d) of %s is not blank (first non-zero byte at %d): the probe overwrites it. If it is yours to '
+                             'overwrite, pass --i-own-this-scratch-range with the same range' % (
+                                 args.scratch_start, args.scratch_size, sink.path, args.scratch_start + found))
+        blank = True
+    sink.allow(args.scratch_start, scratch_end)
+    report['scratch'] = {'target': sink.path, 'kind': 'block' if sink.is_block else 'file', 'start': args.scratch_start, 'size': args.scratch_size,
+                         'end': scratch_end, 'start_lba512': args.scratch_start // 512, 'blank': blank, 'owner_flag': bool(args.own_scratch),
+                         'device_bytes': sink.length}
+    # the drive's links, before the card is touched
+    drive_chain = sink.pci_chain()
+    if sink.is_block and not drive_chain and not args.allow_unknown_link:
+        raise ProbeError('no PCI function was found above %s: its link speed and AER counters cannot be read; --allow-unknown-link goes on' % sink.path)
+    if not drive_chain:
+        report['notes'].append('no PCI function was found above the target (a regular file?): the drive\'s link, state and AER counters were not checked')
+    drive_links = check_links('drive', drive_chain, args.min_drive_gts, args.allow_unknown_link) if drive_chain else []
+    drive_function = drive_chain[-1] if drive_chain else None
+    if drive_function and any(state != 'live' for state in nvme_states(drive_function)):
+        raise ProbeError('the NVMe controller of %s is not live: %s' % (sink.path, nvme_states(drive_function)))
+    info = card.p2pmem_info()
+    if info.get('in_use'):
+        raise ProbeError('the published slice is already allocated (p2pmem available is below its size): another process holds it')
+    plan, data_bytes = write_plan(args, info)
+    holders = [] if args.allow_shared else card.other_openers()
+    if holders:
+        raise ProbeError('the card is open in process(es) %s: nothing may hold it during the test (--allow-shared overrides)'
+                         % ', '.join(str(pid) for pid in holders))
+    patterns = {bank: bank_pattern(args.seed, bank, size) for bank, size in sorted(data_bytes.items())}
+    canaries = {bank: canary_page(args.seed, bank) for bank in patterns}
+    card_chain = card.pci_chain()
+    monitor = AerMonitor(list(card_chain) + list(drive_chain), drive_function)
+    report.update({'plan': plan, 'info': info, 'cpu_map': args.cpu_map, 'aer': {'before': monitor.before}})
+
+    card.power_up(args.settle)
+    report['links'] = {'drive': drive_links, 'card': check_links('card', card_chain, 0.0, args.allow_unknown_link) if card_chain else []}
+    window = card.acquire_window(plan['window'])
+    stack = contextlib.ExitStack()
+    stack.callback(window.close)
+    run = aimer = None
+    began = time.time()
+    try:
+        noc = plan['noc']
+        window.configure(noc['x'], noc['y'], noc['addr'], noc['ordering'])
+        report['pinned'] = window.pin()
+        if not report['pinned'] and not args.allow_unpinned:
+            raise ProbeError('the window could not be pinned with a dma-buf export (tt-kmd older than 2.10.0-rc1?): without the pin a close or FREE_TLB '
+                             'under a live mapping, or a reset, would not be stopped; --allow-unpinned goes on regardless')
+        cpu = window.cpu_window(WINDOW_4G, uc=args.cpu_map == 'uc')
+        window_selftest(cpu, dict(plan, dest=dict(plan['dest'], size=plan['region_bytes'])))
+        aimer = Aimer(window, cpu, plan, canaries)
+        try:
+            prove_banks(window, aimer, cpu, plan, canaries)
+            report['fill'] = fill_banks(aimer, cpu, plan, patterns)
+            buffer = card.p2p_buffer(info['size'])
+            stack.callback(buffer.close)
+            first_bus = buffer.bus_addr_of(0)
+            expected = card.expected_phys(info)
+            report['bus_addr_check'] = None if not first_bus or not expected else first_bus == expected
+            if report['bus_addr_check'] is False:
+                raise ProbeError('the mapping starts at physical address %#x, the slice at %#x: the DMA would not land where the TLB points' % (first_bus, expected))
+            run = WriteRun(args, sink, Scratch(args.scratch_start, args.scratch_size), buffer, plan, patterns, aimer, monitor,
+                           Budget(int(args.max_write_gib * GIB)))
+            stack.callback(run.close)
+            aimer.aim(args.bank)
+            if not args.no_sweep:
+                for size in args.sizes:
+                    for qd in args.qds:
+                        report['sweep'].append(run_arm(run, size, qd, args.arm_seconds, args.min_batches))
+                        monitor.check(force=True)
+            if args.reaim:
+                report['reaim'] = run_reaim(run)
+                monitor.check(force=True)
+            if args.soak > 0:
+                aimer.aim(args.bank)
+                report['soak'] = run_soak(run, args.soak)
+            monitor.check(force=True)
+        except StopRun as error:
+            report['aborted'] = {'kind': error.kind, 'message': str(error)}
+            report['mismatch'] = run.last_mismatch if run is not None and error.kind == 'mismatch' else None
+        except ProbeError as error:
+            report['aborted'] = {'kind': 'error', 'message': str(error)}
+        finally:
+            report['aer']['after'] = snapshot_aer(monitor.functions)
+            report['aer']['delta'] = monitor.delta()
+            report['aer']['samples'] = monitor.samples
+    finally:
+        report['bytes'] = {'p2w': run.p2w_bytes if run else 0, 'sentinel': run.sentinel_bytes if run else 0, 'written_to_drive': sink.written}
+        report['aims'] = aimer.records[-200:] if aimer else []
+        stack.close()
+    report['seconds'] = time.time() - began
+    return finish_write(report, args)
+
+
+def finish_write(report, args):
+    """The verdict. PASS needs every applicable condition True (the go/no-go of the design: byte-exact, no uncorrectable AER, a sustained rate,
+    a sub-run that drains inside the bound, a canary that matched after every re-aim); FAIL if any is False or the run stopped; UNVERIFIED if
+    one could not be measured (nothing compared, no AER counters)."""
+    verdict = {}
+    stopped = report['aborted']
+    verifies = [arm['verify'] for arm in report['sweep']] + [part['verify'] for part in (report['reaim'], report['soak']) if part]
+    if stopped and stopped['kind'] == 'mismatch':
+        verdict['byte_exact'] = False
+    elif args.write_verify == 'none' or not verifies:
+        verdict['byte_exact'] = None
+    else:
+        verdict['byte_exact'] = all(item['ok'] for item in verifies)
+    delta = report.get('aer', {}).get('delta')
+    verdict['no_uncorrectable_aer'] = None if delta is None or not delta['measured'] else delta['uncorrectable'] == 0
+    soak = report['soak']
+    deep = [arm['gbps'] for arm in report['sweep'] if arm['qd'] >= 4]          # queue depth 1 is the drain measurement, not a sustained load
+    rates = deep or [arm['gbps'] for arm in report['sweep']]
+    if soak or rates:
+        verdict['p2w_sustained_gbps'] = soak['gbps'] if soak else min(rates)
+        verdict['p2w_gbps_ok'] = verdict['p2w_sustained_gbps'] >= args.min_write_gbps
+    drain = [arm for arm in report['sweep'] if arm['size'] == SUBRUN_BYTES and arm['qd'] == 1]
+    if drain:
+        verdict['subrun_drain_ms'] = drain[0]['write_max_ms']
+        verdict['subrun_drain_ok'] = drain[0]['write_max_ms'] <= args.drain_ms
+    if args.reaim:
+        reaim = report['reaim']
+        if stopped and stopped['kind'] == 'canary':
+            verdict['reaim_canary_ok'] = False
+        else:
+            verdict['reaim_canary_ok'] = (reaim['canary_ok'] == reaim['rounds']) if reaim else None
+    flags = [value for key, value in verdict.items() if key.endswith('_ok') or key in ('byte_exact', 'no_uncorrectable_aer')]
+    verdict['go'] = all(value is True for value in flags) and not stopped
+    report['verdict'] = verdict
+    report['below_min_gbps'] = verdict.get('p2w_gbps_ok') is False
+    if stopped or any(value is False for value in flags):
+        report['result'] = FAIL
+    elif any(value is None for value in flags):
+        report['result'] = UNVERIFIED
+    else:
+        report['result'] = PASS
+    report['ok'] = report['result'] == PASS
+    return report
+
+
+VERIFY_WORDS = {True: 'OK', False: 'MISMATCH', None: 'skipped'}
+
+
+def emit_write(report, as_json):
+    if as_json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+        return
+    plan = report.get('plan', {})
+    scratch = report.get('scratch', {})
+    print('write arm: window %s, cpu map %s, %d bytes per bank at window offset %#x, banks %s' % (
+        plan.get('window'), report.get('cpu_map'), plan.get('region_bytes', 0), plan['dest']['window_offset'], ','.join(sorted(plan.get('banks', {})))))
+    print('scratch: %s [%d, +%d) lba512 %d, %s' % (scratch.get('target'), scratch.get('start', 0), scratch.get('size', 0), scratch.get('start_lba512', 0),
+                                                    'blank' if scratch.get('blank') else 'owner flag'))
+    for label, links in sorted(report.get('links', {}).items()):
+        if links:
+            print('links %-5s %s' % (label, ', '.join('%s %s GT/s x%s' % (link['bdf'], link['speed_gts'], link['width']) for link in links)))
+    for arm in report['sweep']:
+        print('write %9d B x%-2d qd %-2d %8.3f GB/s  op p50 %7.2f p99 %7.2f max %7.2f ms  cpu %5.2f cores  verify %s' % (
+            arm['size'], arm['iovecs'], arm['qd'], arm['gbps'], arm['write_p50_ms'], arm['write_p99_ms'], arm['write_max_ms'],
+            arm['cpu']['process_fraction_of_write_time'], VERIFY_WORDS[arm['verify']['ok']]))
+    if report['reaim']:
+        part = report['reaim']
+        print('re-aim %d rounds over banks %s: canary %d/%d, configure p50 %.3f max %.3f ms, canary read p50 %.3f max %.3f ms, verify %s' % (
+            part['rounds'], part['banks'], part['canary_ok'], part['rounds'], part['configure_ms']['p50'], part['configure_ms']['max'],
+            part['canary_read_ms']['p50'], part['canary_read_ms']['max'], VERIFY_WORDS[part['verify']['ok']]))
+    if report['soak']:
+        part = report['soak']
+        print('soak %.1f min: %d cycles, %.1f GB written, %.3f GB/s while writing (slowest 30 s bucket %s), %.3f GB/s overall, verify %s' % (
+            part['minutes'], part['cycles'], part['bytes'] / 1e9, part['gbps'],
+            '%.3f' % part['min_bucket_gbps'] if part['min_bucket_gbps'] is not None else 'n/a', part['effective_gbps'], VERIFY_WORDS[part['verify']['ok']]))
+    delta = report.get('aer', {}).get('delta')
+    if delta:
+        print('aer: %s, correctable +%d, uncorrectable +%d %s' % ('measured' if delta['measured'] else 'NOT MEASURED', delta['correctable'], delta['uncorrectable'],
+                                                                 json.dumps(delta['by_function'], sort_keys=True) if delta['by_function'] else ''))
+    if report['aborted']:
+        print('STOPPED (%s): %s' % (report['aborted']['kind'], report['aborted']['message']))
+    print('bytes: %.2f GB from the card to the drive, %.2f GB of sentinel' % (report['bytes']['p2w'] / 1e9, report['bytes']['sentinel'] / 1e9))
+    print('verdict: %s' % json.dumps(report['verdict'], sort_keys=True))
+    for note in report.get('notes', []):
+        print('note: %s' % note)
+    print('RESULT', report['result'])
+
+
+def estimate_writes(args, drive_gbps=7.0):
+    """An upper bound on what a run writes to the drive, assuming it can take `drive_gbps`: the sweep, the re-aim arm and the soak, the
+    sentinel included (so the operator can weigh it against the drive's endurance)."""
+    total = 0.0
+    if not args.no_sweep:
+        total += len(args.sizes) * len(args.qds) * args.arm_seconds * drive_gbps * 1e9 * 2
+    if args.reaim:
+        total += args.reaim_rounds * args.reaim_ops * args.reaim_op_bytes * 2
+    if args.soak > 0:
+        pace = args.soak_max_gbps if args.soak_max_gbps > 0 else drive_gbps
+        total += args.soak * 60 * min(pace, drive_gbps) * 1e9 * (1 + 1.0 / max(1, args.soak_verify_every))
+    return min(total, args.max_write_gib * GIB)
+
+
+def dry_run_write(args):
+    """The plan of a write run, from the arguments alone: no file is opened, no device read."""
+    info = {'bar': 4, 'offset': 0, 'size': 4 * GIB, 'bus_addr': 0, 'tlb_first': FIRST_4G_TLB, 'tlb_last': FIRST_4G_TLB}
+    if args.scratch_start is not None and args.scratch_size is not None:
+        check_write_args(args)
+    plan, data_bytes = write_plan(args, info)
+    arms = [] if args.no_sweep else [{'size': size, 'qd': qd, 'iovecs': 1 if not args.iov_bytes else -(-size // args.iov_bytes)}
+                                     for size in args.sizes for qd in args.qds]
+    return {'dry_run': True, 'mode': 'write', 'plan': plan, 'arms': arms,
+            'reaim': {'banks': args.banks, 'rounds': args.reaim_rounds, 'ops': args.reaim_ops, 'op_bytes': args.reaim_op_bytes} if args.reaim else None,
+            'soak': {'minutes': args.soak, 'size': args.soak_size, 'qd': args.soak_qd, 'max_gbps': args.soak_max_gbps or None} if args.soak > 0 else None,
+            'scratch': {'start': args.scratch_start, 'size': args.scratch_size, 'largest_batch': required_scratch(args), 'owner_flag': bool(args.own_scratch)},
+            'write_budget_gib': args.max_write_gib, 'estimated_writes_gib_at_most': estimate_writes(args) / GIB, 'cpu_map': args.cpu_map,
+            'note': 'a real run also refuses a range that is not blank (without --i-own-this-scratch-range), a link at 2.5 GT/s, a drive that is '
+                    'mounted or held, and a slice somebody else holds; none of that is looked at here'}
+
+
+# -- the mock banked card and a mock drive: the write flow, in memory -----------------------------------------------------
+
+def bank_of_xy(x, y):
+    for bank in range(NUM_BANKS):
+        if dram_bank_xy(bank)[0] == x and 0 <= y - dram_bank_xy(bank)[1] < 3:
+            return bank
+    raise ValueError('(%d, %d) is not a DRAM bank endpoint' % (x, y))
+
+
+FAKE_AER_CORRECTABLE = ('RxErr', 'BadTLP', 'BadDLLP', 'Rollover', 'Timeout', 'NonFatalErr', 'CorrIntErr', 'HeaderOF', 'TOTAL_ERR_COR')
+FAKE_AER_UNCORRECTABLE = ('Undefined', 'DLP', 'SDES', 'TLP', 'FCP', 'CmpltTO', 'CmpltAbrt', 'UnxCmplt', 'RxOF', 'MalfTLP', 'ECRC', 'UnsupReq',
+                          'ACSViol', 'UncorrIntErr', 'BlockedTLP', 'AtomicOpBlocked', 'TLPBlockedErr', 'PoisonTLPBlocked')
+
+
+def make_fake_sysfs(root, card_gts=32.0, drive_gts=16.0, state='live'):
+    """A tree shaped like sysfs for a card (root port, endpoint) and a drive (root port, switch up and down ports, endpoint), with link
+    speeds, zeroed AER counters and an NVMe controller. Returns the directories the probe needs."""
+    base = os.path.join(root, 'devices', 'pci0000:00')
+    card = [os.path.join(base, '0000:00:01.0'), None]
+    card[1] = os.path.join(card[0], '0000:01:00.0')
+    drive = [os.path.join(base, '0000:00:02.0')]
+    for name in ('0000:02:00.0', '0000:03:01.0', '0000:04:00.0'):
+        drive.append(os.path.join(drive[-1], name))
+    for chain, speed in ((card, card_gts), (drive, drive_gts)):
+        for index, directory in enumerate(chain):
+            os.makedirs(directory, exist_ok=True)
+            for name, text in (('current_link_speed', '%.1f GT/s PCIe' % speed), ('max_link_speed', '%.1f GT/s PCIe' % speed), ('current_link_width', '4')):
+                with open(os.path.join(directory, name), 'w') as handle:
+                    handle.write(text + '\n')
+            for name, counters in (('aer_dev_correctable', FAKE_AER_CORRECTABLE), ('aer_dev_nonfatal', FAKE_AER_UNCORRECTABLE + ('TOTAL_ERR_NONFATAL',)),
+                                   ('aer_dev_fatal', FAKE_AER_UNCORRECTABLE + ('TOTAL_ERR_FATAL',))):
+                with open(os.path.join(directory, name), 'w') as handle:
+                    handle.write(''.join('%s 0\n' % counter for counter in counters))
+            if index == 0:
+                for name in AER_ROOT_FILES:
+                    with open(os.path.join(directory, name), 'w') as handle:
+                        handle.write('0\n')
+    controller = os.path.join(drive[-1], 'nvme', 'nvme0')
+    block = os.path.join(controller, 'nvme0n1')
+    os.makedirs(block, exist_ok=True)
+    with open(os.path.join(controller, 'state'), 'w') as handle:
+        handle.write(state + '\n')
+    return {'card_chain': card, 'drive_chain': drive, 'block_dir': block}
+
+
+def anonymous_file(name, size):
+    """A descriptor for `size` bytes of memory nothing else can open: memfd_create where the C library has it, else an unlinked temporary file."""
+    if hasattr(os, 'memfd_create'):
+        fd = os.memfd_create(name)
+    else:
+        with tempfile.TemporaryFile() as handle:
+            fd = os.dup(handle.fileno())
+    os.ftruncate(fd, size)
+    return fd
+
+
+class MockBankedCard(MockCard):
+    """A card with eight DRAM banks, each a window onto one memfd, and a window that selects between them: what the CPU window and the
+    p2pmem mapping see is the bank the window was last aimed at (offset x of the slice is offset x of that bank). `fault`: 'stale-aim' (a
+    CONFIGURE_TLB after the first does not move the window), 'wrong-bank' (the CPU window follows the aim but the drive's DMA always reads
+    bank 0)."""
+
+    def __init__(self, bank_bytes=64 << 20, fault=None, window=FIRST_4G_TLB, sysfs=None, in_use=0, openers=(), slice_offset=0):
+        MockCard.__init__(self, slice_size=bank_bytes, slice_offset=slice_offset, window=window, fault=fault, in_use=in_use, openers=openers)
+        self.bank_bytes = bank_bytes
+        self.memfd = anonymous_file('p2p-fake-card', NUM_BANKS * bank_bytes)
+        self.banks = [mmap.mmap(self.memfd, bank_bytes, offset=bank * bank_bytes) for bank in range(NUM_BANKS)]
+        self.aimed = 0
+        self.configures = 0
+        self.stale_after = 1                 # the 'stale-aim' fault: CONFIGURE_TLB calls after this many are ignored
+        self.write_limit = {}                # bank -> offset beyond which CPU writes through the window are lost (a bank that does not store)
+        self.cpu_maps = []                   # the CPU mapping each window was asked for: 'uc' or 'wc'
+        self.tmp = None
+        if sysfs is None:
+            self.tmp = tempfile.TemporaryDirectory()
+            sysfs = make_fake_sysfs(self.tmp.name)
+        self.sysfs = sysfs
+        self.pci_dir = sysfs['card_chain'][-1]
+
+    def pci_chain(self):
+        return list(self.sysfs['card_chain'])
+
+    def acquire_window(self, wanted):
+        self.events.append('acquire_window')
+        if wanted in self.held_windows:
+            raise ProbeError('window %d is held by another process' % wanted)
+        return MockBankedWindow(self)
+
+    def p2p_buffer(self, size):
+        self.events.append('p2p_buffer')
+        return MockBankedBuffer(self)
+
+    def close(self):
+        for bank in self.banks:
+            try:
+                bank.close()
+            except BufferError:
+                pass
+        os.close(self.memfd)
+        if self.tmp is not None:
+            self.tmp.cleanup()
+
+
+class MockBankedWindow(MockWindow):
+    def configure(self, x, y, addr, ordering):
+        self.card.events.append('configure')
+        self.card.configured = (x, y, addr, ordering)
+        self.card.configures += 1
+        if self.card.fault == 'stale-aim' and self.card.configures > self.card.stale_after:
+            return
+        self.card.aimed = bank_of_xy(x, y)
+
+    def cpu_window(self, size, uc=False):
+        self.card.cpu_maps.append('uc' if uc else 'wc')
+        return MockBankedCpu(self.card, dead=self.card.selftest_fails)
+
+
+class MockBankedCpu(MockCpu):
+    def __init__(self, card, dead=False):
+        MockCpu.__init__(self, None, dead=dead)
+        self.card = card
+
+    def read(self, offset, size):
+        return bytes(size) if self.dead else bytes(self.card.banks[self.card.aimed][offset:offset + size])
+
+    def write(self, offset, data):
+        if self.dead:
+            return
+        limit = self.card.write_limit.get(self.card.aimed)
+        if limit is not None:
+            data = data[:max(0, limit - offset)]
+        self.card.banks[self.card.aimed][offset:offset + len(data)] = data
+
+
+class MockBankedBuffer(object):
+    """The p2pmem mapping: `view` shows the bank the window is aimed at (bank 0 under the 'wrong-bank' fault)."""
+
+    def __init__(self, card):
+        self.card = card
+        self.views = [memoryview(bank) for bank in card.banks]
+        self.size = card.slice_size
+        self.phys = 0x38000000000 + card.slice_offset
+
+    @property
+    def view(self):
+        return self.views[0 if self.card.fault == 'wrong-bank' else self.card.aimed]
+
+    def bus_addr_of(self, offset):
+        return self.phys + offset
+
+    def close(self):
+        for view in self.views:
+            view.release()
+
+
+class MockSink(Sink):
+    """A regular file as the drive (buffered: not every filesystem the tests run on takes O_DIRECT), with the drive's sysfs tree supplied by
+    the mock card. `fault`: 'flip' (one byte of the data lands wrong), 'drop' (a write is acknowledged and nothing is written)."""
+
+    def __init__(self, path, card=None, fault=None):
+        Sink.__init__(self, path, direct=False)
+        self.card = card
+        self.fault = fault
+        self.calls = 0
+
+    def sysfs_dir(self, sys_dev_block='/sys/dev/block'):
+        return self.card.sysfs['block_dir'] if self.card is not None else None
+
+    def pci_chain(self):
+        return list(self.card.sysfs['drive_chain']) if self.card is not None else []
+
+    def write_iov(self, views, offset):
+        with self.lock:
+            self.calls += 1
+            number = self.calls
+        if self.fault == 'drop' and number == 2:
+            self._check_fence(offset, sum(len(view) for view in views))
+            return sum(len(view) for view in views)
+        if self.fault == 'flip' and number == 2:
+            data = bytearray(b''.join(bytes(view) for view in views))
+            data[len(data) // 2] ^= 0xFF
+            with memoryview(data) as whole:
+                return Sink.write_iov(self, [whole], offset)
+        return Sink.write_iov(self, views, offset)
+
+
 # -- command line ------------------------------------------------------------------------------------------------------
 
 def build_parser():
@@ -955,14 +2152,55 @@ def build_parser():
     parser.add_argument('--extents', metavar='FILE', help='print FILE\'s FIEMAP extents and whether they are safe to read, and exit')
     parser.add_argument('--dry-run', action='store_true', help='print the plan; touch no device')
     parser.add_argument('--mock', action='store_true', help='run the flow against in-memory fakes')
-    parser.add_argument('--mock-fault', choices=('flip', 'misroute', 'stall'), help='with --mock: inject a defect the verify must catch')
+    parser.add_argument('--mock-fault', choices=('flip', 'misroute', 'stall', 'stale-aim', 'wrong-bank', 'drop'),
+                        help='with --mock: inject a defect the verify must catch (the last three are for --mode write)')
     parser.add_argument('--json', action='store_true', help='print the report as JSON only')
+    parser.add_argument('--json-out', metavar='FILE', help='also write the report as JSON to FILE')
+    write = parser.add_argument_group('write arm (--mode write): the drive DMA-reads the card\'s DRAM into a scratch range of a drive you own')
+    write.add_argument('--mode', choices=('read', 'write'), default='read', help='read: the drive into the card (the default). write: the card into the drive')
+    write.add_argument('--target', help='the drive (or a file standing in for it) the card\'s bytes are written to, opened O_DIRECT')
+    write.add_argument('--scratch-start', type=parse_size, help='first byte of the scratch range (multiple of 4096, at least 1M): the probe writes nowhere else')
+    write.add_argument('--scratch-size', type=parse_size, help='size of the scratch range; at least queue depth x write size of the largest arm')
+    write.add_argument('--i-own-this-scratch-range', dest='own_scratch', action='store_true',
+                       help='the range is not blank and the operator says it may be overwritten; needs --scratch-start and --scratch-size. '
+                            'Without it a range that is not all zeros is refused')
+    write.add_argument('--sizes', type=parse_int_list, default=list(WRITE_SIZES),
+                       help='bytes per write (one pwritev), comma separated (default 696320,2785280,22282240: a shard, an object, an 8-object sub-run)')
+    write.add_argument('--qd', dest='qds', type=parse_int_list, default=list(WRITE_QDS),
+                       help='writes in flight, comma separated (default 1,4,8,16,32; 1 is the drain-bound measurement)')
+    write.add_argument('--iov-bytes', type=parse_size, default=SHARD_BYTES, help='bytes per iovec inside a write (default 696320, one shard; 0 = one iovec)')
+    write.add_argument('--arm-seconds', type=float, default=2.0, help='write time per size x queue-depth cell (default 2)')
+    write.add_argument('--min-batches', type=int, default=2, help='batches per cell at least (default 2)')
+    write.add_argument('--region', type=parse_size, default=128 << 20, help='bytes of pattern put in the sweep bank of the card (default 128M)')
+    write.add_argument('--no-sweep', action='store_true', help='skip the size x queue-depth sweep (to run only --reaim and/or --soak)')
+    write.add_argument('--reaim', action='store_true', help='the re-aim arm: aim the window at each bank in turn, canary read after every aim, write, verify')
+    write.add_argument('--banks', type=parse_int_list, default=list(range(NUM_BANKS)), help='banks the re-aim arm visits (default 0-7)')
+    write.add_argument('--reaim-rounds', type=int, default=64, help='re-aims in the re-aim arm (default 64)')
+    write.add_argument('--reaim-ops', type=int, default=4, help='concurrent writes per aim epoch (default 4)')
+    write.add_argument('--reaim-op-bytes', type=parse_size, default=OBJECT_BYTES, help='bytes per write in the re-aim arm (default 2785280)')
+    write.add_argument('--soak', type=float, default=0.0, metavar='MINUTES', help='sustained writes for this many minutes, AER sampled throughout')
+    write.add_argument('--soak-size', type=parse_size, default=OBJECT_BYTES, help='bytes per write in the soak (default 2785280)')
+    write.add_argument('--soak-qd', type=int, default=8, help='writes in flight in the soak (default 8)')
+    write.add_argument('--soak-verify-every', type=int, default=4, help='paint and verify every Nth soak cycle, and the last (default 4)')
+    write.add_argument('--soak-max-gbps', type=float, default=2.0, help='pace the soak to this average rate, to spare the drive\'s endurance (default 2; 0 = unpaced)')
+    write.add_argument('--aer-interval', type=float, default=30.0, help='seconds between AER/drive-state samples inside an arm (default 30)')
+    write.add_argument('--write-verify', choices=('full', 'none'), default='full',
+                       help='full: paint a sentinel, write, read back and compare every byte; none: write only, the run ends UNVERIFIED')
+    write.add_argument('--max-write-gib', type=float, default=1024.0, help='stop before this many GiB have been written to the drive (default 1024)')
+    write.add_argument('--min-write-gbps', type=float, default=0.25, help='go/no-go: sustained write rate at least this (default 0.25)')
+    write.add_argument('--drain-ms', type=float, default=50.0, help='go/no-go: one 22282240-byte sub-run on its own finishes within this (default 50)')
+    write.add_argument('--cpu-map', choices=('uc', 'wc'), default='uc', help='CPU mapping of the window: uc (what the tier reads canaries through) or wc')
+    write.add_argument('--min-drive-gts', type=float, default=16.0, help='refuse a drive link slower than this many GT/s (default 16; 0 = only Gen1 is refused)')
+    write.add_argument('--allow-unknown-link', action='store_true', help='go on when a link speed or the drive\'s PCI function cannot be found (never for Gen1)')
     return parser
 
 
 def resolve_target(args):
     if args.noc_x is None or args.noc_y is None:
-        args.noc_x, args.noc_y = dram_bank_xy(args.bank)
+        try:
+            args.noc_x, args.noc_y = dram_bank_xy(args.bank)
+        except ValueError as error:
+            raise ProbeError(str(error)) from error
 
 
 def emit(report, as_json):
@@ -995,9 +2233,46 @@ def emit(report, as_json):
     print('RESULT', report['result'])
 
 
+def main_write(args):
+    """--mode write: dry-run plan, or the flow against a real card and drive, or against the mocks."""
+    resolve_target(args)
+    if args.dry_run:
+        print(json.dumps(dry_run_write(args), indent=2, sort_keys=True))
+        return 0
+    if not args.target:
+        raise ProbeError('--target is required (the drive, or a file standing in for it, that the card\'s bytes are written to)')
+    if args.mock:
+        args.settle = 0
+        need = args.dest_offset + 2 * PAGE + max(args.region, args.reaim_ops * args.reaim_op_bytes)
+        card = MockBankedCard(bank_bytes=max(64 << 20, -(-need // PAGE) * PAGE), fault=args.mock_fault)
+        sink = MockSink(args.target, card=card, fault=args.mock_fault)
+    else:
+        if os.geteuid() != 0:
+            raise ProbeError('run as root: the p2pmem allocation, the TLB ioctls and the raw drive all need it')
+        sink = Sink(args.target)
+        try:
+            card = TtCard(args.device)
+        except OSError:
+            sink.close()
+            raise
+    try:
+        report = run_write_probe(card, sink, args)
+    finally:
+        sink.close()
+        card.close()
+    if args.json_out:
+        with open(args.json_out, 'w') as handle:
+            json.dump(report, handle, indent=2, sort_keys=True)
+            handle.write('\n')
+    emit_write(report, args.json)
+    return EXIT_CODES[report['result']]
+
+
 def main(argv=None):
     args = build_parser().parse_args(argv)
     try:
+        if args.mode == 'write':
+            return main_write(args)
         if args.prepare:
             prepare_source(args.prepare, args.size, args.seed, args.overwrite_device, args.overwrite_file)
             print('wrote %d bytes to %s' % (args.size, args.prepare))
