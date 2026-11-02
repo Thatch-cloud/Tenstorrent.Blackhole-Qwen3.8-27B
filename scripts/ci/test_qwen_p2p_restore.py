@@ -1444,7 +1444,8 @@ class ExtensionSourceTests(unittest.TestCase):
         return scope['op']
 
     def test_the_parameters_of_the_two_ops(self):
-        self.assertEqual(self.parameters('qwen_write_blocks_from_staging'), ['device_tensor', 'staging', 'byte_offset', 'blocks', 'bank', 'row_stride'])
+        # version 4 of the extension (the Gemma branch): the frozen interface's order, with the bank before the offset and the block geometry and queue after the stride
+        self.assertEqual(self.parameters('qwen_write_blocks_from_staging'), ['tensor', 'staging', 'bank', 'byte_offset', 'blocks', 'row_stride', 'pages_per_block', 'cq_id'])
         self.assertEqual(self.parameters('qwen_staging_checksum'), ['staging', 'byte_offset', 'length', 'bank', 'cores', 'count'])
 
     def test_staging_api_finds_the_strided_mode_against_those_signatures(self):
@@ -1455,8 +1456,8 @@ class ExtensionSourceTests(unittest.TestCase):
         self.assertEqual((api.strided, api.ranged, api.mode), (True, True, 'strided'))
 
     def test_the_extension_without_them_is_compat(self):
-        write = self.function_with(self.parameters('qwen_write_blocks_from_staging')[:-1], 4)
-        checksum = self.function_with(self.parameters('qwen_staging_checksum')[:-1], 3)
+        write = self.function_with([name for name in self.parameters('qwen_write_blocks_from_staging') if name != 'row_stride'], 4)
+        checksum = self.function_with([name for name in self.parameters('qwen_staging_checksum') if name != 'count'], 3)
         ttnn = types.SimpleNamespace(qwen_p2p_staging_alloc=lambda *a, **k: 1, qwen_p2p_staging_info=lambda *a, **k: [], qwen_write_blocks_from_staging=write, qwen_staging_checksum=checksum)
         api = p2p.StagingApi(ttnn, 'mesh', [1])
         self.assertEqual((api.strided, api.ranged, api.mode), (False, False, 'compat'))

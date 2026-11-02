@@ -1,4 +1,4 @@
-"""pin_kvread.build_problems for version 3 of the qwen_kv_read extension (the P2P restore's device ops and the kernels shipped beside the .so).
+"""pin_kvread.build_problems for version 3 and later of the qwen_kv_read extension (the P2P device ops and the kernels shipped beside the .so).
 
 Run from scripts/ci:  python3 -B -m unittest test_pin_kvread_p2p"""
 
@@ -52,7 +52,7 @@ class Version3BuildTests(unittest.TestCase):
         self.assertIn('not version 3', problems[0])
 
     def test_a_missing_or_changed_kernel_is_refused(self):
-        fake_build(self.directory, files=['qwen_p2p_plan.hpp', 'qwen_p2p_checksum.cpp'])
+        fake_build(self.directory, files=['qwen_p2p_plan.hpp', 'qwen_p2p_checksum.cpp', 'qwen_p2p_gather.cpp', 'qwen_p2p_digest_rows.cpp'])
         problems = pin_kvread.build_problems(self.directory, CPP)
         self.assertEqual(len(problems), 1)
         self.assertIn('qwen_p2p_scatter.cpp', problems[0])
