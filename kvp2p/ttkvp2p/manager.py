@@ -288,7 +288,7 @@ class NvmeKVManager(OffloadingManager):
         self._lru.clear()
 
     def _freeze(self) -> float:
-        """The pass's "now" for the TTL: refreshed by the first lookup, touch or prepare_load of a pass (or by ``on_schedule_end``), held until
+        """The pass's "now" for the TTL: refreshed by the first lookup or prepare_load of a pass (or by ``on_schedule_end``), held until
         ``on_schedule_end`` ends the pass. Only those calls arm it: calls that vLLM makes AFTER ``on_schedule_end`` in the same pass
         (``prepare_store``, ``touch``, ``on_request_finished``, the completions) must not, or the next pass would start from a stale
         time (after an idle engine, by the length of the idle)."""
