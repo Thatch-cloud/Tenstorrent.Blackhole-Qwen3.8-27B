@@ -17,6 +17,8 @@ This directory holds the connector side:
 | `ttkvp2p/store.py` | the drive store, v1a: superblocks, geometry, the exclusive drive open, discard (standard library only) |
 | `ttkvp2p/health.py` | the start-up host checks, the status-file reader, the control-directory parser, the state-file writer (standard library only) |
 | `ttkvp2p/claim.py` | the claim tool, the only writer of a superblock; owner-run, never automatic (standard library only) |
+| `ttkvp2p/cardlink.py` | `CardLink`: one card's end of the peer-to-peer path. TLB window 202 (re-aimed per staging bank, every aim proved by a canary read), the uncached CPU mapping, the mapping of the published slice, bounds-checked per-object `slot_view`s |
+| `ttkvp2p/p2pio.py` | `P2PIO`: the drive side, both directions. Aim epochs, restore first, bounded spill sub-runs, vectored O_DIRECT `preadv` / `pwritev` with hard iovec bounds, the DMA canary |
 
 Importing any of the connector-side modules imports neither `ttnn` nor the device extension, starts no thread and opens nothing: the API-server process
 imports the connector class to decide whether the hybrid KV cache manager can stay on.
@@ -180,6 +182,64 @@ through the real scheduler), and `complete_store` attaches the digests by key po
 exactly the signature above (`A1Manager`, which raises on any call the amendment does not allow) and a slot-permuting one (`PermutingKVManager`:
 key `i` gets neither the i-th allocated slot nor a monotone one), and check that every key ends up with the digest of its own object and
 restores exactly.
+
+## The drive side: `CardLink` and `P2PIO` (WP2b)
+
+Both are stdlib only (no numpy, no vLLM, no ttnn) and are imported by the production wiring at start-up (`worker.default_backend_factory`).
+
+**Geometry.** One *object* is one KV block of one group: four *shards* of `shard_object_bytes` (696,320 for Gemma), one per card, laid out on the drive as
+`[shard 0][shard 1][shard 2][shard 3]`. Each card's staging bank holds a 4 KiB canary page and then the slot's objects, so object `j` of a slot is at
+`canary + 4096 + j * shard_object_bytes` on every card. One `preadv` / `pwritev` covers one contiguous run of objects and its iovecs are, per object, shard 0..3
+(the cards' `slot_view`s), so the drive offset of every byte follows from the iovec order.
+
+**The window.** Window 202 of each card is the only way to reach a bank, so it is *aimed* at one bank at a time and all four cards at the same bank (an *aim epoch*).
+`CardLink.aim(bank)` is `CONFIGURE_TLB` followed by an 8-byte non-posted read of that bank's canary page through the uncached mapping; any other value raises
+`CanaryMismatch` and the link is unusable. `CardLink.open` writes a fresh canary page (a per-open random nonce) into **every** bank and reads them all back
+before any data is stored. `begin_io` / `end_io` count the bios in flight on a card: `aim` refuses while there is one, and `begin_io` refuses an I/O that was
+planned for an older aim. Every CPU access to the uncached window is one aligned 8-byte load or store (`ops.words`, a `Q` view of the mapping), never a `memcpy` of
+the range; `open` waits `settle_s` (default 1 s, as the Qwen link does) after the power state; the published slice must start on a page boundary.
+
+**Scheduling.** `P2PIO` has one scheduler thread and `io_threads` I/O threads (`kvp2p-sched`, `kvp2p-io_N`, for the per-thread CPU gate). A call for the bank of the
+current epoch runs (up to `io_queue_depth_objects` objects and `io_threads` calls in flight); a call for another bank waits until everything in flight has returned,
+then all four cards are re-aimed. Restore (`read_piece`) is served before spill (`write_subrun`, at most `spill_subrun_objects` objects, so the drain is bounded).
+The two directions use disjoint banks. `stats()` reports the aims, the longest aim, and how long a restore waited behind a spill (the drain the W1 probe bounds).
+
+**What `P2PIO` asks of the runtime** (the names `KVP2PRuntime` has): `runtime.drive.fd` (the open descriptor of the cache drive, which the runtime opened exclusively),
+`runtime.store.data_off` / `num_slots` / `object_bytes` (the data region), optionally `runtime.canary_offset`, and `runtime.latch(reason)`. The layer never opens the
+device itself, never guesses a data region (a runtime that states none, or objects of another size, is refused and the tier stays UNAVAILABLE), and refuses a
+descriptor that is not open O_DIRECT (buffered I/O would make the CPU copy the cards' BAR pages; only a test passes `allow_buffered`).
+
+**Bounds.** Before every syscall each iovec is checked against the plan (the card is the shard's card, the buffer is exactly where the slot of that bank has the
+object, the windows are aimed at the call's bank in the call's epoch), and the drive range against the data region the runtime states (never the superblock or the
+DMA canary block). A violation raises `BoundsViolation`, issues no syscall and stops the layer. Once the layer is dead nothing more is issued, not even a call that
+was already decided.
+
+**Futures.** A future resolves only when no call of its request is still in flight: the worker releases the bank and the slots' in-flight counts when it sees the
+future done. This matters when a request is cut into several calls (`restore_run_objects` shorter than the run).
+
+**Threads.** The layer's own threads never call into the runtime (the runtime belongs to the engine thread). A fault found there stops the layer and is recorded in
+`P2PIO.dead`, a reason that begins `P2PIO bounds violation` (the runtime files that text under the `bounds_violation` latch code); the worker reads it at its next
+`service` and latches the tier from the engine thread. A fault found on the caller's thread (a bad request, the start-up DMA canary) is latched there.
+
+**Not proven on a card** (the W1 kit settles each; the CPU tests use a fake kernel and cannot): the uncached mapping of window 202 (only write-combining ran on a
+card), that an 8-byte non-posted read cannot complete before the posted `CONFIGURE_TLB` writes landed, that the card accepts the 8-byte accesses and the ordering value
+`relaxed` for the canary writes, that `O_DIRECT` `preadv` / `pwritev` accept iovecs from four cards' p2pmem mappings in one call, and the sysfs file names under
+`p2pmem`. Only the bank's first NOC endpoint is used; the Qwen link fell back to the bank's other endpoints when the first did not store. This module fails closed
+instead, so the risk is availability, not safety.
+
+**Errors.** The future of a call carries the drive's `OSError` with its `errno` (EIO / EILSEQ are what the worker counts as media errors); a short count is continued;
+an end of file is `P2PShortIO` (no errno).
+
+**Tests** (`tests/fake_card.py` is a fake tt-kmd, four fake cards whose p2pmem mapping and CPU window alias whichever bank the window is aimed at, and a real file as
+the drive, opened O_DIRECT where the file system allows it):
+
+```sh
+PYTHONPATH=kvp2p python3 -m unittest discover -s kvp2p/tests -p 'test_cardlink.py'      # stdlib only
+PYTHONPATH=kvp2p python3 -m unittest discover -s kvp2p/tests -p 'test_p2pio.py'         # stdlib only
+PYTHONPATH=kvp2p python3 -m unittest discover -s kvp2p/tests -p 'test_p2pio_mutants.py' # the safety checks, weakened one at a time (~1 min)
+```
+
+`test_wp4_wiring.py` drives the WP4 factory against the real modules (and the worker's latch from `P2PIO.dead`) and needs the vLLM environment.
 
 ## What the model runner calls, in this order
 

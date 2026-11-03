@@ -556,6 +556,16 @@ class TTP2PWorker(OffloadingWorker):
                 logger.exception('ttkvp2p: runtime.latch failed')
         self._fail_all(R_LATCHED)
 
+    def _check_io_layer(self) -> None:
+        """P2PIO stops itself after a bounds or canary fault found on its own threads, and does not call into the runtime from there (I7: the runtime belongs to the
+        engine thread). Its reason is ``io.dead``; the tier is latched here, on the engine thread, with that reason (it begins "P2PIO bounds violation", which the
+        runtime files under the bounds_violation code)."""
+        if self._latched:
+            return
+        dead = getattr(self.be.io, 'dead', None)
+        if isinstance(dead, str) and dead:
+            self._latch(dead)
+
     def _fail_all(self, reason: str) -> None:
         for job in list(self._order):
             if job.state == ACTIVE:
@@ -1047,6 +1057,7 @@ class TTP2PWorker(OffloadingWorker):
     def service(self, *, budget_objects: Optional[int], idle_wait_ms: float) -> None:
         now = self._clock()
         self._reap_runs()
+        self._check_io_layer()
         self._poll_holds()
         state = self.rt.state
         if (self._closing or self._latched or state != STATE_AVAILABLE) and self._order:
