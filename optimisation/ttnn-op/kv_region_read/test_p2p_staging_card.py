@@ -77,18 +77,56 @@ class FakeEvent(object):
 
 
 class FakeMesh(object):
-    pass
+    """An open mesh. `shape` is what ttnn.MeshShape gives: production opens (devices, 1)."""
+
+    def __init__(self, shape=(DEVICES, 1)):
+        self.shape = shape
 
 
 class FakeTTNN(object):
     """Version 4 of the extension on numpy. The knobs are the mistakes the card check must catch."""
-    bfloat8_b, TILE_LAYOUT, DRAM_MEMORY_CONFIG = 'bfloat8_b', 'TILE', 'DRAM'
+    bfloat8_b, bfloat16, TILE_LAYOUT, DRAM_MEMORY_CONFIG = 'bfloat8_b', 'bfloat16', 'TILE', 'DRAM'
     QwenP2PRefused = Refused
 
     def __init__(self, devices=DEVICES, **knobs):
         self.devices = devices
         self.knobs = knobs
         self.staging = []
+        self.tracing = False
+        self.trace_log = []                          # 'begin' / 'end' / 'release', in order
+        self.adds = 0
+
+    # --- the trace API of ttnn, and the one ordinary op the check puts into a capture
+    def begin_trace_capture(self, mesh, cq_id=0):
+        assert not self.tracing, 'a capture is already running'
+        self.tracing = True
+        self.trace_log.append('begin')
+        return 7
+
+    def end_trace_capture(self, mesh, trace_id, cq_id=0):
+        assert self.tracing and trace_id == 7
+        self.tracing = False
+        self.trace_log.append('end')
+
+    def release_trace(self, mesh, trace_id):
+        assert not self.tracing, 'released while the capture was still running'
+        self.trace_log.append('release')
+
+    def add(self, a, b):
+        self.adds += 1
+        if self.tracing and self.knobs.get('add_fails_in_capture'):
+            raise RuntimeError('the op in the capture failed')
+        return FakeCache((1, 1, 32, 32), self.devices, {})
+
+    def _trace_check(self, op):
+        """Every op that enqueues refuses while a capture runs (the knobs are the mistakes: one op that does not, one that says something else, one of the wrong type)."""
+        if not self.tracing or self.knobs.get('trace_unrefused') == op:
+            return
+        if self.knobs.get('trace_wrong_type'):
+            raise RuntimeError('%s: a device error' % op)
+        if self.knobs.get('trace_other_reason'):
+            raise Refused('%s: the staging buffer is frozen' % op)
+        raise Refused('%s: refused while a trace is being captured on command queue 0' % op)
 
     def empty(self, shape, dtype=None, layout=None, device=None, memory_config=None):
         return FakeCache(shape, self.devices, self.knobs)
@@ -106,6 +144,7 @@ class FakeTTNN(object):
         cache.data[:, list(blocks)] = data
 
     def qwen_p2p_staging_alloc(self, mesh, bytes_per_bank, bottom_up=False, page_bytes=65536):
+        self._trace_check('alloc')
         problem = ref.check_staging(bytes_per_bank, page_bytes, 8, 4 << 30)
         if problem:
             raise Refused(problem)
@@ -118,7 +157,16 @@ class FakeTTNN(object):
         lead = (4096 - address % 4096) % 4096
         banks = [dict(bank=b, noc_x=17 + b // 4, noc_y=12 + 3 * (b % 4), noc_endpoints=[[17 + b // 4, 12 + 3 * (b % 4) + p] for p in range(3)], bank_offset=0,
                       address=address) for b in range(8 - (1 if self.knobs.get('short_banks') else 0))]
-        devices = [dict(mesh_coord=[0, d], mesh_index=d, device_id=d, pcie_device=d, pci_bus_id='0000:%02x:00.0' % (0x10 + d)) for d in range(self.devices)]
+        coordinate = (lambda d: [0, d]) if self.knobs.get('wrong_coords') else (lambda d: [d, 0])       # the production mesh is (devices, 1)
+        # the tt-kmd device number is NOT the logical chip id (the mock cluster says chip 0 is device 1): the fake permutes it too
+        devices = [dict(mesh_coord=coordinate(d), mesh_index=d, device_id=d, mmio_chip_id=d, pcie_device=(d + 1) % self.devices, pci_bus_id='0000:%02x:00.0' % (0x10 + d),
+                        pci_bus_id_source='cluster_descriptor', pci_bus_id_sysfs='0000:%02x:00.0' % (0x10 + d), pci_bus_id_agrees=True) for d in range(self.devices)]
+        if self.knobs.get('pci_none'):
+            devices[2].update(pci_bus_id=None, pci_bus_id_source=None, pci_bus_id_sysfs=None, pci_bus_id_agrees=None)
+        if self.knobs.get('kmd_none'):
+            devices[1].update(pcie_device=None)
+        if self.knobs.get('pci_disagree'):
+            devices[3].update(pci_bus_id_sysfs='0000:%02x:00.0' % (0x20 + 3), pci_bus_id_agrees=False)
         if self.knobs.get('short_info'):
             devices = devices[:-1]
         return dict(address=address, size=staging.size_bytes, page_bytes=staging.page_bytes, aligned_4k_offset=lead, aligned_4k_address=address + lead,
@@ -130,14 +178,17 @@ class FakeTTNN(object):
             raise Refused('byte_offset and the per-device length must be multiples of the staging page size and inside the range')
 
     def qwen_p2p_staging_write(self, staging, offset, data, bank=None):
+        self._trace_check('staging_write')
         self._region(staging, offset, data.shape[1])
         staging.bank(0 if bank is None else bank)[:, offset:offset + data.shape[1]] = data
 
     def qwen_p2p_staging_read(self, staging, offset, out, bank=None):
+        self._trace_check('staging_read')
         self._region(staging, offset, out.shape[1])
         out[:] = staging.bank(0 if bank is None else bank)[:, offset:offset + out.shape[1]]
 
     def qwen_staging_checksum(self, staging, offset, length, bank=None, cores=64, count=None):
+        self._trace_check('oracle_checksum')
         problem = ref.check_checksum(offset, length, staging.size_bytes, cores, 1 if count is None else count)
         if problem:
             raise Refused(problem)
@@ -173,6 +224,7 @@ class FakeTTNN(object):
         return blocks
 
     def qwen_blocks_to_staging(self, cache, staging, bank, byte_offset, blocks, row_stride, pages_per_block, cq_id=0):
+        self._trace_check('gather')
         blocks = self._rows_call('gather', cache, staging, bank, byte_offset, blocks, row_stride, pages_per_block, cq_id, False)
         use = (bank + 1) % 8 if self.knobs.get('gather_wrong_bank') else bank
         stride = cache.data.shape[2] if self.knobs.get('gather_stride_ignored') else row_stride
@@ -184,6 +236,7 @@ class FakeTTNN(object):
                 data[:, byte_offset + i * stride + cache.data.shape[2]:byte_offset + i * stride + cache.data.shape[2] + 64] = 0
 
     def qwen_write_blocks_from_staging(self, cache, staging, bank, byte_offset, blocks, row_stride, pages_per_block, cq_id=0):
+        self._trace_check('scatter')
         blocks = self._rows_call('scatter', cache, staging, bank, byte_offset, blocks, row_stride, pages_per_block, cq_id, True)
         data = staging.bank(bank)
         rows = np.stack([data[:, byte_offset + i * row_stride:byte_offset + i * row_stride + cache.data.shape[2]] for i in range(len(blocks))], axis=1).copy()
@@ -198,6 +251,7 @@ class FakeTTNN(object):
             cache.data[:, 3] = rows[:, 0]
 
     def qwen_blocks_digest_async(self, caches, blocks, pages_per_block, cq_id=0):
+        self._trace_check('digest')
         blocks = list(blocks)
         if not caches or len(caches) > 16 or not blocks or len(blocks) > 128:
             raise Refused('count')
@@ -225,9 +279,11 @@ class FakeTTNN(object):
         return FakeDigest(values, 3 if self.knobs.get('slow_digest', True) else 0)
 
     def qwen_p2p_record_event(self, mesh, cq_id=0):
+        self._trace_check('event')
         return FakeEvent(self.knobs.get('event_never'))
 
     def qwen_p2p_warm(self, staging, tensors, null_block=0, bank=0, byte_offset=None, cq_id=0):
+        self._trace_check('warm')
         for cache in tensors:
             staging.keys.add(cache.pages)
         staging.warmed = True
@@ -251,7 +307,7 @@ class CardCheckOnTheFakeTests(unittest.TestCase):
         self.assertTrue(report['ok'], report['problems'])
         cases = report['cases']
         self.assertEqual(sorted(cases), sorted(['staging_diagnostics', 'oracle_checksum', 'warm_freeze', 'digest_96', 'digest_repeats', 'digest_flipped_byte', 'scatter',
-                                                'round_trip', 'refusals', 'new_key_after_freeze'] + ['gather_bank_%d' % b for b in range(8)]))
+                                                'round_trip', 'refusals', 'new_key_after_freeze', 'trace_capture'] + ['gather_bank_%d' % b for b in range(8)]))
         for bank in range(8):
             self.assertTrue(cases['gather_bank_%d' % bank]['bytes_equal'] and cases['gather_bank_%d' % bank]['canary_untouched'], bank)
         for bank in (0, 3, 7):
@@ -261,10 +317,17 @@ class CardCheckOnTheFakeTests(unittest.TestCase):
         self.assertTrue(cases['round_trip']['digests_agree'] and cases['round_trip']['equals_numpy'])
         self.assertEqual(set(cases['refusals'].values()), {'refused'})
         self.assertEqual(cases['new_key_after_freeze'], 'refused')
+        trace = cases['trace_capture']
+        self.assertTrue(trace['started'] and trace['equal'] and trace['bytes_equal'])
+        self.assertEqual(sorted(trace['refusals']), sorted(TRACE_OPS))
+        self.assertEqual(set(trace['refusals'].values()), {'refused'})
+        self.assertEqual(ttnn.trace_log, ['begin', 'end', 'release'], 'one capture, ended and released')
         self.assertTrue(cases['warm_freeze']['frozen'] and cases['warm_freeze']['warmed'])
         self.assertTrue(report['whole_cache_equal'])
         self.assertTrue(ttnn.staging[0].released, 'the staging buffer is released at the end')
         self.assertEqual(report['staging']['num_banks'], 8)
+        self.assertEqual(report['staging']['mesh_shape'], [DEVICES, 1])
+        self.assertEqual(report['staging']['pcie_devices'], [1, 2, 3, 0], 'the tt-kmd device number is reported as it is, not as the logical chip id')
         self.assertTrue(all(report['staging']['formula_endpoint_in_info']))
         self.assertEqual(report['staging']['bytes_reserved_per_card'], STAGING_MIB * 8 << 20)
 
@@ -295,12 +358,62 @@ class CardCheckOnTheFakeTests(unittest.TestCase):
             'short_banks': 'lists 7 banks',
             'misaligned': 'not 64-byte aligned',
             'block_bytes_off': 'qwen_block_bytes',
+            'pci_none': 'device 2 has no PCI address',
+            'kmd_none': 'device 1 has no tt-kmd device number',
+            'pci_disagree': 'the cluster descriptor says',
+            'wrong_coords': 'mesh coordinates',
+            'trace_other_reason': 'but not because of the trace',
+            'trace_wrong_type': 'trace capture: gather raised RuntimeError, not QwenP2PRefused',
         }
         for knob, text in mistakes.items():
             with self.subTest(mistake=knob):
                 _, report = run(**{knob: 1})
                 self.assertFalse(report['ok'], knob)
                 self.assertTrue(any(text in problem for problem in report['problems']), (knob, report['problems']))
+
+    def test_every_op_that_enqueues_must_refuse_behind_a_real_trace_capture(self):
+        for op in TRACE_OPS:
+            with self.subTest(op=op):
+                ttnn, report = run(trace_unrefused=op)
+                self.assertFalse(report['ok'], op)
+                self.assertTrue(any('trace capture: %s was not refused during the capture' % op in problem for problem in report['problems']), (op, report['problems']))
+                self.assertEqual(ttnn.trace_log, ['begin', 'end', 'release'], 'the capture is ended and released even when an op was not refused')
+
+    def test_the_capture_is_ended_and_released_even_when_the_op_in_it_fails(self):
+        ttnn = FakeTTNN(add_fails_in_capture=1)
+        with self.assertRaises(RuntimeError):
+            card.run(ttnn, FakeMesh(), DEVICES, blocks=BLOCKS, staging_mib=STAGING_MIB)
+        self.assertEqual(ttnn.trace_log, ['begin', 'end', 'release'])
+        self.assertTrue(ttnn.staging[0].released)
+
+    def test_a_ttnn_without_the_trace_api_is_a_failure_not_a_skip(self):
+        ttnn = FakeTTNN()
+        ttnn.begin_trace_capture = None
+        report = card.run(ttnn, FakeMesh(), DEVICES, blocks=BLOCKS, staging_mib=STAGING_MIB)
+        self.assertFalse(report['ok'])
+        self.assertTrue(any('the refusal during a real capture cannot be checked' in problem for problem in report['problems']), report['problems'])
+        self.assertEqual(report['cases']['trace_capture'], dict(started=False))
+
+    def test_the_mesh_coordinates_are_those_of_the_mesh_that_is_open(self):
+        ttnn = FakeTTNN()                                   # lists (d, 0): the coordinates of a (devices, 1) mesh
+        report = card.run(ttnn, FakeMesh((1, DEVICES)), DEVICES, blocks=BLOCKS, staging_mib=STAGING_MIB)
+        self.assertFalse(report['ok'])
+        self.assertTrue(any('mesh coordinates' in problem and 'shape [1, 4]' in problem for problem in report['problems']), report['problems'])
+        ttnn = FakeTTNN(wrong_coords=1)                     # lists (0, d): right for a (1, devices) mesh
+        report = card.run(ttnn, FakeMesh((1, DEVICES)), DEVICES, blocks=BLOCKS, staging_mib=STAGING_MIB)
+        self.assertTrue(report['ok'], report['problems'])
+        self.assertEqual(report['staging']['mesh_shape'], [1, DEVICES])
+
+    def test_the_main_program_opens_the_mesh_as_production_does_and_keeps_memory_small(self):
+        with open(os.path.join(HERE, 'p2p_staging_card.py'), encoding='utf-8') as handle:
+            text = handle.read()
+        self.assertIn('ttnn.MeshShape(options.devices, 1)', text, 'production opens a (4, 1) mesh')
+        self.assertNotIn('ttnn.MeshShape(1, options.devices)', text)
+        self.assertEqual(card.DEFAULT_BLOCKS, 256)
+        self.assertGreater(card.DEFAULT_BLOCKS, card.SLOT_OBJECTS + 1, 'the slot case needs more blocks than a slot has objects')
+        shadow_gib = card.TENSORS * DEVICES * card.DEFAULT_BLOCKS * card.BLOCK_BYTES / 2.0 ** 30
+        self.assertLess(shadow_gib, 1.0, 'the numpy shadow of the default run fits a 4 GB container with room to spare')
+        self.assertIn('Memory:', card.__doc__)
 
     def test_an_event_that_never_completes_is_a_timeout_not_a_hang(self):
         original = card.POLL_LIMIT_S
@@ -368,6 +481,7 @@ class CardCheckOnTheFakeTests(unittest.TestCase):
 
 
 _GATHER = FakeTTNN.qwen_blocks_to_staging
+TRACE_OPS = ('gather', 'scatter', 'digest', 'event', 'warm', 'oracle_checksum', 'staging_write', 'staging_read', 'alloc')
 
 if __name__ == '__main__':
     unittest.main()

@@ -7,9 +7,15 @@ NOT RUN ON CARDS YET. Run it in a card window (never beside production), in a th
 
     python3 p2p_staging_card.py --devices 4 --staging-mib 8
 
+The mesh is opened as production opens it, (devices, 1): the coordinate order the host's worker reads from the info is the one tested. Memory: the numpy shadow of every
+cache is 10 x devices x blocks x 69,632 bytes (0.7 GB at the default of 256 blocks and 4 devices, 2.7 GB at 1,024) and each numpy image of the 96 objects of a slot adds
+0.27 GB; the whole check peaked at about 1.4 GB of host memory at 256 blocks on the CPU fake (slot case not included: estimate 2 GB with it), where 1,024 blocks would need
+over 4 GB, more than a 4 GB container or a rig that also serves has. The device holds 10 caches of the same blocks (0.18 GB per card at 256 blocks).
+
 What it settles, per device and with different bytes on every device and every tensor:
-  * the staging buffer: alloc, info (8 banks, one entry per device in mesh order, the same range on every device, the 4 KiB lead, the NOC coordinates of every bank
-    compared with the UMD/probe formula, the PCI address of each device), the DRAM it cost;
+  * the staging buffer: alloc, info (8 banks, one entry per device in mesh order and with that mesh's coordinates, the same range on every device, the 4 KiB lead, the NOC
+    coordinates of every bank compared with the UMD/probe formula, the tt-kmd device number and the PCI address of each device from the cluster descriptor, cross-checked
+    against sysfs, none of them missing), the DRAM it cost;
   * the GATHER, object-major, exactly as the spill lays an object out (row_stride 696,320, byte_offset = slot base + tensor x 69,632): the staged bytes read back through
     the diagnostics equal the numpy image of ten rows per object; the bytes between the rows are untouched; in each of the 8 banks; blocks the call does not name are not
     read into anything (the caches are unchanged);
@@ -20,6 +26,8 @@ What it settles, per device and with different bytes on every device and every t
   * the round trip gather -> scatter into other blocks: the bytes arrive, and the two digests agree;
   * the event: query() is False or True while work is queued and True once it is through; the host never blocks on it;
   * warm -> freeze: after freeze the three programs keep working and a new program key is refused; before the first capture, as the engine start does;
+  * a REAL trace capture (begin_trace_capture on CQ0, one small op so that the trace is not empty): every op that enqueues, and the allocation, raises QwenP2PRefused naming
+    the trace; the capture ends and is released; the next valid digest and gather are byte-exact;
   * the refusals (bad bank, offset, stride, ids, counts) raise QwenP2PRefused before anything is enqueued, and the next valid call is unaffected;
   * the cost: enqueue time and completion time of a slot of 96 objects, gather, scatter and digest, and the effective GB/s per card.
 
@@ -43,6 +51,7 @@ P2P_NAMES = ('qwen_p2p_staging_alloc', 'qwen_p2p_staging_info', 'qwen_blocks_to_
              'qwen_p2p_record_event', 'qwen_p2p_warm', 'qwen_p2p_freeze', 'qwen_staging_checksum', 'qwen_p2p_staging_write', 'qwen_p2p_staging_read')
 RAW_NAMES = ('qwen_block_bytes', 'qwen_read_blocks_raw', 'qwen_write_blocks_raw')
 POLL_LIMIT_S = 30.0
+DEFAULT_BLOCKS = 256                     # blocks of each scratch cache (see the memory note above)
 
 
 def _ref():
@@ -53,6 +62,27 @@ def _ref():
 def formula_endpoint(bank):
     """The UMD/probe formula for the first endpoint of a bank (banks 0-3 in column 17, 4-7 in column 18, three endpoints per bank going down from row 12)."""
     return 17 + bank // 4, 12 + 3 * (bank % 4)
+
+
+def mesh_dims(mesh, devices):
+    """The shape of the open mesh as a list; (devices, 1), the production shape, when the mesh does not say."""
+    shape = getattr(mesh, 'shape', None)
+    try:
+        dims = [int(shape[i]) for i in range(len(shape))]
+    except Exception:  # noqa: BLE001
+        dims = []
+    product = 1
+    for dim in dims:
+        product *= dim
+    return dims if dims and all(dim > 0 for dim in dims) and product == devices else [devices, 1]
+
+
+def row_major_coordinates(dims):
+    """The coordinates of a mesh of shape `dims` in row-major order, as the info lists its devices."""
+    coordinates = [[]]
+    for dim in dims:
+        coordinates = [prefix + [index] for prefix in coordinates for index in range(dim)]
+    return coordinates
 
 
 def missing_names(ttnn):
@@ -84,7 +114,7 @@ def poll(function, what, limit=POLL_LIMIT_S):
             raise TimeoutError('%s was not ready after %.0f s' % (what, limit))
 
 
-def check_info(info, devices, staging_bytes, report, problems):
+def check_info(info, devices, staging_bytes, report, problems, dims=None):
     """The description the host aims its window and maps its cards with."""
     banks, listed = info.get('banks', []), info.get('devices', [])
     report['info_banks'], report['info_devices'] = len(banks), len(listed)
@@ -108,19 +138,38 @@ def check_info(info, devices, staging_bytes, report, problems):
     buses = [entry.get('pci_bus_id') for entry in listed]
     if all(buses) and len(set(buses)) != len(buses):
         problems.append('two devices report the same PCI address')
+    # The shard map of the offload is read from these fields (mesh coordinate d -> PCI address -> the drive's p2pmem window): a missing or inconsistent one is a failure here,
+    # where the host would otherwise find it at start-up.
+    for index, entry in enumerate(listed):
+        if not entry.get('pci_bus_id'):
+            problems.append('device %d has no PCI address (pci_bus_id is %r): the host cannot map shard %d to a card' % (index, entry.get('pci_bus_id'), index))
+        if entry.get('pcie_device') is None:
+            problems.append('device %d has no tt-kmd device number (pcie_device is None)' % index)
+        if entry.get('pci_bus_id_agrees') is False:
+            problems.append('device %d: the cluster descriptor says %s but sysfs says %s for tt-kmd device %s: the chip -> card map is not consistent' % (
+                index, entry.get('pci_bus_id'), entry.get('pci_bus_id_sysfs'), entry.get('pcie_device')))
+    kmd = [entry.get('pcie_device') for entry in listed]
+    if all(number is not None for number in kmd) and len(set(kmd)) != len(kmd):
+        problems.append('two devices report the same tt-kmd device number')
     if [entry.get('mesh_index') for entry in listed] != list(range(len(listed))):
         problems.append('the devices are not listed in mesh order')
+    wanted = row_major_coordinates(dims if dims else [devices, 1])
+    coordinates = [[int(v) for v in entry.get('mesh_coord', [])] for entry in listed]
+    if coordinates != wanted:
+        problems.append('the devices\' mesh coordinates are %s, not the row-major order %s of a mesh of shape %s' % (coordinates, wanted, dims if dims else [devices, 1]))
     # Not a failure: the formula is an assumption of the probe, the info is tt-metal's own answer, and the report says whether they agree.
     in_endpoints = [tuple(formula_endpoint(entry['bank'])) in [tuple(p) for p in entry.get('noc_endpoints', [])] for entry in banks]
     report['staging'] = dict(address=info.get('address'), size=info.get('size'), aligned_4k_offset=lead, num_banks=info.get('num_banks'),
                              noc=[[entry.get('noc_x'), entry.get('noc_y')] for entry in banks], formula_endpoint_in_info=in_endpoints,
-                             pci_bus_ids=buses, device_ids=[entry.get('device_id') for entry in listed], bytes_reserved_per_card=info.get('bytes_reserved'),
+                             pci_bus_ids=buses, pcie_devices=kmd, mmio_chip_ids=[entry.get('mmio_chip_id') for entry in listed],
+                             pci_bus_id_sources=[entry.get('pci_bus_id_source') for entry in listed], pci_bus_id_agrees=[entry.get('pci_bus_id_agrees') for entry in listed],
+                             mesh_shape=dims if dims else [devices, 1], device_ids=[entry.get('device_id') for entry in listed], bytes_reserved_per_card=info.get('bytes_reserved'),
                              dram_free_per_bank_before=info.get('dram_free_per_bank_before'), dram_free_per_bank_after=info.get('dram_free_per_bank_after'))
     if not all(in_endpoints):
         report['staging']['note'] = 'the probe formula names an endpoint tt-metal does not list for some bank: aim the window at noc_x/noc_y from info'
 
 
-def run(ttnn, mesh, devices, blocks=1024, staging_mib=8, banks_to_test=None, **version_3_arguments):
+def run(ttnn, mesh, devices, blocks=DEFAULT_BLOCKS, staging_mib=8, banks_to_test=None, **version_3_arguments):
     """The checks on an open mesh -> the report dict (ok, problems, one entry per case, the cost figures). staging_mib: bytes per bank (a slot of 96 objects needs 64).
     version_3_arguments (heads_per_chip, bank, long_run, strided): the keywords the version 3 host probe passes; they mean nothing here and are ignored, so that probe
     reaches the check, which then reports a version 3 extension as `absent` (it lacks the version 4 ops) instead of dying on a TypeError."""
@@ -141,7 +190,7 @@ def run(ttnn, mesh, devices, blocks=1024, staging_mib=8, banks_to_test=None, **v
     caches = []
     try:
         info = ttnn.qwen_p2p_staging_info(staging)
-        check_info(info, devices, staging_bytes, report, problems)
+        check_info(info, devices, staging_bytes, report, problems, mesh_dims(mesh, devices))
         caches = [make_cache(ttnn, mesh, blocks, t) for t in range(TENSORS)]
         slice_bytes = int(ttnn.qwen_block_bytes(caches[0]))
         report['slice_bytes'] = slice_bytes
@@ -355,6 +404,60 @@ def run(ttnn, mesh, devices, blocks=1024, staging_mib=8, banks_to_test=None, **v
             cases['new_key_after_freeze'] = 'refused'
         ttnn.deallocate(odd)
 
+        # 8b. a REAL trace capture (not the forced test hook of the mock device): every op that enqueues refuses behind it, the capture ends, the next valid calls are exact
+        def trace_capture_case():
+            names = ('begin_trace_capture', 'end_trace_capture', 'release_trace')
+            begin, end, release = [getattr(ttnn, name, None) for name in names]
+            if not (callable(begin) and callable(end) and callable(release)):
+                problems.append('trace capture: this ttnn lacks %s: the refusal during a real capture cannot be checked' % ', '.join(names))
+                return dict(started=False)
+            probe = ttnn.empty([1, 1, 32, 32], dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=mesh, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+            first_run = ttnn.add(probe, probe)             # compiled before the capture, as every traced op is; the capture then holds one real command
+            synchronize(ttnn, mesh)
+            ttnn.deallocate(first_run)
+            calls = [('gather', lambda: ttnn.qwen_blocks_to_staging(caches[0], staging, 1, CANARY, selected[:2], SHARD, PAGES_PER_BLOCK)),
+                     ('scatter', lambda: ttnn.qwen_write_blocks_from_staging(caches[0], staging, 1, CANARY, selected[:2], SHARD, PAGES_PER_BLOCK)),
+                     ('digest', lambda: ttnn.qwen_blocks_digest_async(caches, selected[:2], PAGES_PER_BLOCK)),
+                     ('event', lambda: ttnn.qwen_p2p_record_event(mesh)),
+                     ('warm', lambda: ttnn.qwen_p2p_warm(staging, caches)),
+                     ('oracle_checksum', lambda: ttnn.qwen_staging_checksum(staging, 5 * STAGING_PAGE, STAGING_PAGE, 1)),
+                     ('staging_write', lambda: ttnn.qwen_p2p_staging_write(staging, 0, np.zeros((devices, STAGING_PAGE), dtype=np.uint8), 1)),
+                     ('staging_read', lambda: ttnn.qwen_p2p_staging_read(staging, 0, np.empty((devices, STAGING_PAGE), dtype=np.uint8), 1)),
+                     ('alloc', lambda: ttnn.qwen_p2p_staging_alloc(mesh, staging_bytes, False, STAGING_PAGE))]
+            outcome, trace_id, traced = {}, None, None
+            try:
+                trace_id = begin(mesh, cq_id=0)
+                traced = ttnn.add(probe, probe)
+                for name, call in calls:
+                    try:
+                        call()
+                        outcome[name] = 'not refused'
+                        problems.append('trace capture: %s was not refused during the capture' % name)
+                    except refused as error:
+                        outcome[name] = 'refused' if 'trace' in str(error) else 'refused for another reason'
+                        if 'trace' not in str(error):
+                            problems.append('trace capture: %s was refused, but not because of the trace: %s' % (name, str(error)[:160]))
+                    except Exception as error:  # noqa: BLE001
+                        outcome[name] = type(error).__name__
+                        problems.append('trace capture: %s raised %s, not QwenP2PRefused' % (name, type(error).__name__))
+            finally:
+                if trace_id is not None:
+                    try:
+                        end(mesh, trace_id, cq_id=0)
+                    finally:
+                        release(mesh, trace_id)
+                ttnn.deallocate(probe)
+                if traced is not None:
+                    ttnn.deallocate(traced)
+            # the next valid calls: the refusals enqueued nothing and the capture left no mark
+            digests_after, _, _ = digests_of(big)
+            ttnn.qwen_blocks_to_staging(caches[0], staging, 1, CANARY, selected[:2], SHARD, PAGES_PER_BLOCK)
+            seconds, polls = poll(ttnn.qwen_p2p_record_event(mesh).query, 'the event after the capture')
+            staged = read_staging(1, CANARY, 2 * SHARD)
+            gather_equal = all(np.array_equal(staged[:, i * SHARD:i * SHARD + BLOCK_BYTES], shadow[0][:, selected[i]]) for i in range(2))
+            return dict(started=True, refusals=outcome, equal=digests_after == digest_reference(big), bytes_equal=bool(gather_equal))
+        cases['trace_capture'] = trace_capture_case()
+
         # 9. whole caches: after everything above, every block of every cache is what the shadow says
         wrong = []
         for t, cache in enumerate(caches):
@@ -384,7 +487,7 @@ def run(ttnn, mesh, devices, blocks=1024, staging_mib=8, banks_to_test=None, **v
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     parser.add_argument('--devices', type=int, default=4)
-    parser.add_argument('--blocks', type=int, default=1024, help='blocks of each scratch cache')
+    parser.add_argument('--blocks', type=int, default=DEFAULT_BLOCKS, help='blocks of each scratch cache (host memory: about 10 x devices x blocks x 69,632 bytes; the slot case needs more than 97)')
     parser.add_argument('--staging-mib', type=int, default=64, help='bytes per bank (64 holds the slot of 96 objects)')
     parser.add_argument('--banks', type=int, nargs='*', default=None, help='the banks to test (default: all 8)')
     options = parser.parse_args(argv)
@@ -402,7 +505,7 @@ def main(argv=None):
     if absent:
         print(json.dumps({'ok': False, 'problem': 'this ttnn lacks %s: the extension is not version 4' % ', '.join(absent)}))
         return 1
-    mesh = ttnn.open_mesh_device(ttnn.MeshShape(1, options.devices))
+    mesh = ttnn.open_mesh_device(ttnn.MeshShape(options.devices, 1))      # as production opens it: the coordinate order of the info is the one the worker reads
     try:
         report = run(ttnn, mesh, options.devices, options.blocks, options.staging_mib, options.banks)
     finally:

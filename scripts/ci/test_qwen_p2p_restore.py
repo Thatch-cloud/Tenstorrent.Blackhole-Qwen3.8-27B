@@ -1448,12 +1448,22 @@ class ExtensionSourceTests(unittest.TestCase):
         self.assertEqual(self.parameters('qwen_write_blocks_from_staging'), ['tensor', 'staging', 'bank', 'byte_offset', 'blocks', 'row_stride', 'pages_per_block', 'cq_id'])
         self.assertEqual(self.parameters('qwen_staging_checksum'), ['staging', 'byte_offset', 'length', 'bank', 'cores', 'count'])
 
-    def test_staging_api_finds_the_strided_mode_against_those_signatures(self):
+    def test_this_qwen_host_is_not_supported_against_version_4_and_fails_closed(self):
+        """This host (the version 3 StagingApi) calls the scatter positionally in the version 3 order (tensor, handle, byte_offset, blocks, ...): against version 4 its
+        byte_offset would bind to the new `bank` parameter. It never gets that far: it reads qwen_p2p_staging_info as a list of per-device dicts and version 4 answers one dict, so
+        the first thing it does with a version 4 extension (the info, before any copy) is P2PUnavailable. A v3 Qwen host and a v4 extension are not a pair on this branch; the
+        Gemma host (ttkvp2p) is the host of version 4, and a Qwen image keeps the version 3 extension (the p2p-1 line)."""
         write = self.function_with(self.parameters('qwen_write_blocks_from_staging'), 4)
         checksum = self.function_with(self.parameters('qwen_staging_checksum'), 3)
-        ttnn = types.SimpleNamespace(qwen_p2p_staging_alloc=lambda *a, **k: 1, qwen_p2p_staging_info=lambda *a, **k: [], qwen_write_blocks_from_staging=write, qwen_staging_checksum=checksum)
+        self.assertIn('nb::dict staging_info(P2PStaging& handle)', self.SOURCE.read_text(encoding='utf-8'), 'version 4 answers the info as ONE dict (the fake below is that shape)')
+        version_4_info = {'address': 1 << 30, 'size': 64 << 20, 'page_bytes': 4096, 'banks': [{'bank': 0}], 'devices': [{'mesh_coord': [0, 0], 'pci_bus_id': None}]}
+        ttnn = types.SimpleNamespace(qwen_p2p_staging_alloc=lambda *a, **k: 1, qwen_p2p_staging_info=lambda *a, **k: version_4_info, qwen_write_blocks_from_staging=write,
+                                     qwen_staging_checksum=checksum)
         api = p2p.StagingApi(ttnn, 'mesh', [1])
-        self.assertEqual((api.strided, api.ranged, api.mode), (True, True, 'strided'))
+        api.alloc(1 << 20)
+        with self.assertRaises(p2p.P2PUnavailable) as raised:
+            api.info()
+        self.assertIn('qwen_p2p_staging_info failed', str(raised.exception))
 
     def test_the_extension_without_them_is_compat(self):
         write = self.function_with([name for name in self.parameters('qwen_write_blocks_from_staging') if name != 'row_stride'], 4)

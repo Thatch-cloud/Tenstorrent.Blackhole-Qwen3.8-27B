@@ -10,6 +10,8 @@ _freeze, qwen_staging_checksum; docs/tp4-p2p-restore.md), everything that can be
     the extension uses: on random block sets, page sizes, offsets (including the end of the ring), banks and launch splits. The stand-in performs NOC transfers late (at the
     barrier) and refuses a sub-page access, an unaligned DRAM address, an access outside the allowed pages and a kernel that ends with a transfer pending;
   * the emulation has teeth: deliberately broken copies of each kernel are caught;
+  * the reader of the serialized cluster descriptor (which tt-kmd device and which PCI address each chip has) is compiled as it stands in the extension and run on descriptors
+    in UMD's format: a permutation of chips and devices comes through as a permutation;
   * the extension source, the build script and the card test agree with the contract (names, version, argument names and order, validation before enqueue, no private strings).
 
 Run from this directory:  python3 -B -m unittest discover -p 'test_p2p_staging.py'   (numpy and a C++ compiler; python 3.10 or later)
@@ -1511,6 +1513,117 @@ class GatherDigestTeethTests(unittest.TestCase):
         self.assertIn('constexpr uint32_t kQwenP2PStep = 2654435761u;', block(DIGEST))
 
 
+def between(text, begin, end):
+    return text[text.index(begin) + len(begin):text.index(end)]
+
+
+@unittest.skipUnless(have_compiler(), 'no C++ compiler')
+class ClusterDescriptorParserTests(unittest.TestCase):
+    """The reader of the serialized cluster descriptor (which tt-kmd device and which PCI address each chip has: qwen_p2p_staging_info's pcie_device and pci_bus_id), compiled as it
+    stands in qwen_kv_read.cpp (between its markers) and run on descriptors in the format UMD writes. A logical chip id is NOT the tt-kmd device number, so this reader is the
+    only thing between the shard map and a permuted one."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.directory = tempfile.mkdtemp(prefix='p2p_parser_')
+        text = read(EXTENSION)
+        source = os.path.join(cls.directory, 'parse.cpp')
+        with open(source, 'w') as handle:
+            handle.write('''#include <algorithm>
+#include <cctype>
+#include <cstdint>
+#include <fstream>
+#include <iostream>
+#include <istream>
+#include <map>
+#include <string>
+namespace qwen_p2p_host {
+%s
+%s
+}
+int main(int, char** argv) {
+    std::ifstream file(argv[1]);
+    auto map = qwen_p2p_host::parse_chip_pci_map(file);
+    std::cout << "OK " << map.ok << "\\n";
+    for (const auto& [chip, number] : map.device_number) std::cout << "D " << chip << " " << number << "\\n";
+    for (const auto& [chip, bdf] : map.bdf) std::cout << "B " << chip << " " << bdf << "\\n";
+}
+''' % (between(text, '// BEGIN-CHIP-PCI-STRUCT', '// END-CHIP-PCI-STRUCT'), between(text, '// BEGIN-CHIP-PCI-PARSER', '// END-CHIP-PCI-PARSER')))
+        cls.exe = os.path.join(cls.directory, 'parse')
+        done = subprocess.run([ref.compiler(), '-std=c++17', '-Wall', '-Wextra', '-Werror', source, '-o', cls.exe], capture_output=True, text=True)
+        if done.returncode:
+            raise RuntimeError(done.stderr)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.directory, ignore_errors=True)
+
+    def parse(self, text):
+        path = os.path.join(self.directory, 'descriptor.yaml')
+        with open(path, 'w') as handle:
+            handle.write(text)
+        lines = subprocess.run([self.exe, path], capture_output=True, text=True, check=True).stdout.splitlines()
+        numbers = {int(line.split()[1]): int(line.split()[2]) for line in lines if line.startswith('D ')}
+        addresses = {int(line.split()[1]): line.split()[2] for line in lines if line.startswith('B ')}
+        return lines[0], numbers, addresses
+
+    @staticmethod
+    def address(domain, bus, device=0, function=0):
+        return '%04x:%02x:%02x.%x' % (domain, bus, device, function)
+
+    def descriptor(self, mapping, addresses=None, quote=False, upper=False):
+        """What UMD's ClusterDescriptor::serialize writes (block style), with the sections around the two that matter."""
+        lines = ['arch:', '  0: Blackhole', '  1: Blackhole', 'chips:', '  0: [0, 0, 0, 0]', '  1: [1, 0, 0, 0]', 'chip_unique_ids:', '  0: 111', '  1: 222',
+                 'ethernet_connections:', '  - - chip: 0', '      chan: 2', '    - chip: 1', '      chan: 3', 'chips_with_mmio:']
+        lines += ['  - %d: %d' % (chip, number) for chip, number in sorted(mapping.items())]
+        lines += ['io_device_type: PCIe', 'harvesting:', '  0:', '    noc_translation: true', '    harvest_mask: 192', '  1:', '    noc_translation: true', '    harvest_mask: 192',
+                  'chip_to_bus_id:', '  0: "0x01"', '  1: "0x02"', 'boards:', '  - - board_id: 7', '    - board_type: p150a', '    - chips:', '        - 0', '        - 1',
+                  'asic_locations:', '  0: 1', '  1: 2', 'chip_pci_bdfs:']
+        for chip, bdf in sorted((addresses or {}).items()):
+            bdf = bdf.upper() if upper else bdf
+            lines.append('  %d: %s' % (chip, '"%s"' % bdf if quote else bdf))
+        lines += ['chip_pcie_lane_counts:', '  0: 16', '  1: ~']
+        return '\n'.join(lines) + '\n'
+
+    def test_the_tt_kmd_device_numbers_are_the_descriptors_not_the_chip_ids(self):
+        mapping = {0: 1, 1: 2, 2: 3, 3: 0}                                          # the shape of the 4-card mock cluster: chip 0 is /dev/tenstorrent/1
+        ok, numbers, addresses = self.parse(self.descriptor(mapping))
+        self.assertEqual((ok, numbers, addresses), ('OK 1', mapping, {}))
+        self.assertNotEqual(numbers, {chip: chip for chip in mapping}, 'a permutation is carried as a permutation')
+
+    def test_the_pci_addresses_are_read_lower_case_quoted_or_not(self):
+        wanted = {0: self.address(0, 0x41), 1: self.address(0, 0x01, 2, 1), 5: self.address(0x10, 0xab)}
+        for quote in (False, True):
+            for upper in (False, True):
+                with self.subTest(quote=quote, upper=upper):
+                    ok, numbers, addresses = self.parse(self.descriptor({0: 0, 1: 1, 5: 5}, wanted, quote=quote, upper=upper))
+                    self.assertEqual((ok, numbers, addresses), ('OK 1', {0: 0, 1: 1, 5: 5}, wanted))
+
+    def test_other_sections_that_look_alike_are_not_read(self):
+        """`harvesting` has `0:` lines under it, `chip_to_bus_id` a quoted number: neither is a device number or an address."""
+        ok, numbers, addresses = self.parse(self.descriptor({2: 7}))
+        self.assertEqual((ok, numbers, addresses), ('OK 1', {2: 7}, {}))
+
+    def test_an_empty_or_odd_descriptor_gives_an_empty_map_never_a_guess(self):
+        for text in ('', 'chips_with_mmio: []\nchip_pci_bdfs: {}\n', 'chips_with_mmio:\n  - x: 1\n  - 3: y\n  - 4\n  - 5: 6 7\n', '# comment only\n\n'):
+            with self.subTest(text=text):
+                ok, numbers, addresses = self.parse(text)
+                self.assertEqual((ok, numbers, addresses), ('OK 1', {}, {}), text)
+
+    def test_the_source_reads_the_descriptor_through_the_public_api_and_cleans_up(self):
+        text = read(EXTENSION)
+        self.assertIn('#include <tt-metalium/cluster.hpp>', text)
+        reader = self.function_after(text, 'ChipPciMap read_chip_pci_map() {')
+        self.assertIn('tt::tt_metal::SerializeClusterDescriptor()', reader)
+        self.assertIn('std::filesystem::remove(path, ignored)', reader)
+        self.assertIn('"umd_"', reader, 'only the temporary directory that call created is removed, and only if it is empty')
+
+    @staticmethod
+    def function_after(text, header):
+        start = text.index(header)
+        return text[start:text.index('\n}\n', start)]
+
+
 class SourceAgreementTests(unittest.TestCase):
     OPS = ('qwen_p2p_staging_alloc', 'qwen_p2p_staging_info', 'qwen_blocks_to_staging', 'qwen_write_blocks_from_staging', 'qwen_blocks_digest_async', 'qwen_p2p_record_event',
            'qwen_p2p_warm', 'qwen_p2p_freeze', 'qwen_staging_checksum', 'qwen_p2p_staging_write', 'qwen_p2p_staging_read')
@@ -1651,6 +1764,64 @@ class SourceAgreementTests(unittest.TestCase):
     def test_the_default_staging_page_is_64_kib(self):
         self.assertIn('nb::arg("page_bytes") = uint64_t(64) << 10', read(EXTENSION))
 
+    def test_warm_checks_every_tensor_before_it_enqueues_anything(self):
+        """A refusal from warm must mean that nothing was enqueued (the exception contract): tensor 5 is checked before the gather of tensor 0."""
+        text = read(EXTENSION)
+        warm = self.function_body(text, 'void warm(', '// qwen_p2p_freeze:')
+        self.assertIn('check_warm_sequence(', warm)
+        self.assertLess(warm.index('check_warm_sequence('), warm.index('rows_op('), 'the whole sequence is checked before the first gather')
+        self.assertLess(warm.index('check_warm_sequence('), warm.index('finish_queue('))
+        check = self.function_body(text, 'void check_warm_sequence(', '// qwen_p2p_warm: gather -> digest')
+        for call in ('view_tensor(', 'check_block_rows(', 'check_block_ids(', 'check_digest_rows(', 'check_grid(', 'kernel_path(', 'TensorAccessorArgs('):
+            self.assertIn(call, check, call)
+        for enqueue in ('enqueue_program(', 'EnqueueMeshWorkload', 'enqueue_read_shards', 'enqueue_write_shards', 'rows_op(', 'digest_blocks(', 'program_for('):
+            self.assertNotIn(enqueue, check, 'the check enqueues and builds nothing: ' + enqueue)
+        self.assertIn('qwen_p2p::kScatterCores', check)
+        self.assertIn('qwen_p2p::kDigestMaxCores', check)
+
+    def test_the_default_warm_scratch_follows_the_bank_that_was_asked_for(self):
+        warm = self.function_body(read(EXTENSION), 'void warm(', '// qwen_p2p_freeze:')
+        self.assertIn('state.bank_offsets[bank]', warm)
+        self.assertNotIn('bank_offsets[0]', warm)
+
+    def test_what_is_leaked_on_purpose_is_never_destroyed(self):
+        """A function-local static vector is destroyed at process exit, after tt-metal has torn down: it would free exactly what was leaked to stay."""
+        text = read(EXTENSION)
+        self.assertIn('static Leaked* const instance = new Leaked();', text)
+        self.assertNotIn('static std::vector<std::shared_ptr', text)
+        release = self.function_body(text, 'void release() {', 'bool released() const')
+        self.assertIn('qwen_p2p_host::leaked().pending', release)
+        self.assertIn('qwen_p2p_host::leaked().buffers', release)
+        digest = self.function_body(text, 'DigestHandle digest_blocks(', '// qwen_p2p_record_event:')
+        self.assertIn('leaked().pending.push_back(pending)', digest)
+
+    def test_release_lets_the_other_threads_run_while_it_waits(self):
+        text = read(EXTENSION)
+        binding = text[text.index('.def("release", &P2PStaging::release'):]
+        binding = binding[:binding.index(');')]
+        self.assertIn('nb::call_guard<nb::gil_scoped_release>()', binding, 'release() waits up to 10 s: not with the GIL held')
+
+    def test_no_allocation_behind_a_frozen_staging_not_even_after_it_is_released(self):
+        text = read(EXTENSION)
+        self.assertIn('frozen_meshes()', self.function_body(text, 'void freeze(', '// ttnn.qwen_staging_checksum (ORACLE'), 'freeze remembers the mesh')
+        constructor = text[text.index('P2PStaging(MeshDevice& mesh'):text.index('~P2PStaging()')]
+        self.assertIn('frozen_meshes()', constructor)
+        self.assertIn('a staging buffer of this mesh was frozen', constructor)
+        self.assertLess(constructor.index('check_queue_usable(mesh, 0, op)'), constructor.index('frozen_meshes()'))
+        self.assertLess(constructor.index('frozen_meshes()'), constructor.index('MeshBuffer::create('), 'refused before anything is allocated')
+        oracle = self.function_body(text, 'staging_checksum(\n', '// Diagnostics (card tests only)')
+        self.assertIn('state.frozen || state.warmed', oracle, 'the oracle\'s lazily allocated partials: only before warm')
+
+    def test_the_info_names_the_card_from_the_cluster_descriptor_not_from_the_logical_chip_id(self):
+        text = read(EXTENSION)
+        info = self.function_body(text, 'nb::dict staging_info(', '}  // namespace qwen_p2p_host\n\nNB_MODULE')
+        self.assertIn('read_chip_pci_map()', info)
+        self.assertIn('pci_map.device_number.find(*mmio_chip)', info)
+        self.assertIn('entry["pcie_device"] = kmd_device.has_value()', info)
+        self.assertNotIn('entry["pcie_device"] = have_pcie', info, 'pcie_device is no longer the logical chip id')
+        for field in ('pci_bus_id_source', 'pci_bus_id_sysfs', 'pci_bus_id_agrees', 'mmio_chip_id', 'programs_cached'):
+            self.assertIn('"%s"' % field, info, field)
+
     def test_runtime_args_are_rewritten_from_the_live_buffers_on_every_call(self):
         text = read(EXTENSION)
         for header, until in (('void rows_op(', '// qwen_blocks_digest_async. No GIL needed.'), ('DigestHandle digest_blocks(', '// qwen_p2p_record_event:')):
@@ -1698,9 +1869,10 @@ class SourceAgreementTests(unittest.TestCase):
             self.assertEqual(subprocess.run(['bash', '-n', BUILD]).returncode, 0)
 
     def test_no_private_string_in_the_new_files(self):
-        """The repository is public: no hostnames, addresses, serials, registries, bus addresses or tokens in what this change adds."""
+        """The repository is public: no hostnames, addresses, serials, registries, bus addresses (with or without the PCI domain) or tokens in what this
+        change adds."""
         forbidden = re.compile(r'(\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b|thatch\.local|zot\.|/home/[a-z]|\bspark-|blackhole-[0-9A-F]{8,}|ghp_|ssh-rsa|BEGIN [A-Z ]*PRIVATE'
-                               r'|\b[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]\b|/dev/disk/by-id|nvme-[A-Za-z0-9_]+_[A-Z0-9]{8,})')
+                               r'|\b[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]\b|\b[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]\b|/dev/disk/by-id|nvme-[A-Za-z0-9_]+_[A-Z0-9]{8,})')
         names = ['qwen_p2p_scatter.cpp', 'qwen_p2p_gather.cpp', 'qwen_p2p_checksum.cpp', 'qwen_p2p_digest_rows.cpp', 'qwen_p2p_plan.hpp', 'qwen_kv_read.cpp', 'rv_kernel_check.sh', 'build_kv_read.sh',
                  'p2p_staging_ref.py', 'p2p_staging_card.py', 'p2p_staging_mock.py', 'test_p2p_staging_card.py',
                  os.path.join('emu', 'api', 'dataflow', 'dataflow_api.h'), os.path.join('emu', 'emu_common.hpp'), os.path.join('emu', 'emu_scatter.cpp'),

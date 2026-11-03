@@ -25,7 +25,8 @@ SHA256 = re.compile(r'[0-9a-f]{64}')
 OP_NAMES = (b'qwen_read_blocks', b'qwen_read_blocks_raw', b'qwen_write_blocks_raw', b'qwen_block_bytes')
 # Version 3 (docs/tp4-p2p-restore.md): the P2P restore's device ops, and the files the module reads or compiles at run time, which must sit beside the .so.
 # They are required only when the checkout's own qwen_kv_read.cpp is version 3, so a checkout that predates it can still move a version 2 pin.
-# Version 4 (the Gemma P2P KV offload: docs/tp4-p2p-gemma.md) adds the spill's gather, the block-row digest with its event, and warm / freeze, and two more kernels.
+# Version 4 (the Gemma P2P KV offload: the header of qwen_kv_read.cpp and the note at the top of docs/tp4-p2p-restore.md) adds the spill's gather, the block-row digest with its event,
+# and warm / freeze, and two more kernels.
 P2P_OP_NAMES = (b'qwen_p2p_staging_alloc', b'qwen_p2p_staging_info', b'qwen_p2p_staging_write', b'qwen_p2p_staging_read', b'qwen_write_blocks_from_staging',
                 b'qwen_staging_checksum', b'qwen_blocks_to_staging', b'qwen_blocks_digest_async', b'qwen_p2p_record_event', b'qwen_p2p_warm', b'qwen_p2p_freeze')
 P2P_FILES = ('qwen_p2p_plan.hpp', 'qwen_p2p_scatter.cpp', 'qwen_p2p_checksum.cpp', 'qwen_p2p_gather.cpp', 'qwen_p2p_digest_rows.cpp')

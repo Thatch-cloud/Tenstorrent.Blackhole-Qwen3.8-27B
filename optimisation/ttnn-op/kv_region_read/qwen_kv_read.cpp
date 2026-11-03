@@ -21,7 +21,9 @@
 //   ttnn.qwen_p2p_staging_alloc(mesh_device, bytes_per_bank, bottom_up=False, page_bytes=64 KiB) -> P2PStaging
 //       one lockstep interleaved allocation of 8 x bytes_per_bank per card: bank b of every card holds the contiguous range [A, A + bytes_per_bank)
 //   ttnn.qwen_p2p_staging_info(staging) -> dict(address, size, page_bytes, aligned_4k_offset / _address / _size, banks=[{bank, noc_x, noc_y, ...}],
-//       devices=[{mesh_coord, device_id, pci_bus_id, ...}], ...)
+//       devices=[{mesh_coord, device_id, mmio_chip_id, pcie_device, pci_bus_id, ...}], ...)
+//       pcie_device is the tt-kmd device number N of the card's MMIO chip and pci_bus_id its PCI address, both from the cluster descriptor tt-metal holds (a logical
+//       chip id is NOT N); pci_bus_id_sysfs is the cross-check, None for any of them that cannot be found
 //   ttnn.qwen_blocks_to_staging(tensor, staging, bank, byte_offset, blocks, row_stride, pages_per_block, cq_id=0)       GATHER: KV rows -> staging
 //       staging[byte_offset + i * row_stride + j * page_bytes] = page (blocks[i] * pages_per_block + j) of the tensor
 //   ttnn.qwen_write_blocks_from_staging(tensor, staging, bank, byte_offset, blocks, row_stride, pages_per_block, cq_id=0)   SCATTER: staging -> KV rows
@@ -45,13 +47,16 @@
 #include <dlfcn.h>
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <iterator>
+#include <istream>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -66,6 +71,7 @@
 #include <tt-metalium/allocator.hpp>
 #include <tt-metalium/buffer.hpp>
 #include <tt-metalium/circular_buffer_config.hpp>
+#include <tt-metalium/cluster.hpp>
 #include <tt-metalium/distributed.hpp>
 #include <tt-metalium/host_api.hpp>
 #include <tt-metalium/kernel_types.hpp>
@@ -267,6 +273,17 @@ struct DigestPending {
     std::optional<tt::tt_metal::distributed::MeshEvent> event;
 };
 
+// Which tt-kmd device (N in /dev/tenstorrent/N) and which PCI address each MMIO chip of the cluster has, as the cluster descriptor tt-metalium holds them. A logical chip id
+// is NOT N (the descriptor of the 4-card mock cluster says chip 0 is device 1), so GetPCIeDeviceID (the logical id of the MMIO chip) cannot name the card by itself.
+// BEGIN-CHIP-PCI-STRUCT
+struct ChipPciMap {
+    bool ok = false;      // the descriptor was read and parsed (it may still lack a chip)
+    std::string error;    // why not, when !ok
+    std::map<int64_t, int64_t> device_number;  // logical chip id -> N
+    std::map<int64_t, std::string> bdf;        // logical chip id -> PCI address (lower case)
+};
+// END-CHIP-PCI-STRUCT
+
 struct StagingState {
     std::weak_ptr<MeshDevice> mesh;
     uint64_t size_bytes = 0;  // bytes per bank
@@ -285,9 +302,23 @@ struct StagingState {
     bool warmed = false;
     uint32_t digest_serial = 0;
     std::vector<std::shared_ptr<DigestPending>> inflight;
+    ChipPciMap pci_map;          // read from the cluster descriptor at the first qwen_p2p_staging_info
+    bool pci_map_read = false;
 
     bool released() const { return buffer == nullptr; }
 };
+
+// What is LEAKED on purpose on a fault path: host buffers that the completion reader may still write into (a digest whose readback threw, a release that timed out) and
+// device buffers a hung queue may still read. One heap object that is never destroyed: a function-local static vector would be destroyed at process exit, after
+// tt-metal has torn down, and would free exactly what must stay.
+struct Leaked {
+    std::vector<std::shared_ptr<DigestPending>> pending;
+    std::vector<std::shared_ptr<tt::tt_metal::distributed::MeshBuffer>> buffers;
+};
+inline Leaked& leaked() {
+    static Leaked* const instance = new Leaked();
+    return *instance;
+}
 
 namespace {
 std::mutex& registry_mutex() {
@@ -297,6 +328,13 @@ std::mutex& registry_mutex() {
 // One live staging per mesh: the digest op has no staging argument and finds its partials and program cache through the mesh of its tensors.
 std::map<const MeshDevice*, std::weak_ptr<StagingState>>& registry() {
     static std::map<const MeshDevice*, std::weak_ptr<StagingState>> map;
+    return map;
+}
+// The meshes that had a staging FROZEN. From then on traces may exist on them, and a device allocation made behind live traces can be overwritten by a replay or overlap its
+// intermediates (tt-metal only warns), so qwen_p2p_staging_alloc refuses such a mesh for as long as the mesh lives, even after the frozen staging was released. The weak
+// pointer tells a new mesh at the address of a destroyed one. Under registry_mutex().
+std::map<const MeshDevice*, std::weak_ptr<MeshDevice>>& frozen_meshes() {
+    static std::map<const MeshDevice*, std::weak_ptr<MeshDevice>> map;
     return map;
 }
 }  // namespace
@@ -385,11 +423,99 @@ std::string kernel_path(const char* name) {
     return path;
 }
 
-// PCI address of a tt-kmd device N (/dev/tenstorrent/N) from sysfs, "" when it cannot be read (a container without /sys/class).
+// PCI address of a tt-kmd device N (/dev/tenstorrent/N) from sysfs, "" when it cannot be read (a container without /sys/class). This is the CROSS-CHECK of the cluster
+// descriptor's own answer (read_chip_pci_map), and the fallback when the descriptor has no address.
 std::string pci_bus_id_of(uint32_t pcie_device) {
     std::error_code error;
     const auto link = std::filesystem::read_symlink("/sys/class/tenstorrent/tenstorrent!" + std::to_string(pcie_device) + "/device", error);
     return error ? std::string() : link.filename().string();
+}
+
+// BEGIN-CHIP-PCI-PARSER
+std::string trim_text(const std::string& text) {
+    const char* blanks = " \t\r\n\"'";
+    const size_t first = text.find_first_not_of(blanks);
+    if (first == std::string::npos) {
+        return std::string();
+    }
+    return text.substr(first, text.find_last_not_of(blanks) - first + 1);
+}
+
+bool parse_whole_integer(const std::string& text, int64_t& value) {
+    try {
+        size_t used = 0;
+        value = std::stoll(text, &used, 10);
+        return used == text.size() && !text.empty();
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
+// The two sections of a serialized cluster descriptor (YAML, block style, as UMD writes it) that name the cards: `chips_with_mmio` (a sequence of one-pair maps, "- <chip>:
+// <N>") and `chip_pci_bdfs` (a map, "<chip>: <address>"). Every other line is skipped, and a line that does not parse is skipped: the result then simply lacks that chip.
+ChipPciMap parse_chip_pci_map(std::istream& input) {
+    ChipPciMap map;
+    std::string line, section;
+    while (std::getline(input, line)) {
+        if (line.empty() || line[0] == '#') {
+            continue;
+        }
+        if (line[0] != ' ' && line[0] != '\t' && line[0] != '-') {
+            section = line.substr(0, line.find(':'));  // a top-level key
+            continue;
+        }
+        if (section != "chips_with_mmio" && section != "chip_pci_bdfs") {
+            continue;
+        }
+        std::string entry = line.substr(line.find_first_not_of(" \t"));
+        if (entry.compare(0, 2, "- ") == 0) {
+            entry.erase(0, 2);
+        }
+        const size_t colon = entry.find(':');
+        int64_t chip = 0;
+        if (colon == std::string::npos || !parse_whole_integer(trim_text(entry.substr(0, colon)), chip)) {
+            continue;
+        }
+        const std::string value = trim_text(entry.substr(colon + 1));
+        if (section == "chips_with_mmio") {
+            int64_t number = 0;
+            if (parse_whole_integer(value, number)) {
+                map.device_number[chip] = number;
+            }
+        } else if (!value.empty() && value != "~" && value != "null") {
+            std::string lower = value;
+            std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            map.bdf[chip] = lower;
+        }
+    }
+    map.ok = true;
+    return map;
+}
+// END-CHIP-PCI-PARSER
+
+// The cluster descriptor tt-metalium holds, through its public SerializeClusterDescriptor (it writes the YAML into a fresh temporary directory, which is removed again here).
+ChipPciMap read_chip_pci_map() {
+    ChipPciMap map;
+    std::filesystem::path path;
+    try {
+        path = tt::tt_metal::SerializeClusterDescriptor();
+        std::ifstream file(path);
+        if (file) {
+            map = parse_chip_pci_map(file);
+        } else {
+            map.error = "the serialized cluster descriptor cannot be read";
+        }
+    } catch (const std::exception& error) {
+        map.error = error.what();
+    }
+    std::error_code ignored;
+    if (!path.empty()) {
+        std::filesystem::remove(path, ignored);
+        if (path.parent_path().filename().string().rfind("umd_", 0) == 0) {
+            std::filesystem::remove(path.parent_path(), ignored);  // an empty directory only
+        }
+    }
+    return map;
 }
 
 std::vector<CoreCoord> core_list(uint32_t count, uint32_t columns) {
@@ -569,6 +695,14 @@ public:
                 }
                 qwen_p2p_host::registry().erase(it);
             }
+            auto frozen = qwen_p2p_host::frozen_meshes().find(&mesh);
+            if (frozen != qwen_p2p_host::frozen_meshes().end()) {
+                if (!frozen->second.expired()) {
+                    refuse(op, "a staging buffer of this mesh was frozen, so traces may exist on it: a device allocation behind live traces can be overwritten by a replay "
+                               "(allocate before the first freeze; a new mesh, that is a new engine process, can have its own)");
+                }
+                qwen_p2p_host::frozen_meshes().erase(frozen);  // (a stale entry: the mesh it named is gone, and this is a new mesh at the same address)
+            }
         }
         auto* allocator = mesh.allocator().get();
         state.num_banks = allocator->get_num_banks(BufferType::DRAM);
@@ -624,6 +758,8 @@ public:
         qwen_p2p_host::registry()[&mesh] = state_;
     }
 
+    // (A handle that is garbage collected without release() waits here with the GIL held, as Python's own deallocation does; the engine calls release() explicitly, through
+    // the binding, which gives the GIL up while it waits.)
     ~P2PStaging() { release(); }
     P2PStaging(const P2PStaging&) = delete;
     P2PStaging& operator=(const P2PStaging&) = delete;
@@ -648,8 +784,8 @@ public:
         // everything enqueued so far has to complete first, within a bounded time (a hung device must not hang the shutdown). If it does not, everything is LEAKED on
         // purpose, like the closed-mesh case, and so are the host buffers of the digests in flight (the completion reader thread writes into them).
         bool drained = !open;
-        static std::vector<std::shared_ptr<qwen_p2p_host::DigestPending>> leaked_pending;
-        static std::vector<std::shared_ptr<tt::tt_metal::distributed::MeshBuffer>> leaked_buffers;
+        auto& leaked_pending = qwen_p2p_host::leaked().pending;  // (never destroyed: see Leaked)
+        auto& leaked_buffers = qwen_p2p_host::leaked().buffers;
         if (open) {
             const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
             try {
@@ -944,8 +1080,7 @@ DigestHandle digest_blocks(
         pending->event = queue.enqueue_record_event_to_host();
     } catch (const std::exception& error) {
         // The digest program is in the queue, its readback is not (or only partly): the host buffer may still be written, so it is kept until the mesh closes.
-        static std::vector<std::shared_ptr<DigestPending>> leaked;
-        leaked.push_back(pending);
+        leaked().pending.push_back(pending);
         throw P2PEnqueueError(std::string(op) + ": the partials readback or its event threw (" + error.what() + "): the digest program is in the queue, the sequence is half-enqueued");
     }
     state.inflight.push_back(pending);
@@ -969,6 +1104,60 @@ void finish_queue(MeshDevice& mesh, uint32_t cq_id, const char* op) {
         tt::tt_metal::distributed::Finish(mesh.mesh_command_queue(static_cast<uint8_t>(cq_id)));
     } catch (const std::exception& error) {
         throw P2PEnqueueError(std::string(op) + ": the blocking finish threw (" + error.what() + ")");
+    }
+}
+
+// Every check that the gathers, the digest and the scatters of qwen_p2p_warm would make one by one (rows_op, digest_blocks), made for the WHOLE sequence before its first
+// enqueue: a refusal from warm must mean that nothing was enqueued, and warm runs one op per tensor, so a bad tensor 5 would otherwise be found only after the gathers of
+// tensors 0 to 4 had run. It also finds a missing kernel file and a compute grid that is too small (the first build of each program family would find them only after the
+// families before it had run). Keep it in step with rows_op and digest_blocks. No enqueue, no lock, no allocation.
+void check_warm_sequence(
+    MeshDevice& mesh,
+    const StagingState& state,
+    const std::vector<ttnn::Tensor>& tensors,
+    uint32_t null_block,
+    uint32_t pages_per_block,
+    uint64_t offset) {
+    using namespace tt::tt_metal;
+    const char* op = "qwen_p2p_warm";
+    check_grid(mesh, qwen_p2p::kScatterCores, qwen_p2p::kScatterColumns, op);
+    check_grid(mesh, qwen_p2p::kDigestMaxCores, qwen_p2p::kDigestColumns, op);
+    for (const char* kernel : {"qwen_p2p_gather.cpp", "qwen_p2p_scatter.cpp", "qwen_p2p_digest_rows.cpp"}) {
+        (void)kernel_path(kernel);  // a refusal when the file is missing
+    }
+    std::vector<TensorView> views;
+    for (const auto& tensor : tensors) {
+        views.push_back(view_tensor(tensor, op));
+    }
+    const TensorView& first = views.front();
+    if (const char* problem = qwen_p2p::check_digest_rows(tensors.size(), 1, pages_per_block, first.page_bytes, first.slices)) {
+        refuse(op, problem);
+    }
+    std::vector<uint32_t> first_layout;
+    TensorAccessorArgs(*first.buffer).append_to(first_layout);
+    const std::vector<uint32_t> null_only = {null_block};
+    for (size_t t = 0; t < views.size(); ++t) {
+        const TensorView& view = views[t];
+        const std::string which = "tensor " + std::to_string(t) + ": ";
+        if (view.mesh != &mesh) {
+            refuse(op, which + "it is not on the mesh of this staging buffer");
+        }
+        if (view.page_bytes != first.page_bytes || view.slice_bytes != uint64_t(pages_per_block) * first.page_bytes) {
+            refuse(op, which + "its page size or block size differs from pages_per_block * page_bytes of the first tensor");
+        }
+        std::vector<uint32_t> layout;
+        TensorAccessorArgs(*view.buffer).append_to(layout);
+        if (layout != first_layout) {
+            refuse(op, which + "it has a different accessor layout from the first tensor");
+        }
+        if (const char* problem = qwen_p2p::check_block_rows(
+                offset + t * first.slice_bytes, view.slice_bytes, view.page_bytes, pages_per_block, 1, state.size_bytes, first.slice_bytes)) {
+            refuse(op, which + problem);
+        }
+        size_t bad = 0;
+        if (const char* problem = qwen_p2p::check_block_ids(null_only, view.slices, /*require_distinct=*/true, &bad)) {
+            refuse(op, which + with_index(problem, bad, null_only));
+        }
     }
 }
 
@@ -1004,13 +1193,15 @@ void warm(P2PStaging& handle, const std::vector<ttnn::Tensor>& tensors, uint32_t
     }
     const uint32_t pages_per_block = static_cast<uint32_t>(first.slice_bytes / first.page_bytes);
     // The warm scratch: just after the first 4 KiB-aligned page of the bank (the canary page the host writes at start-up), one row per tensor.
-    const uint64_t start = state.address + (state.bank_offsets.empty() ? 0 : state.bank_offsets[0]);
+    const uint64_t start = state.address + (bank < state.bank_offsets.size() ? state.bank_offsets[bank] : 0);   // (the bank asked for, not bank 0)
     const uint64_t lead = (4096 - start % 4096) % 4096;
     const uint64_t offset = byte_offset_opt.value_or(lead + 4096);
     const uint64_t span = uint64_t(tensors.size()) * first.slice_bytes;
     if (offset % qwen_p2p::kDramAlignment != 0 || offset > state.size_bytes || span > state.size_bytes - offset) {
         refuse(op, "the warm scratch (one row per tensor, after the first 4 KiB page of the bank) does not fit the staging range");
     }
+    // Every tensor, the kernels and the grid are checked now, before the first gather: a refusal from warm means that nothing was enqueued.
+    check_warm_sequence(*mesh, state, tensors, null_block, pages_per_block, offset);
 
     std::vector<CachedProgram*> used;
     const std::vector<uint32_t> null_only = {null_block};
@@ -1075,12 +1266,17 @@ void freeze(P2PStaging& handle) {
         }
     }
     state.frozen = true;
+    // The mesh is remembered as one that had a staging frozen (the constructor refuses a new staging on it from now on, whatever becomes of this one).
+    if (const auto mesh = state.mesh.lock()) {
+        std::lock_guard<std::mutex> registry_lock(registry_mutex());
+        frozen_meshes()[mesh.get()] = mesh;
+    }
 }
 
 // ttnn.qwen_staging_checksum (ORACLE, card tests only): the per-device checksums of `count` consecutive staging byte ranges of `length` bytes (the algorithm of
 // qwen_p2p_checksum.cpp, k from 0 at the start of EACH range). Blocking. -> [device][range]. One launch carries up to kChecksumMaxRanges ranges; more are several
-// launches, each read back before the next because they share the partials buffer. The partials buffer is allocated at the first call, so an oracle call after
-// freeze needs a buffer that was allocated before it.
+// launches, each read back before the next because they share the partials buffer. The partials buffer is allocated at the first call, which must come before
+// qwen_p2p_warm (after it a first call is refused: no device allocation behind live traces).
 std::vector<std::vector<uint64_t>> staging_checksum(
     P2PStaging& handle, uint64_t byte_offset, uint64_t length, uint32_t bank, uint32_t cores, uint32_t count) {
     using namespace tt::tt_metal;
@@ -1105,8 +1301,9 @@ std::vector<std::vector<uint64_t>> staging_checksum(
         refuse(op, "the staging buffer was released");
     }
     if (!state.checksum_partials) {
-        if (state.frozen) {
-            refuse(op, "the oracle's partials buffer was not allocated before freeze");
+        // A device allocation is made only before the first warm (and so before any trace): behind live traces a new buffer can be overwritten by a replay.
+        if (state.frozen || state.warmed) {
+            refuse(op, "the oracle's partials buffer was not allocated before warm (call the oracle once before qwen_p2p_warm; production never calls it)");
         }
         distributed::DeviceLocalBufferConfig partial_local;
         partial_local.page_size = qwen_p2p::kChecksumPartialBytes;
@@ -1277,6 +1474,19 @@ nb::dict staging_info(P2PStaging& handle) {
         }
     }
 
+    // Which card each chip is: from the cluster descriptor (read once, here, under the state's mutex: any thread may ask for the info) and checked against sysfs.
+    ChipPciMap pci_map;
+    size_t programs_cached = 0;
+    {
+        std::lock_guard<std::mutex> lock(state.mutex);
+        if (!state.pci_map_read) {
+            state.pci_map = read_chip_pci_map();
+            state.pci_map_read = true;
+        }
+        pci_map = state.pci_map;
+        programs_cached = state.scatter.size() + state.gather.size() + state.digest.size() + state.checksum.size();
+    }
+
     nb::list devices;
     nb::list banks;
     std::vector<BankPoint> first_points;
@@ -1294,20 +1504,40 @@ nb::dict staging_info(P2PStaging& handle) {
         entry["mesh_coord"] = coordinate;
         entry["mesh_index"] = index;
         entry["device_id"] = static_cast<int>(device->id());
-        // GetPCIeDeviceID is the logical chip id of the MMIO chip that controls this one. It equals the tt-kmd device index N (/dev/tenstorrent/N) when every
-        // card is visible to the process, in the order the kernel numbered them (the serving container's case) and NOT when a subset is: pci_bus_id below is
-        // derived from it, so the host must compare it with the card it actually opened (the window self-test does) and not trust it blindly.
-        uint32_t pcie = 0;
-        bool have_pcie = false;
+        // GetPCIeDeviceID is the LOGICAL chip id of the MMIO chip that controls this one; it is not the tt-kmd device number N (/dev/tenstorrent/N): the cluster
+        // descriptor's own map says which N (and which PCI address) belongs to that chip, and the two differ whenever UMD numbered its chips in another order than the
+        // kernel numbered the cards. pcie_device is that N and pci_bus_id that address; sysfs is read for N as a cross-check (pci_bus_id_agrees) and as the fallback for the
+        // address. Whatever cannot be found is None: the host must then refuse to map the shards, not guess.
+        std::optional<int64_t> mmio_chip;
         try {
-            pcie = static_cast<uint32_t>(GetPCIeDeviceID(device->id()));
-            have_pcie = true;
+            mmio_chip = static_cast<int64_t>(GetPCIeDeviceID(device->id()));
         } catch (const std::exception&) {
         }
-        entry["mmio_chip_id"] = have_pcie ? nb::object(nb::int_(pcie)) : nb::object(nb::none());
-        entry["pcie_device"] = have_pcie ? nb::object(nb::int_(pcie)) : nb::object(nb::none());
-        const std::string bus = have_pcie ? pci_bus_id_of(pcie) : std::string();
-        entry["pci_bus_id"] = bus.empty() ? nb::object(nb::none()) : nb::object(nb::str(bus.c_str()));
+        std::optional<int64_t> kmd_device;
+        std::string descriptor_bdf;
+        if (mmio_chip.has_value()) {
+            const auto number = pci_map.device_number.find(*mmio_chip);
+            if (number != pci_map.device_number.end()) {
+                kmd_device = number->second;
+            }
+            const auto address = pci_map.bdf.find(*mmio_chip);
+            if (address != pci_map.bdf.end()) {
+                descriptor_bdf = address->second;
+            }
+        }
+        std::string sysfs_bdf;
+        if (kmd_device.has_value() && *kmd_device >= 0) {
+            sysfs_bdf = pci_bus_id_of(static_cast<uint32_t>(*kmd_device));
+            std::transform(sysfs_bdf.begin(), sysfs_bdf.end(), sysfs_bdf.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        }
+        const std::string& bus = !descriptor_bdf.empty() ? descriptor_bdf : sysfs_bdf;
+        auto text_or_none = [](const std::string& text) { return text.empty() ? nb::object(nb::none()) : nb::object(nb::str(text.c_str())); };
+        entry["mmio_chip_id"] = mmio_chip.has_value() ? nb::object(nb::int_(*mmio_chip)) : nb::object(nb::none());
+        entry["pcie_device"] = kmd_device.has_value() ? nb::object(nb::int_(*kmd_device)) : nb::object(nb::none());
+        entry["pci_bus_id"] = text_or_none(bus);
+        entry["pci_bus_id_source"] = !descriptor_bdf.empty() ? nb::object(nb::str("cluster_descriptor")) : (!sysfs_bdf.empty() ? nb::object(nb::str("sysfs")) : nb::object(nb::none()));
+        entry["pci_bus_id_sysfs"] = text_or_none(sysfs_bdf);
+        entry["pci_bus_id_agrees"] = (!descriptor_bdf.empty() && !sysfs_bdf.empty()) ? nb::object(nb::bool_(descriptor_bdf == sysfs_bdf)) : nb::object(nb::none());
         devices.append(entry);
 
         // The banks' NOC coordinates: from the first device, and every other device must agree.
@@ -1364,6 +1594,8 @@ nb::dict staging_info(P2PStaging& handle) {
     info["dram_largest_free_block_after"] = static_cast<uint64_t>(state.dram_after.largest_free_block_bytes);
     info["frozen"] = state.frozen;
     info["warmed"] = state.warmed;
+    info["programs_cached"] = programs_cached;  // the gather / scatter / digest / oracle programs built so far (0: nothing was ever enqueued)
+    info["pci_map_error"] = pci_map.ok ? nb::object(nb::none()) : nb::object(nb::str(pci_map.error.c_str()));
     return info;
 }
 
@@ -1448,7 +1680,8 @@ NB_MODULE(qwen_kv_read, m) {
 
     // Versions 3 and 4: the P2P KV offload's device side.
     nb::class_<P2PStaging>(m, "P2PStaging")
-        .def("release", &P2PStaging::release, "Frees the staging buffer and its cached programs. Call it before the mesh is closed.")
+        // (the GIL is released: release() waits up to 10 s for the queue to drain, and the P2PIO threads must not stall behind it at shutdown; it touches no Python object)
+        .def("release", &P2PStaging::release, nb::call_guard<nb::gil_scoped_release>(), "Frees the staging buffer and its cached programs. Call it before the mesh is closed.")
         .def_prop_ro("size_bytes", &P2PStaging::size_bytes)
         .def_prop_ro("page_bytes", &P2PStaging::page_bytes)
         .def_prop_ro("num_banks", &P2PStaging::num_banks)
@@ -1491,8 +1724,10 @@ NB_MODULE(qwen_kv_read, m) {
         nb::arg("staging"),
         "A dict: address (byte address of the range in bank 0 as seen through a TLB window aimed at it), size (bytes per bank), page_bytes, aligned_4k_offset / "
         "aligned_4k_address / aligned_4k_size (the first 4096-aligned byte of the range and the whole 4096-byte units from there), banks [{bank, noc_x, noc_y, "
-        "noc_endpoints, bank_offset, address}] (translated NOC coordinates of an endpoint of each bank), devices [{mesh_coord, device_id, pcie_device, pci_bus_id "
-        "(None when sysfs cannot be read)}] in mesh (row-major) order, and the allocation's cost.");
+        "noc_endpoints, bank_offset, address}] (translated NOC coordinates of an endpoint of each bank), devices [{mesh_coord, device_id, mmio_chip_id (the logical "
+        "id of the card's MMIO chip), pcie_device (the tt-kmd device number N of that card, from the cluster descriptor), pci_bus_id (its PCI address, from the cluster "
+        "descriptor, else sysfs), pci_bus_id_source, pci_bus_id_sysfs, pci_bus_id_agrees}] in mesh (row-major) order (any of the PCI fields is None when it cannot be found), "
+        "and the allocation's cost (programs_cached is the number of programs built so far).");
     m.def(
         "qwen_blocks_to_staging",
         [](const ttnn::Tensor& tensor,

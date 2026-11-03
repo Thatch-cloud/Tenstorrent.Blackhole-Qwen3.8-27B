@@ -5,13 +5,15 @@
 It runs INSIDE a throwaway container of the serving image that has no device mounted (build_kv_read.sh does that) and refuses to run where /dev/tenstorrent exists. The mock
 cluster is slow-dispatch and executes nothing, so what it proves is the HOST side of every op against the real tt-metal:
 
-  * the staging allocation and its info (8 banks, 4 devices, aligned 4 KiB fields, one staging per mesh, bad sizes refused);
+  * the staging allocation and its info (8 banks, 4 devices in the coordinate order of the (4, 1) mesh production opens, aligned 4 KiB fields, one staging per mesh, bad sizes
+    refused); the tt-kmd device number of each device is the cluster descriptor's (the mock descriptor permutes them: chip 0 is device 1), not the logical chip id;
   * every kernel is JIT-compiled by tt-metal's own compiler with its own flags the first time it is dispatched (a kernel that does not compile raises QwenP2PEnqueueError,
     which is NOT a refusal: the check breaks each of the three production kernels in turn and sees exactly that), and a missing kernel file is a refusal;
   * the whole refusal matrix (bad bank, offset, stride, block ids, counts, geometry, queue, repeats, tensors that do not match) raises QwenP2PRefused, a ValueError, BEFORE
     anything is enqueued, and a refusal does not disturb the next valid call;
   * the digest handle: ready() / result() shapes, 300 calls with their handles dropped (host buffers outlive the handles), a handle outliving its staging;
-  * warm -> freeze: freeze needs warm, a warmed program key keeps working after freeze, a new key is refused;
+  * warm -> freeze: freeze needs warm, a warmed program key keeps working after freeze, a new key is refused; a warm that is refused because of its LAST tensor has built no
+    program (every tensor is checked before the first gather); the oracle cannot allocate after warm; a mesh that had a staging frozen takes no new one;
   * the refusal during trace capture (forced with QWEN_P2P_TEST_TRACE_ACTIVE: the mock device cannot capture a trace) for every op.
 
 What it cannot prove: the bytes. The mock device reads back zeros. The kernels' arithmetic is checked on the CPU (test_p2p_staging.py) and on a card (p2p_staging_card.py).
@@ -22,6 +24,7 @@ Prints "MOCK-OK <n> checks" and exits 0, or the failed checks and exit 1.
 import argparse
 import gc
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -31,6 +34,23 @@ DEFAULT_DESC = 'tt_metal/third_party/umd/tests/cluster_descriptor_examples/black
 BLOCKS = 130                      # blocks of each scratch cache
 ROW = 69632                       # one block's row of one tensor on one chip: 64 pages of 1,088 bytes
 SHARD = 696320                    # ten tensors
+
+
+def descriptor_device_numbers(path):
+    """`chips_with_mmio` of a cluster descriptor YAML -> {logical chip id: tt-kmd device number}. Read here from the source file, independently of the extension (which reads the
+    descriptor tt-metal serializes from the live cluster)."""
+    numbers, inside = {}, False
+    with open(path, encoding='utf-8') as handle:
+        for line in handle:
+            if not line.strip() or line.lstrip().startswith('#'):
+                continue
+            if not line[0].isspace() and not line.startswith('-'):
+                inside = line.split(':')[0].strip() == 'chips_with_mmio'
+                continue
+            match = re.match(r'\s*-?\s*(\d+)\s*:\s*(\d+)\s*$', line)
+            if inside and match:
+                numbers[int(match.group(1))] = int(match.group(2))
+    return numbers
 
 
 class QuietFds(object):
@@ -104,7 +124,7 @@ def run(cluster_desc):
     check = Checks()
     refused, enqueue_error = q.QwenP2PRefused, q.QwenP2PEnqueueError
     started = time.time()
-    mesh = ttnn.open_mesh_device(ttnn.MeshShape(1, 4))
+    mesh = ttnn.open_mesh_device(ttnn.MeshShape(4, 1))        # as production opens it
     try:
         check.ok(q.QWEN_KV_READ_VERSION == '4', 'the version is 4')
         check.ok(issubclass(refused, ValueError) and not issubclass(refused, RuntimeError), 'QwenP2PRefused is a ValueError (nothing was enqueued)')
@@ -124,7 +144,27 @@ def run(cluster_desc):
         info = ttnn.qwen_p2p_staging_info(staging)
         check.ok(len(info['banks']) == 8 and len(info['devices']) == 4, 'info: 8 banks, 4 devices')
         check.ok(all(b['noc_x'] is not None and b['noc_y'] is not None for b in info['banks']), 'info: every bank has NOC coordinates')
-        check.ok([d['mesh_coord'] for d in info['devices']] == [[0, 0], [0, 1], [0, 2], [0, 3]], 'info: devices in mesh order')
+        check.ok([d['mesh_coord'] for d in info['devices']] == [[0, 0], [1, 0], [2, 0], [3, 0]], 'info: devices in mesh order, with the coordinates of a (4, 1) mesh')
+        check.ok([d['mesh_index'] for d in info['devices']] == [0, 1, 2, 3], 'info: mesh indexes')
+        numbers = descriptor_device_numbers(cluster_desc)
+        check.ok(len(numbers) == 4, 'the mock cluster descriptor names 4 cards')
+        for d in info['devices']:
+            check.ok(d['mmio_chip_id'] == d['device_id'], 'info: a P150 is its own MMIO chip (device %s)' % d['device_id'])
+            check.ok(d['pcie_device'] == numbers.get(d['mmio_chip_id']), 'info: pcie_device %s is the cluster descriptor\'s tt-kmd device number of chip %s (%s)' % (
+                d['pcie_device'], d['mmio_chip_id'], numbers.get(d['mmio_chip_id'])))
+            check.ok(d['pci_bus_id'] is None or (isinstance(d['pci_bus_id'], str) and d['pci_bus_id'] == d['pci_bus_id'].lower()), 'info: pci_bus_id is a lower case string or None')
+            check.ok(d['pci_bus_id_source'] in ('cluster_descriptor', 'sysfs', None) and (d['pci_bus_id'] is None) == (d['pci_bus_id_source'] is None), 'info: pci_bus_id_source')
+            # The mock cluster's addresses are SYNTHETIC (UMD makes them up) and sysfs in the container shows the host's own cards, so the two may well disagree here; on a card
+            # they must not (p2p_staging_card.py fails on a disagreement). What is checked is that the fields say what they are: agrees is None when there is nothing to
+            # compare, else it is whether the two addresses are equal, and the address reported is the descriptor's whenever the descriptor has one.
+            nothing_to_compare = d['pci_bus_id_source'] != 'cluster_descriptor' or d['pci_bus_id_sysfs'] is None
+            check.ok((d['pci_bus_id_agrees'] is None) == nothing_to_compare, 'info: pci_bus_id_agrees is None only when there is nothing to compare (device %s)' % d['device_id'])
+            check.ok(d['pci_bus_id_agrees'] is None or d['pci_bus_id_agrees'] == (d['pci_bus_id'] == d['pci_bus_id_sysfs']), 'info: pci_bus_id_agrees says whether the addresses are equal')
+        check.ok(any(d['pcie_device'] != d['mmio_chip_id'] for d in info['devices']) == (len(set(numbers.items()) - {(c, c) for c in numbers}) > 0),
+                 'info: a descriptor that permutes chips and devices gives a pcie_device that is not the chip id (the mock\'s does)')
+        check.ok(info['programs_cached'] == 0 and info['pci_map_error'] is None, 'info: nothing built or enqueued yet, and the cluster descriptor was read')
+        print('  devices: %s' % ', '.join('chip %s -> tt-kmd %s (%s, sysfs agrees: %s)' % (d['mmio_chip_id'], d['pcie_device'], d['pci_bus_id_source'], d['pci_bus_id_agrees'])
+                                         for d in info['devices']))
         lead = info['aligned_4k_offset']
         check.ok(0 <= lead < 4096 and (info['address'] + lead) % 4096 == 0 and info['aligned_4k_address'] == info['address'] + lead, 'info: the 4 KiB lead')
         check.ok(info['aligned_4k_size'] == (info['size'] - lead) // 4096 * 4096 and info['size'] == ring, 'info: the 4 KiB usable size')
@@ -241,9 +281,21 @@ def run(cluster_desc):
         print('warm, freeze, and a program key that was not warmed')
         staging.release()
         staging = ttnn.qwen_p2p_staging_alloc(mesh, ring, False, 4096)
+        # A warm that is refused enqueued nothing, whichever tensor is the bad one: all are checked before the first gather (a bad LAST tensor is the case that used to run nine
+        # gathers first). No program was built either: programs_cached counts the builds, and the first gather builds one.
+        short = ttnn.empty([4, 1, 128, 512], dtype=ttnn.bfloat8_b, layout=ttnn.TILE_LAYOUT, device=mesh, memory_config=ttnn.DRAM_MEMORY_CONFIG)   # 4 blocks: no block 7
+        error = check.raises(refused, ttnn.qwen_p2p_warm, staging, tensors[:9] + [short], 7)
+        check.ok(error is not None and 'tensor 9' in str(error), 'a warm refused for its last tensor says which tensor: ' + str(error)[:160])
+        error = check.raises(refused, ttnn.qwen_p2p_warm, staging, tensors[:9] + [odd])                    # a block of 32 pages in the last place
+        check.ok(error is not None and 'tensor 9' in str(error), 'a warm refused for the block size of its last tensor says which tensor: ' + str(error)[:160])
+        check.raises(refused, ttnn.qwen_p2p_warm, staging, tensors, 0, 0, ring - 1000)
+        check.ok(ttnn.qwen_p2p_staging_info(staging)['programs_cached'] == 0 and not staging.warmed, 'a refused warm built no program and warmed nothing')
+        ttnn.deallocate(short)
         started_warm = time.time()
         ttnn.qwen_p2p_warm(staging, tensors)
         check.ok(staging.warmed and not staging.frozen, 'warm')
+        error = check.raises(refused, ttnn.qwen_staging_checksum, staging, 0, 4096)         # warmed but not yet frozen: the oracle still allocates nothing
+        check.ok(error is not None and 'before warm' in str(error), 'the oracle allocates nothing after warm, even before freeze: ' + str(error)[:160])
         ttnn.qwen_p2p_freeze(staging)
         check.ok(staging.frozen, 'freeze')
         ttnn.qwen_p2p_freeze(staging)                                                       # idempotent
@@ -255,6 +307,9 @@ def run(cluster_desc):
         error = check.raises(refused, ttnn.qwen_blocks_to_staging, odd, staging, 0, 8192, [1], 34816, 32)    # a block of 32 pages: a new key
         check.ok(error is not None and 'not warmed' in str(error), 'a new program key after freeze is refused, and says why')
         check.raises(refused, ttnn.qwen_p2p_warm, staging, tensors)                         # warm after freeze
+        error = check.raises(refused, ttnn.qwen_staging_checksum, staging, 0, 4096)         # the oracle's partials were not allocated before warm: no allocation now
+        check.ok(error is not None and 'before warm' in str(error), 'the oracle allocates nothing after warm, and says why: ' + str(error)[:160])
+        check.ok(ttnn.qwen_p2p_staging_info(staging)['programs_cached'] >= 3 and staging.frozen, 'the warmed programs are cached')
 
         print('digest handles and host buffers')
         started_calls = time.time()
@@ -272,6 +327,8 @@ def run(cluster_desc):
         check.ok(straggler.ready() and len(straggler.result()) == 4, 'a handle outlives its staging and stays readable')
         check.raises(refused, ttnn.qwen_blocks_digest_async, tensors, [1], 64)
         check.raises(refused, ttnn.qwen_blocks_to_staging, tensors[0], staging, 0, 0, [1], SHARD, 64)
+        error = check.raises(refused, ttnn.qwen_p2p_staging_alloc, mesh, ring, False, 4096)    # a mesh that had a staging frozen takes no new one, though that one is released
+        check.ok(error is not None and 'frozen' in str(error), 'a mesh that had a staging frozen takes no new staging (traces may exist), and the refusal says why: ' + str(error)[:160])
     finally:
         ttnn.close_mesh_device(mesh)
         shutil.rmtree(cache, True)
