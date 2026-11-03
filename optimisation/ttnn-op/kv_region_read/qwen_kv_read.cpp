@@ -24,6 +24,8 @@
 //       devices=[{mesh_coord, device_id, mmio_chip_id, pcie_device, pci_bus_id, ...}], ...)
 //       pcie_device is the tt-kmd device number N of the card's MMIO chip and pci_bus_id its PCI address, both from the cluster descriptor tt-metal holds (a logical
 //       chip id is NOT N); pci_bus_id_sysfs is the cross-check, None for any of them that cannot be found
+//   ttnn.qwen_p2p_mesh_devices(mesh_device) -> [dict per device]       the same device records as qwen_p2p_staging_info()["devices"], with NO staging allocation
+//       (the registry's shard map is built from it before anything is allocated on a card)
 //   ttnn.qwen_blocks_to_staging(tensor, staging, bank, byte_offset, blocks, row_stride, pages_per_block, cq_id=0)       GATHER: KV rows -> staging
 //       staging[byte_offset + i * row_stride + j * page_bytes] = page (blocks[i] * pages_per_block + j) of the tensor
 //   ttnn.qwen_write_blocks_from_staging(tensor, staging, bank, byte_offset, blocks, row_stride, pages_per_block, cq_id=0)   SCATTER: staging -> KV rows
@@ -1446,6 +1448,55 @@ BankPoint bank_point(tt::tt_metal::IDevice* device, uint32_t bank) {
     return point;
 }
 
+// One mesh device as the host must know it: which tt-kmd device and which PCI address it is. Shared by qwen_p2p_staging_info and qwen_p2p_mesh_devices, so that the two
+// cannot disagree (the Python worker compares the registry's map, built from the second, with the first).
+nb::dict device_record(tt::tt_metal::IDevice* device, size_t index, const MeshCoordinate& coordinate_of, const ChipPciMap& pci_map) {
+    using namespace tt::tt_metal;
+    nb::dict entry;
+    nb::list coordinate;
+    for (uint32_t value : coordinate_of.coords()) {
+        coordinate.append(value);
+    }
+    entry["mesh_coord"] = coordinate;
+    entry["mesh_index"] = index;
+    entry["device_id"] = static_cast<int>(device->id());
+    // GetPCIeDeviceID is the LOGICAL chip id of the MMIO chip that controls this one; it is not the tt-kmd device number N (/dev/tenstorrent/N): the cluster
+    // descriptor's own map says which N (and which PCI address) belongs to that chip, and the two differ whenever UMD numbered its chips in another order than the
+    // kernel numbered the cards. pcie_device is that N and pci_bus_id that address; sysfs is read for N as a cross-check (pci_bus_id_agrees) and as the fallback for the
+    // address. Whatever cannot be found is None: the host must then refuse to map the shards, not guess.
+    std::optional<int64_t> mmio_chip;
+    try {
+        mmio_chip = static_cast<int64_t>(GetPCIeDeviceID(device->id()));
+    } catch (const std::exception&) {
+    }
+    std::optional<int64_t> kmd_device;
+    std::string descriptor_bdf;
+    if (mmio_chip.has_value()) {
+        const auto number = pci_map.device_number.find(*mmio_chip);
+        if (number != pci_map.device_number.end()) {
+            kmd_device = number->second;
+        }
+        const auto address = pci_map.bdf.find(*mmio_chip);
+        if (address != pci_map.bdf.end()) {
+            descriptor_bdf = address->second;
+        }
+    }
+    std::string sysfs_bdf;
+    if (kmd_device.has_value() && *kmd_device >= 0) {
+        sysfs_bdf = pci_bus_id_of(static_cast<uint32_t>(*kmd_device));
+        std::transform(sysfs_bdf.begin(), sysfs_bdf.end(), sysfs_bdf.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    }
+    const std::string& bus = !descriptor_bdf.empty() ? descriptor_bdf : sysfs_bdf;
+    auto text_or_none = [](const std::string& text) { return text.empty() ? nb::object(nb::none()) : nb::object(nb::str(text.c_str())); };
+    entry["mmio_chip_id"] = mmio_chip.has_value() ? nb::object(nb::int_(*mmio_chip)) : nb::object(nb::none());
+    entry["pcie_device"] = kmd_device.has_value() ? nb::object(nb::int_(*kmd_device)) : nb::object(nb::none());
+    entry["pci_bus_id"] = text_or_none(bus);
+    entry["pci_bus_id_source"] = !descriptor_bdf.empty() ? nb::object(nb::str("cluster_descriptor")) : (!sysfs_bdf.empty() ? nb::object(nb::str("sysfs")) : nb::object(nb::none()));
+    entry["pci_bus_id_sysfs"] = text_or_none(sysfs_bdf);
+    entry["pci_bus_id_agrees"] = (!descriptor_bdf.empty() && !sysfs_bdf.empty()) ? nb::object(nb::bool_(descriptor_bdf == sysfs_bdf)) : nb::object(nb::none());
+    return entry;
+}
+
 // qwen_p2p_staging_info: what the host needs to aim its window and map the cards. One dict (the banks and the staging range are the same on every device; the host
 // checks that, and so does this: if the devices disagree about a bank's NOC coordinates the call refuses rather than let a window be aimed at the wrong place).
 nb::dict staging_info(P2PStaging& handle) {
@@ -1496,49 +1547,7 @@ nb::dict staging_info(P2PStaging& handle) {
             refuse(op, "a device of the mesh is not local");
         }
         IDevice* device = found.front();
-        nb::dict entry;
-        nb::list coordinate;
-        for (uint32_t value : coords[index].coords()) {
-            coordinate.append(value);
-        }
-        entry["mesh_coord"] = coordinate;
-        entry["mesh_index"] = index;
-        entry["device_id"] = static_cast<int>(device->id());
-        // GetPCIeDeviceID is the LOGICAL chip id of the MMIO chip that controls this one; it is not the tt-kmd device number N (/dev/tenstorrent/N): the cluster
-        // descriptor's own map says which N (and which PCI address) belongs to that chip, and the two differ whenever UMD numbered its chips in another order than the
-        // kernel numbered the cards. pcie_device is that N and pci_bus_id that address; sysfs is read for N as a cross-check (pci_bus_id_agrees) and as the fallback for the
-        // address. Whatever cannot be found is None: the host must then refuse to map the shards, not guess.
-        std::optional<int64_t> mmio_chip;
-        try {
-            mmio_chip = static_cast<int64_t>(GetPCIeDeviceID(device->id()));
-        } catch (const std::exception&) {
-        }
-        std::optional<int64_t> kmd_device;
-        std::string descriptor_bdf;
-        if (mmio_chip.has_value()) {
-            const auto number = pci_map.device_number.find(*mmio_chip);
-            if (number != pci_map.device_number.end()) {
-                kmd_device = number->second;
-            }
-            const auto address = pci_map.bdf.find(*mmio_chip);
-            if (address != pci_map.bdf.end()) {
-                descriptor_bdf = address->second;
-            }
-        }
-        std::string sysfs_bdf;
-        if (kmd_device.has_value() && *kmd_device >= 0) {
-            sysfs_bdf = pci_bus_id_of(static_cast<uint32_t>(*kmd_device));
-            std::transform(sysfs_bdf.begin(), sysfs_bdf.end(), sysfs_bdf.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        }
-        const std::string& bus = !descriptor_bdf.empty() ? descriptor_bdf : sysfs_bdf;
-        auto text_or_none = [](const std::string& text) { return text.empty() ? nb::object(nb::none()) : nb::object(nb::str(text.c_str())); };
-        entry["mmio_chip_id"] = mmio_chip.has_value() ? nb::object(nb::int_(*mmio_chip)) : nb::object(nb::none());
-        entry["pcie_device"] = kmd_device.has_value() ? nb::object(nb::int_(*kmd_device)) : nb::object(nb::none());
-        entry["pci_bus_id"] = text_or_none(bus);
-        entry["pci_bus_id_source"] = !descriptor_bdf.empty() ? nb::object(nb::str("cluster_descriptor")) : (!sysfs_bdf.empty() ? nb::object(nb::str("sysfs")) : nb::object(nb::none()));
-        entry["pci_bus_id_sysfs"] = text_or_none(sysfs_bdf);
-        entry["pci_bus_id_agrees"] = (!descriptor_bdf.empty() && !sysfs_bdf.empty()) ? nb::object(nb::bool_(descriptor_bdf == sysfs_bdf)) : nb::object(nb::none());
-        devices.append(entry);
+        devices.append(device_record(device, index, coords[index], pci_map));
 
         // The banks' NOC coordinates: from the first device, and every other device must agree.
         for (uint32_t bank = 0; bank < state.num_banks; ++bank) {
@@ -1597,6 +1606,32 @@ nb::dict staging_info(P2PStaging& handle) {
     info["programs_cached"] = programs_cached;  // the gather / scatter / digest / oracle programs built so far (0: nothing was ever enqueued)
     info["pci_map_error"] = pci_map.ok ? nb::object(nb::none()) : nb::object(nb::str(pci_map.error.c_str()));
     return info;
+}
+
+// qwen_p2p_mesh_devices: the mesh -> card map and NOTHING else. It allocates no staging buffer, enqueues nothing, compiles nothing and takes no lock of any staging: it reads
+// the mesh's own device list and the cluster descriptor tt-metalium holds. The host needs the PCI address of every card BEFORE the first allocation (the start-up order
+// keeps a zero device footprint until the host checks have passed, and the registry's shard map is part of them), and the logical device id says nothing about it.
+// Returns one dict per device in mesh row-major order, the very records qwen_p2p_staging_info()["devices"] carries.
+nb::list mesh_devices(MeshDevice& mesh) {
+    using namespace tt::tt_metal;
+    const char* op = "qwen_p2p_mesh_devices";
+    if (!mesh.is_initialized()) {
+        refuse(op, "the mesh device is closed");
+    }
+    const std::vector<MeshCoordinate> coords = mesh_coordinates(mesh);
+    if (coords.empty()) {
+        refuse(op, "the mesh has no device");
+    }
+    const ChipPciMap pci_map = read_chip_pci_map();
+    nb::list devices;
+    for (size_t index = 0; index < coords.size(); ++index) {
+        const auto found = mesh.get_view().get_devices(MeshCoordinateRange(coords[index]));
+        if (found.empty()) {
+            refuse(op, "a device of the mesh is not local");
+        }
+        devices.append(device_record(found.front(), index, coords[index], pci_map));
+    }
+    return devices;
 }
 
 }  // namespace qwen_p2p_host
@@ -1880,6 +1915,14 @@ NB_MODULE(qwen_kv_read, m) {
         nb::arg("out"),
         nb::arg("bank") = nb::none(),
         "Diagnostic: reads the staging range of bank `bank` (default 0) into uint8 out [devices, n]. byte_offset and n are multiples of the staging page size. Blocking.");
+    // Added within version 4 (the integration review of the Gemma P2P offload, B1): the mesh -> card map without a staging allocation.
+    m.def(
+        "qwen_p2p_mesh_devices",
+        [](MeshDevice& mesh) { return qwen_p2p_host::mesh_devices(mesh); },
+        nb::arg("mesh"),
+        "Which card each device of the mesh is, with NO staging allocation, no program and nothing enqueued: a list with one dict per device in mesh row-major order, the same records as "
+        "qwen_p2p_staging_info(staging)[\"devices\"] (mesh_coord, mesh_index, device_id, mmio_chip_id, pcie_device = the tt-kmd device number N, pci_bus_id = the PCI address, lower case, "
+        "its source and the sysfs cross-check). A field that cannot be found is None: the host must then refuse to map the shards, not guess.");
     m.attr("QWEN_KV_READ_VERSION") = "4";
     for (const char* name : {"qwen_read_blocks",
                              "qwen_block_bytes",
@@ -1887,6 +1930,7 @@ NB_MODULE(qwen_kv_read, m) {
                              "qwen_write_blocks_raw",
                              "qwen_p2p_staging_alloc",
                              "qwen_p2p_staging_info",
+                             "qwen_p2p_mesh_devices",
                              "qwen_blocks_to_staging",
                              "qwen_write_blocks_from_staging",
                              "qwen_blocks_digest_async",

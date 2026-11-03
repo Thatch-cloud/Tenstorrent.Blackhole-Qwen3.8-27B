@@ -93,7 +93,7 @@ echo "== import"
 PYTHONPATH=/tmp/kvr:${PYTHONPATH:-} python3 -c '
 import os, ttnn, qwen_kv_read
 assert qwen_kv_read.QWEN_KV_READ_VERSION == "4", qwen_kv_read.QWEN_KV_READ_VERSION
-ops = ("qwen_read_blocks", "qwen_block_bytes", "qwen_read_blocks_raw", "qwen_write_blocks_raw", "qwen_p2p_staging_alloc", "qwen_p2p_staging_info", "qwen_blocks_to_staging",
+ops = ("qwen_read_blocks", "qwen_block_bytes", "qwen_read_blocks_raw", "qwen_write_blocks_raw", "qwen_p2p_staging_alloc", "qwen_p2p_staging_info", "qwen_p2p_mesh_devices", "qwen_blocks_to_staging",
        "qwen_write_blocks_from_staging", "qwen_blocks_digest_async", "qwen_p2p_record_event", "qwen_p2p_warm", "qwen_p2p_freeze", "qwen_staging_checksum",
        "qwen_p2p_staging_write", "qwen_p2p_staging_read")
 assert all(callable(getattr(ttnn, n)) for n in ops), "an op is missing on ttnn"
@@ -102,6 +102,7 @@ d = os.path.dirname(qwen_kv_read.__file__)
 assert all(os.path.getsize(os.path.join(d, k)) > 0 for k in ("qwen_p2p_scatter.cpp", "qwen_p2p_gather.cpp", "qwen_p2p_checksum.cpp", "qwen_p2p_digest_rows.cpp")), "a kernel is missing beside the module"
 sig = lambda n: (getattr(ttnn, n).__doc__ or "").splitlines()[0]
 assert "pages_per_block: int" in sig("qwen_blocks_to_staging") and "cq_id: int = 0" in sig("qwen_write_blocks_from_staging"), "the gather / scatter signature is not the frozen interface"
+assert "mesh: " in sig("qwen_p2p_mesh_devices"), "the mesh -> card map takes the mesh only"
 assert "tensors:" in sig("qwen_blocks_digest_async") and "DigestHandle" in sig("qwen_blocks_digest_async"), "the digest signature is not the frozen interface"
 print("IMPORT-OK", qwen_kv_read.QWEN_KV_READ_VERSION)
 '

@@ -1625,7 +1625,7 @@ int main(int, char** argv) {
 
 
 class SourceAgreementTests(unittest.TestCase):
-    OPS = ('qwen_p2p_staging_alloc', 'qwen_p2p_staging_info', 'qwen_blocks_to_staging', 'qwen_write_blocks_from_staging', 'qwen_blocks_digest_async', 'qwen_p2p_record_event',
+    OPS = ('qwen_p2p_staging_alloc', 'qwen_p2p_staging_info', 'qwen_p2p_mesh_devices', 'qwen_blocks_to_staging', 'qwen_write_blocks_from_staging', 'qwen_blocks_digest_async', 'qwen_p2p_record_event',
            'qwen_p2p_warm', 'qwen_p2p_freeze', 'qwen_staging_checksum', 'qwen_p2p_staging_write', 'qwen_p2p_staging_read')
 
     def parameters(self, op):
@@ -1660,6 +1660,7 @@ class SourceAgreementTests(unittest.TestCase):
         self.assertEqual(self.names('qwen_p2p_warm')[:3], ['staging', 'tensors', 'null_block'])
         self.assertEqual(self.names('qwen_p2p_freeze'), ['staging'])
         self.assertEqual(self.names('qwen_p2p_staging_info'), ['staging'])
+        self.assertEqual(self.names('qwen_p2p_mesh_devices'), ['mesh'], 'the mesh -> card map takes the mesh and nothing else: no staging, no queue, no byte count')
         # the oracles keep the v3 signatures
         self.assertEqual(self.names('qwen_staging_checksum'), ['staging', 'byte_offset', 'length', 'bank', 'cores', 'count'])
         defaults = dict(self.parameters('qwen_blocks_to_staging'))
@@ -1815,12 +1816,30 @@ class SourceAgreementTests(unittest.TestCase):
     def test_the_info_names_the_card_from_the_cluster_descriptor_not_from_the_logical_chip_id(self):
         text = read(EXTENSION)
         info = self.function_body(text, 'nb::dict staging_info(', '}  // namespace qwen_p2p_host\n\nNB_MODULE')
+        record = self.function_body(text, 'nb::dict device_record(', '// qwen_p2p_staging_info: what the host needs')
         self.assertIn('read_chip_pci_map()', info)
-        self.assertIn('pci_map.device_number.find(*mmio_chip)', info)
-        self.assertIn('entry["pcie_device"] = kmd_device.has_value()', info)
-        self.assertNotIn('entry["pcie_device"] = have_pcie', info, 'pcie_device is no longer the logical chip id')
-        for field in ('pci_bus_id_source', 'pci_bus_id_sysfs', 'pci_bus_id_agrees', 'mmio_chip_id', 'programs_cached'):
-            self.assertIn('"%s"' % field, info, field)
+        self.assertIn('device_record(device, index, coords[index], pci_map)', info, 'the info\'s device list is built by the shared record')
+        self.assertIn('pci_map.device_number.find(*mmio_chip)', record)
+        self.assertIn('entry["pcie_device"] = kmd_device.has_value()', record)
+        self.assertNotIn('entry["pcie_device"] = have_pcie', record, 'pcie_device is no longer the logical chip id')
+        for field in ('pci_bus_id_source', 'pci_bus_id_sysfs', 'pci_bus_id_agrees', 'mmio_chip_id'):
+            self.assertIn('"%s"' % field, record, field)
+        self.assertIn('"programs_cached"', info)
+        self.assertNotIn('nb::dict entry', info, 'the per-device record lives in one place only')
+
+    def test_the_mesh_card_map_allocates_nothing_enqueues_nothing_and_is_the_infos_record(self):
+        """B1 of the integration review: the registry's shard map must exist BEFORE the first allocation on a card, so the op that gives it may not need a staging."""
+        text = read(EXTENSION)
+        body = self.function_body(text, 'nb::list mesh_devices(', '}  // namespace qwen_p2p_host\n\nNB_MODULE')
+        self.assertIn('read_chip_pci_map()', body)
+        self.assertIn('device_record(found.front(), index, coords[index], pci_map)', body, 'the very record qwen_p2p_staging_info()["devices"] carries')
+        self.assertIn('mesh.get_view().get_devices(MeshCoordinateRange(coords[index]))', body)
+        for forbidden in ('MeshBuffer', 'StagingState', 'P2PStaging', 'program_for', 'enqueue', 'CreateProgram', 'mesh_command_queue', 'frozen_meshes', 'kernel_path', 'Finish'):
+            self.assertNotIn(forbidden, body, forbidden + ' would make the shard map a device operation')
+        binding = text[text.index('"qwen_p2p_mesh_devices",\n        [](MeshDevice& mesh)'):]
+        binding = binding[:binding.index('m.attr("QWEN_KV_READ_VERSION")')]
+        self.assertIn('qwen_p2p_host::mesh_devices(mesh)', binding)
+        self.assertNotIn('gil_scoped_release', binding, 'it builds Python dicts: the GIL stays held')
 
     def test_runtime_args_are_rewritten_from_the_live_buffers_on_every_call(self):
         text = read(EXTENSION)

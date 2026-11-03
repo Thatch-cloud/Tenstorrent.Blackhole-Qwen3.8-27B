@@ -137,6 +137,17 @@ def run(cluster_desc):
         tensors = make([BLOCKS, 1, 128, 512], 5) + make([BLOCKS, 2, 128, 256], 5)
         check.ok(all(int(ttnn.qwen_block_bytes(t)) == ROW for t in tensors), 'every tensor\'s block is 69,632 bytes')
 
+        print('the mesh -> card map, before any staging exists (B1 of the integration review)')
+        before = ttnn.qwen_p2p_mesh_devices(mesh)
+        check.ok(isinstance(before, list) and len(before) == 4, 'mesh devices: one record per device of the (4, 1) mesh, with no staging allocated')
+        check.ok([d['mesh_coord'] for d in before] == [[0, 0], [1, 0], [2, 0], [3, 0]] and [d['mesh_index'] for d in before] == [0, 1, 2, 3], 'mesh devices: in mesh order')
+        check.ok(all(d['pcie_device'] is not None and d['pci_bus_id'] is not None and d['pci_bus_id'] == d['pci_bus_id'].lower() for d in before),
+                 'mesh devices: every card has its tt-kmd number and a lower case PCI address from the cluster descriptor, without a staging buffer')
+        check.ok(len({d['pci_bus_id'] for d in before}) == 4 and len({d['pcie_device'] for d in before}) == 4, 'mesh devices: four distinct cards')
+        check.ok(ttnn.qwen_p2p_mesh_devices(mesh) == before, 'mesh devices: a second call answers the same (nothing was built, nothing remembered)')
+        check.ok(ttnn.qwen_p2p_mesh_devices.__doc__ and 'NO staging allocation' in ttnn.qwen_p2p_mesh_devices.__doc__, 'mesh devices: the docstring says it needs no staging')
+        check.raises(TypeError, ttnn.qwen_p2p_mesh_devices, None)
+
         print('allocation and info')
         ring = 4 << 20
         staging = ttnn.qwen_p2p_staging_alloc(mesh, ring, False, 4096)
@@ -163,6 +174,7 @@ def run(cluster_desc):
         check.ok(any(d['pcie_device'] != d['mmio_chip_id'] for d in info['devices']) == (len(set(numbers.items()) - {(c, c) for c in numbers}) > 0),
                  'info: a descriptor that permutes chips and devices gives a pcie_device that is not the chip id (the mock\'s does)')
         check.ok(info['programs_cached'] == 0 and info['pci_map_error'] is None, 'info: nothing built or enqueued yet, and the cluster descriptor was read')
+        check.ok(info['devices'] == before, 'info: the devices of the staging info ARE the records the mesh map gave before the allocation (the worker compares the two)')
         print('  devices: %s' % ', '.join('chip %s -> tt-kmd %s (%s, sysfs agrees: %s)' % (d['mmio_chip_id'], d['pcie_device'], d['pci_bus_id_source'], d['pci_bus_id_agrees'])
                                          for d in info['devices']))
         lead = info['aligned_4k_offset']
@@ -329,9 +341,12 @@ def run(cluster_desc):
         check.raises(refused, ttnn.qwen_blocks_to_staging, tensors[0], staging, 0, 0, [1], SHARD, 64)
         error = check.raises(refused, ttnn.qwen_p2p_staging_alloc, mesh, ring, False, 4096)    # a mesh that had a staging frozen takes no new one, though that one is released
         check.ok(error is not None and 'frozen' in str(error), 'a mesh that had a staging frozen takes no new staging (traces may exist), and the refusal says why: ' + str(error)[:160])
+        check.ok(ttnn.qwen_p2p_mesh_devices(mesh) == before, 'mesh devices: after the staging was frozen and released the map is the same, and the call still works')
     finally:
         ttnn.close_mesh_device(mesh)
         shutil.rmtree(cache, True)
+    error = check.raises(refused, ttnn.qwen_p2p_mesh_devices, mesh)
+    check.ok(error is not None and 'closed' in str(error), 'mesh devices: a closed mesh is a refusal that says so: ' + str(error)[:120])
     print('%d checks in %.1f s' % (check.count, time.time() - started))
     if check.failed:
         print('MOCK-FAILED %d of %d checks:' % (len(check.failed), check.count))
