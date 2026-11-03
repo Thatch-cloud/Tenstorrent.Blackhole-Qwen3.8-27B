@@ -100,7 +100,9 @@ class Flow(RigCase):
         rig.finish('r3', 'r4', limit=400)
         self.assertEqual(rig.worker.stats['submit_store'], stores_before)
         self.assertEqual(len(rig.loads), loads_before)
-        self.assertEqual(rig.worker.quarantined_banks, [] if not rig.worker.quarantined_banks else rig.worker.quarantined_banks)
+        # the half-enqueued sequence of the throw is quarantined behind a trailing event, and released once that event completes
+        rig.run_until(lambda: not rig.worker.quarantined_banks, what='the quarantine released')
+        self.assertEqual(rig.worker.free_banks, {'spill': [0, 1], 'restore': [2, 3, 4, 5, 6, 7]}, 'every staging bank is back in circulation')
 
     def test_the_kill_switch_latches_a_load_in_flight_and_the_request_recomputes(self):
         rig, prompt = self.stored_rig()
@@ -125,8 +127,7 @@ class Flow(RigCase):
         under_bio = [slot for slot, count in enumerate(allocator.inflight) if count]
         self.assertTrue(under_bio)
         self.assertTrue(rig.scheduler.reset_connector_cache())          # POST /reset_prefix_cache?reset_external=true
-        self.assertEqual(rig.manager.index, {} if not rig.manager.index else rig.manager.index)
-        self.assertEqual(len(rig.manager.index), 0)
+        self.assertEqual(len(rig.manager.index), 0, 'the reset emptied the index')
         for slot in under_bio:
             self.assertIn(slot, allocator.pending_free)
             self.assertNotIn(slot, allocator.free, 'a slot with a bio in flight is not allocatable (I5)')
@@ -251,10 +252,6 @@ class Flow(RigCase):
         self.assertIsNone(connector.build_connector_worker_meta())
 
 
-if __name__ == '__main__':
-    unittest.main()
-
-
 class FlushThroughTheRealScheduler(RigCase):
     """C15: the scheduler's fence protects an in-flight forward's writes; a store's gather is protected by the flush, which our wait() honours."""
 
@@ -307,3 +304,7 @@ class AsyncSchedulingFlush(FlushThroughTheRealScheduler):
     def rig(self, **kwargs):
         kwargs.setdefault('async_scheduling', True)
         return super().rig(**kwargs)
+
+
+if __name__ == '__main__':
+    unittest.main()

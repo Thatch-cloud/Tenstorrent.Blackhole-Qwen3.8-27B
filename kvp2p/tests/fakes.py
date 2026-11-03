@@ -6,8 +6,9 @@ is queue order) and it COMPLETES only when the test says so (``card.hold``), whi
 an enqueue and its completion. The geometry is tiny (rows of 128 B) but has the real shape: 4 chips x 10 tensors, an object
 is one row of every tensor on every chip, and the staging layout is [tensor][row] per object per chip.
 
-``FakeRuntime`` and ``FakeNvmeKVManager`` implement the CONTRACT THE WORKER NEEDS (see ``ttkvp2p.worker.RuntimePort``): they are
-the in-repo stand-in so these tests do not wait for WP3a.
+``FakeRuntime`` and ``FakeNvmeKVManager`` implement the CONTRACT THE WORKER AND THE CONNECTOR NEED (see ``ttkvp2p.worker.RuntimePort``
+and the README): they are the in-repo stand-in so these tests do not wait for WP3a. The manager is dict-backed and takes its store
+verdict and digests from ``complete_store(keys, ctx, success=, digests=)``, exactly what the connector's scheduler role hands it.
 """
 
 import collections
@@ -405,7 +406,6 @@ class FakeAllocator:
         self.inflight = [0] * num_slots
         self.free = collections.deque(range(num_slots))
         self.pending_free = set()
-        self.shuffle = False
         self.handed_out_in_flight = []          # violations of I5 (must stay empty)
         self.begin_refused = 0
 
@@ -413,8 +413,6 @@ class FakeAllocator:
         if len(self.free) < count:
             return None
         slots = [self.free.popleft() for _ in range(count)]
-        if self.shuffle:
-            slots = slots[::-1]
         for slot in slots:
             if self.inflight[slot]:
                 self.handed_out_in_flight.append(slot)
@@ -549,6 +547,7 @@ class FakeNvmeKVManager(OffloadingManager):
         self.lookups_refused_no_retry = 0
         self.prepare_loads = 0
         self.schedule_ends = 0
+        self.complete_store_calls: List[tuple] = []     # (number of keys, success, digests shape) of every complete_store
 
     # --- helpers
     def _tag(self, ctx) -> Optional[ReqTag]:
@@ -626,21 +625,21 @@ class FakeNvmeKVManager(OffloadingManager):
             expected.append(entry.digest)
         return NvmeLoadStoreSpec(slots, gens, np.array(expected, dtype=np.uint64).reshape(len(keys), 4))
 
-    def complete_store(self, keys, req_context, success: bool = True) -> None:
-        results = list(self.runtime.store_results.values())
-        for key in keys:
+    def complete_store(self, keys, req_context, success: bool = True, digests=None) -> None:
+        """The contract of the connector's scheduler role (INTERFACE 3.2): ``keys`` in the order ``prepare_store`` returned them, the
+        job's verdict, and on success one digest row per key in that same order. The manager looks nothing up in ``store_results``."""
+        keys = list(keys)
+        self.complete_store_calls.append((len(keys), success, None if digests is None else tuple(np.shape(digests))))
+        if success:
+            assert digests is not None and len(digests) == len(keys), 'a successful store hands over one digest row per key'
+        for position, key in enumerate(keys):
             entry = self.index.get(key)
             if entry is None or entry.state != 'ALLOCATED':
                 continue
-            found = None
-            for result in results:
-                for position, (slot, gen) in enumerate(zip(result.slot_ids, result.generations)):
-                    if slot == entry.slot and gen == entry.gen:
-                        found = (result, position)
-            if not success or found is None or not found[0].success:
+            if not success:
                 self._drop(key)
                 continue
-            entry.digest = found[0].digests[found[1]].copy()
+            entry.digest = np.array(digests[position], dtype=np.uint64)
             entry.state = 'WRITTEN'
 
     def complete_load(self, keys, req_context) -> None:

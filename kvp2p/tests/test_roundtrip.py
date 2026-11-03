@@ -92,13 +92,13 @@ class RoundTripTests(RigCase):
         self.assertEqual(rig.worker.stats['done_load'], 3)
 
 
-if __name__ == '__main__':
-    unittest.main()
-
-
 class AsyncSchedulingRoundTripTests(RoundTripTests):
     """The same tests with async scheduling: two batches in flight, so every completion reaches the scheduler one step late."""
 
     def rig(self, **kwargs):
         kwargs.setdefault('async_scheduling', True)
         return super().rig(**kwargs)
+
+
+if __name__ == '__main__':
+    unittest.main()

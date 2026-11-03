@@ -7,14 +7,15 @@ import os
 import sys
 import tempfile
 import types
+import unittest
 
-from fakes import BANKS, CHIPS, LEAD, FakeIO, FakeOps, FakeStaging
+from fakes import BANKS, CHIPS, LEAD, SHARD_OBJ, FakeIO, FakeOps, FakeStaging
 from harness import SHARDS, RigCase, tokens
 from ttkvp2p import worker as worker_module
 
 
 class StartupSequence(RigCase):
-    def stand_ins(self, rig, log, fail_at=None):
+    def stand_ins(self, rig, log, fail_at=None, kmd_index=True):
         """Install the three modules; every call is appended to ``log`` as it happens."""
         card, drive = rig.card, rig.drive
         ops = FakeOps(card, rig.slot_objects)
@@ -36,10 +37,16 @@ class StartupSequence(RigCase):
             return FakeStaging()
 
         def staging_info(staging):
-            return {'address': 0x80000000, 'size': card.bank_bytes, 'page_bytes': 1088, 'aligned_4k_offset': LEAD,
+            info = {'address': 0x80000000, 'size': card.bank_bytes, 'page_bytes': 1088, 'aligned_4k_offset': LEAD,
                     'aligned_4k_address': 0x80000000 + LEAD, 'aligned_4k_size': card.bank_bytes - LEAD,
                     'banks': [{'bank': b, 'noc_x': 1, 'noc_y': b} for b in range(BANKS)],
-                    'devices': [{'mesh_coord': d, 'device_id': 10 + d, 'pci_bus_id': SHARDS[d]} for d in range(CHIPS)]}
+                    # device_id is tt-metal's logical id; pcie_device is the tt-kmd index N of /dev/tenstorrent/N. They differ on purpose.
+                    'devices': [{'mesh_coord': d, 'device_id': 10 + d, 'pcie_device': 20 + d, 'pci_bus_id': SHARDS[d]}
+                                for d in range(CHIPS)]}
+            if not kmd_index:
+                for entry in info['devices']:
+                    entry['pcie_device'] = None            # the host could not resolve the kmd index
+            return info
 
         def warm(staging, tensors, null_block=0):
             step('warm')
@@ -127,7 +134,8 @@ class StartupSequence(RigCase):
         expected += ['aim:%s:%d' % (b, bank) for bank in (0, 1, 2, 3, 4, 5, 6, 7) for b in SHARDS]
         expected += ['p2pio', 'dma_canary', 'warm', 'freeze']
         self.assertEqual(log, expected)
-        self.assertEqual([link.chardev for link in CardLink.instances], ['/dev/tenstorrent/%d' % (10 + d) for d in range(CHIPS)])
+        self.assertEqual([link.chardev for link in CardLink.instances], ['/dev/tenstorrent/%d' % (20 + d) for d in range(CHIPS)],
+                         'the character device is named by the tt-kmd index (pcie_device), not by tt-metal\'s logical device_id')
         self.assertEqual({link.window_id for link in CardLink.instances}, {202})
         self.assertTrue(all(link.bdf in link.allocate_path for link in CardLink.instances), 'each card gets its own p2pmem file')
         # and the worker it built moves real bytes through those stand-ins, flushing through the card links
@@ -178,3 +186,76 @@ class StartupSequence(RigCase):
         rig.worker_conn.register_kv_caches(rig.registry)
         self.assertIsNone(rig.worker)
         self.assertIn('p2pmem allocate file', rig.worker_conn.connector_worker.unavailable_reason)
+        self.assertEqual(log, [], 'a host check: nothing was allocated on the cards before it failed (design 2.9 step 2)')
+        self.assertEqual(rig.card.log, [])
+
+    def test_an_ambiguous_p2pmem_file_is_refused_with_zero_device_footprint(self):
+        root = tempfile.mkdtemp(prefix='ttkvp2p-p2pmem-')
+        for bdf in SHARDS:
+            for variant in ('a', 'b') if bdf == SHARDS[2] else ('a',):          # two files whose paths both name card-2
+                os.makedirs(os.path.join(root, bdf, variant))
+                open(os.path.join(root, bdf, variant, 'allocate'), 'w').close()
+        rig = self.rig(start_worker=False, extra={'p2pmem_glob': os.path.join(root, '*', '*', 'allocate')})
+        log = []
+        self.stand_ins(rig, log)
+        worker_module.BACKEND_FACTORY = None
+        rig.worker_conn.register_kv_caches(rig.registry)
+        self.assertIsNone(rig.worker)
+        self.assertIn('found 2', rig.worker_conn.connector_worker.unavailable_reason)
+        self.assertEqual(log, [])
+
+    def test_a_staging_record_without_a_kmd_index_is_refused_before_any_window_is_opened(self):
+        rig = self.rig(start_worker=False, extra={'p2pmem_glob': self.allocate_files()})
+        log = []
+        CardLink = self.stand_ins(rig, log, kmd_index=False)
+        worker_module.BACKEND_FACTORY = None
+        rig.worker_conn.register_kv_caches(rig.registry)
+        self.assertIsNone(rig.worker)
+        self.assertIn('pcie_device', rig.worker_conn.connector_worker.unavailable_reason)
+        self.assertEqual([entry for entry in log if entry.startswith(('open', 'aim'))], [], 'no window was opened')
+        self.assertEqual(CardLink.instances, [])
+        self.assertEqual(rig.runtime.state, 'UNAVAILABLE')
+        self.assertEqual(rig.runtime.released, ['worker'])
+
+
+class TopOfWindow(RigCase):
+    """The staging slot of every CONFIGURED bank must stay below the top 16 MiB of the window, which is not DRAM."""
+
+    def start_with_bank_addresses(self, rig, addresses):
+        real = worker_module.BACKEND_FACTORY
+
+        def factory(**kwargs):
+            backend = real(**kwargs)
+            for entry in backend.staging_info['banks']:
+                entry['address'] = addresses.get(entry['bank'], 0x80000000)
+            return backend
+
+        worker_module.BACKEND_FACTORY = factory
+        rig.worker_conn.register_kv_caches(rig.registry)
+
+    def test_a_high_bank_other_than_bank_zero_is_refused(self):
+        rig = self.rig(start_worker=False)
+        self.start_with_bank_addresses(rig, {6: 0xFF000000 - 100})
+        self.assertIsNone(rig.worker)
+        reason = rig.worker_conn.connector_worker.unavailable_reason
+        self.assertIn('bank 6', reason)
+        self.assertIn('top 16 MiB', reason)
+        self.assertEqual(rig.runtime.released, ['worker'])
+
+    def test_a_high_bank_that_is_not_configured_is_not_checked(self):
+        rig = self.rig(start_worker=False, extra={'restore_banks': [2, 3, 4, 5, 7]})
+        self.start_with_bank_addresses(rig, {6: 0xFF000000 - 100})
+        self.assertIsNotNone(rig.worker, rig.worker_conn.connector_worker.unavailable_reason)
+
+    def test_the_exact_top_is_allowed_and_one_byte_over_is_not(self):
+        rig = self.rig(start_worker=False)
+        end_of_slot = LEAD + 4096 + rig.slot_objects * SHARD_OBJ                   # bank-relative end of the slot (the fake's layout)
+        self.start_with_bank_addresses(rig, {7: 0xFF000000 - end_of_slot})
+        self.assertIsNotNone(rig.worker, rig.worker_conn.connector_worker.unavailable_reason)
+        rig2 = self.rig(start_worker=False)
+        self.start_with_bank_addresses(rig2, {7: 0xFF000000 - end_of_slot + 1})
+        self.assertIsNone(rig2.worker)
+
+
+if __name__ == '__main__':
+    unittest.main()

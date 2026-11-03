@@ -52,7 +52,8 @@ logger = logging.getLogger(__name__)
 CANARY_BYTES = 4096                 # the first 4 KiB of a bank, at aligned_4k_offset, is the canary page; slot data follows it
 WINDOW_TOP = 0xFF000000             # the window's top 16 MiB is not DRAM
 TOMBSTONE_LIMIT = 65536             # I1: the last 64k reported job ids
-STORE_RESULT_LIMIT = 1024           # reported store results kept in the runtime for the manager to consume
+STORE_RESULT_LIMIT = 1024           # reported store results kept in the runtime for the connector's scheduler role to consume; a result
+                                    # pruned before it was consumed reads as a FAILED store there (a missing result means failure)
 
 # Failure reasons.
 R_EIO = 'eio'                       # EIO / EILSEQ on a read: the medium is bad (BAD keys)
@@ -68,6 +69,7 @@ R_NO_SLOT = 'no_slot'               # a flushed store with no free spill slot (I
 R_STALE = 'stale'                   # a slot's generation moved on before the bio started (I5)
 R_BAD_SPEC = 'bad_spec'
 R_SHUTDOWN = 'shutdown'
+R_INTERNAL = 'internal'             # a bug in the state machine hit this job at submit (the tier latches; the job is still reported, I1)
 
 # Consecutive failures of these causes (a success resets the count) latch the tier. The others are the tier working as
 # designed under pressure or a reset, so they neither count nor reset.
@@ -265,14 +267,14 @@ class _Piece:
 
 class _Job:
     __slots__ = ('id', 'is_load', 'n', 'blocks', 'slots', 'gens', 'expected', 'digests', 'state', 'reason', 'pieces',
-                 'deadline', 't_submit', 'bad', 'reported')
+                 'deadline', 't_submit', 'bad', 'reported', 'starved_since')
 
     def __init__(self, job_id: int, is_load: bool, blocks: np.ndarray, slots: List[int], gens: List[int],
-                 expected: Optional[np.ndarray], now: float):
+                 expected: Optional[np.ndarray], now: float, chips: int):
         self.id, self.is_load = job_id, is_load
         self.n = len(slots)
         self.blocks, self.slots, self.gens, self.expected = blocks, slots, gens, expected
-        self.digests: Optional[np.ndarray] = None if is_load else np.zeros((self.n, 4), dtype=np.uint64)
+        self.digests: Optional[np.ndarray] = None if is_load else np.zeros((self.n, chips), dtype=np.uint64)
         self.state = ACTIVE
         self.reason = ''
         self.pieces: List[_Piece] = []
@@ -280,6 +282,7 @@ class _Job:
         self.t_submit = now
         self.bad: List[Tuple[int, int]] = []
         self.reported = False
+        self.starved_since: Optional[float] = None      # stores: since when a piece of the job has waited for a spill bank in vain
 
 
 class _Hold:
@@ -337,13 +340,16 @@ class TTP2PWorker(OffloadingWorker):
         self.slot_objs = max(0, min(int(cfg.slot_objects), int(capacity)))
         if self.slot_objs < 1:
             raise TierRefused('a staging bank (%d usable bytes) cannot hold one object (%d bytes per chip)' % (avail - CANARY_BYTES, self._shard_obj))
-        base_address = int(info.get('address', 0))
-        if base_address + self._slot_base + self.slot_objs * self._shard_obj > WINDOW_TOP:
-            raise TierRefused('the staging slot would reach the top 16 MiB of the window, which is not DRAM')
-        known = {int(entry['bank']) for entry in info.get('banks', ())}
+        bank_entries = {int(entry['bank']): entry for entry in info.get('banks', ())}
         wanted = set(cfg.spill_banks) | set(cfg.restore_banks)
-        if known and not wanted <= known:
-            raise TierRefused('banks %s are not in the staging allocation (%s)' % (sorted(wanted - known), sorted(known)))
+        if bank_entries and not wanted <= set(bank_entries):
+            raise TierRefused('banks %s are not in the staging allocation (%s)' % (sorted(wanted - set(bank_entries)), sorted(bank_entries)))
+        # Every bank has its own address (the allocator's address plus the bank's offset): the highest slot of ANY configured bank
+        # must stay below the top 16 MiB of the window. A staging record without per-bank addresses gives bank 0's for all.
+        for bank in sorted(wanted):
+            address = int(bank_entries.get(bank, {}).get('address', info.get('address', 0)))
+            if address + self._slot_base + self.slot_objs * self._shard_obj > WINDOW_TOP:
+                raise TierRefused('the staging slot of bank %d would reach the top 16 MiB of the window, which is not DRAM' % bank)
 
         self._spill_free: List[int] = list(cfg.spill_banks)
         self._restore_free: List[int] = list(cfg.restore_banks)
@@ -360,6 +366,7 @@ class TTP2PWorker(OffloadingWorker):
 
         self._strikes = 0
         self._last_progress = self._clock()
+        self._spill_released_at = self._clock()                       # when a spill bank last came back (a store waiting for one is starved only while none does)
         self._closing = False
         self._latched = False
         self._decode_active = True
@@ -384,6 +391,7 @@ class TTP2PWorker(OffloadingWorker):
             self._admit(self._make_job(job_id, False, src, dst))
         except Exception as error:
             self._internal_error('submit_store', error)
+            self._report_lost(job_id, is_load=False)
         return True
 
     def submit_load(self, job_id: int, src: NvmeLoadStoreSpec, dst: GPULoadStoreSpec) -> bool:
@@ -399,6 +407,7 @@ class TTP2PWorker(OffloadingWorker):
             self._admit(job)
         except Exception as error:
             self._internal_error('submit_load', error)
+            self._report_lost(job_id, is_load=True)
         return True
 
     def _make_job(self, job_id: int, is_load: bool, gpu: GPULoadStoreSpec, nvme: NvmeLoadStoreSpec) -> _Job:
@@ -427,11 +436,13 @@ class TTP2PWorker(OffloadingWorker):
                 problem = 'a drive slot appears twice in one job'
             elif min(slots) < 0:
                 problem = 'a negative drive slot'
+            elif is_load and len(np.unique(blocks)) != n:
+                problem = 'a destination block appears twice in one load'          # the scatter refuses it, and a refusal is an I11 latch
             elif is_load:
                 expected = None if expected is None else np.asarray(expected, dtype=np.uint64)
-                if expected is None or expected.shape != (n, 4):
-                    problem = 'a load needs expected digests of shape (%d, 4) (I4)' % n
-        job = _Job(job_id, is_load, blocks, slots, gens, expected if problem is None else None, now)
+                if expected is None or expected.shape != (n, self._chips):
+                    problem = 'a load needs expected digests of shape (%d, %d) (I4)' % (n, self._chips)
+        job = _Job(job_id, is_load, blocks, slots, gens, expected if problem is None else None, now, self._chips)
         if problem is not None:
             logger.error('ttkvp2p: job %s (%s) refused: %s', job_id, 'load' if is_load else 'store', problem)
             job.state = FAILED
@@ -454,6 +465,10 @@ class TTP2PWorker(OffloadingWorker):
             self._queue_result(job)
             self._count('fail_' + R_LATCHED)
             return
+        if not self._order:
+            # Work starts now. The stall clock measures the time since the last completion WHILE work is in flight, so after an idle
+            # period (no P2P job at all, e.g. a long decode with offload_prompt_only) it must not carry the idle time into this job.
+            self._note_progress()
         self._order.append(job)
         self._count('submit_load' if job.is_load else 'submit_store')
 
@@ -476,7 +491,8 @@ class TTP2PWorker(OffloadingWorker):
                     digests=job.digests.copy() if ok else None, reason=job.reason)
                 self._reported_stores.append(job.id)
                 while len(self._reported_stores) > STORE_RESULT_LIMIT:
-                    results.pop(self._reported_stores.popleft(), None)
+                    if results.pop(self._reported_stores.popleft(), None) is not None:
+                        self._count('store_result_pruned')           # never consumed: the scheduler role reads a missing result as a failed store
             except Exception:
                 logger.exception('ttkvp2p: cannot leave the store result of job %s for the manager', job.id)
         if ok:
@@ -561,6 +577,31 @@ class TTP2PWorker(OffloadingWorker):
                 except Exception:
                     logger.exception('ttkvp2p: could not report job %s', job.id)
 
+    def _report_lost(self, job_id: int, is_load: bool) -> None:
+        """I1 after an internal error in a submit: the job must still reach exactly one terminal report.
+
+        Without it the scheduler would keep the job in its table for good (the engine would loop on empty steps while a store is
+        pending, and a lost load would park its request). The job may not exist yet (the error came before it was built), may be in
+        the table but not in the order (the error came inside ``_admit``), or may already have been failed and reported by the
+        latch that ``_internal_error`` ran; the last case reports nothing more."""
+        try:
+            if job_id in self._tombstones:
+                return
+            job = self._jobs.get(job_id)
+            if job is None:
+                job = _Job(job_id, is_load, np.zeros(0, dtype=np.int64), [], [], None, self._clock(), self._chips)
+                self._jobs[job_id] = job
+            if job.reported:
+                return
+            job.state = FAILED
+            job.reason = R_INTERNAL
+            for piece in job.pieces:
+                self._retire_piece(piece)
+            self._queue_result(job)
+            self._count('fail_' + R_INTERNAL)
+        except Exception:
+            logger.exception('ttkvp2p: job %s could not be reported after an internal error', job_id)
+
     # ------------------------------------------------------------------------------------------------------------
     # the ring: banks, quarantine (I3)
     # ------------------------------------------------------------------------------------------------------------
@@ -570,10 +611,13 @@ class TTP2PWorker(OffloadingWorker):
         return free.pop(0) if free else None
 
     def _release_bank(self, bank: int) -> None:
-        free = self._spill_free if self._bank_kind[bank] == 'spill' else self._restore_free
+        spill = self._bank_kind[bank] == 'spill'
+        free = self._spill_free if spill else self._restore_free
         if bank not in free:
             free.append(bank)
             free.sort(key=lambda b: (self.cfg.spill_banks + self.cfg.restore_banks).index(b))
+            if spill:
+                self._spill_released_at = self._clock()
 
     def _group_complete(self, group: _Group) -> bool:
         if not group.complete:
@@ -736,6 +780,7 @@ class TTP2PWorker(OffloadingWorker):
         piece.dev_next = hi
         piece.groups.append(_Group(lo, hi, handle, event))
         self._count('objects_scattered' if loading else 'objects_gathered', hi - lo)
+        self._note_progress()               # a sequence went onto the queue: the stall clock counts from here, not from before the work existed
         return True
 
     def _device_throw(self, piece: _Piece, error: BaseException) -> None:
@@ -998,6 +1043,7 @@ class TTP2PWorker(OffloadingWorker):
         if self._order:
             self._advance()
             self._check_deadlines(now)
+            self._check_store_starvation(now)
             self._check_stall(now)
             self._dispatch(budget_objects)
             self._advance()                                     # a sequence that completed at once (and a re-read) moves on
@@ -1049,7 +1095,10 @@ class TTP2PWorker(OffloadingWorker):
                 if piece.state == P_WAIT:
                     bank = self._take_bank('spill')
                     if bank is None:
+                        if job.starved_since is None:
+                            job.starved_since = self._clock()
                         break
+                    job.starved_since = None
                     piece.bank = bank
                     piece.state = P_GATHER
                     piece.dev_next = 0
@@ -1063,6 +1112,19 @@ class TTP2PWorker(OffloadingWorker):
         for job in list(self._order):
             if job.is_load and job.state == ACTIVE and now > job.deadline:
                 self._fail(job, R_DEADLINE)
+
+    def _check_store_starvation(self, now: float) -> None:
+        """A store that cannot get a spill bank is dropped, never left waiting (design 2.8): a later miss, not a stall.
+
+        A store is starved while a piece of it waits for a bank and no spill bank has come back for ``store_wait_s``. Banks
+        that keep rotating, however busy, starve nobody. Banks that are held by stuck I/O, quarantined or lost starve every
+        waiting store, which would otherwise keep its keys ALLOCATED (lookups defer on them) for good. The failure is neutral."""
+        limit = self.cfg.store_wait_s
+        for job in list(self._order):
+            if job.is_load or job.state != ACTIVE or job.starved_since is None:
+                continue
+            if now - max(job.starved_since, self._spill_released_at) > limit:
+                self._fail(job, R_NO_SLOT, count=False)
 
     def _check_stall(self, now: float) -> None:
         """No completion for ``stall_latch_s`` while work is in flight latches the tier (section 2.9)."""
@@ -1112,6 +1174,7 @@ class TTP2PWorker(OffloadingWorker):
                 if bank is None:
                     self._fail(job, R_NO_SLOT, count=False)
                     return
+                job.starved_since = None
                 piece.bank = bank
                 piece.state = P_GATHER
                 piece.dev_next = 0
@@ -1232,14 +1295,25 @@ def default_backend_factory(*, cfg: P2PConfig, registry, runtime, geometry) -> B
     """Production wiring of the device side (design 2.9 steps 3 and 4).
 
     UNVERIFIED until cardlink.py, p2pio.py and the v4-lite extension exist. It uses only what the frozen interface names,
-    except for three ASSUMPTIONS: the constructor of P2PIO, ``P2PIO.dma_canary()`` / ``P2PIO.close()`` (the DMA canary
-    needs a 4 KiB write and read that read_piece/write_subrun cannot express), and the chardev path ``/dev/tenstorrent/<id>``.
-    Nothing is imported at module import (I14), and any failure here leaves the tier UNAVAILABLE.
+    except for ASSUMPTIONS: the constructor of P2PIO, ``P2PIO.dma_canary()`` / ``P2PIO.close()`` (the DMA canary needs a 4 KiB
+    write and read that read_piece/write_subrun cannot express), and the chardev path ``/dev/tenstorrent/<N>`` with N the tt-kmd
+    index the staging record carries as ``pcie_device``. Nothing is imported at module import (I14), and any failure here leaves
+    the tier UNAVAILABLE.
 
-    The sequence: staging alloc, a CardLink per shard (open, canary write, aim and verify every bank), the DMA canary,
-    the warm-up of every program to completion, the freeze. Only then does the caller flip the runtime AVAILABLE.
+    The sequence: the host-only p2pmem file match (zero device footprint when it fails), staging alloc, the shard-map check, a
+    CardLink per shard (open, canary write, aim and verify every bank), the DMA canary, the warm-up of every program to
+    completion, the freeze. Only then does the caller flip the runtime AVAILABLE.
     """
     import glob
+
+    # Host checks that need no device: each card's p2pmem allocate file, found by its PCI address in the registry's shard map.
+    allocate_paths = sorted(glob.glob(cfg.p2pmem_glob))
+    allocate_of = {}
+    for bdf in registry.shard_bdf:
+        matches = [path for path in allocate_paths if str(bdf).lower() in path.lower()]
+        if len(matches) != 1:
+            raise TierRefused('expected one p2pmem allocate file for %s, found %d' % (bdf, len(matches)))
+        allocate_of[str(bdf).lower()] = matches[0]
 
     ops = importlib.import_module('qwen_kv_read')
     staging = ops.qwen_p2p_staging_alloc(registry.mesh_device, cfg.staging_bytes_per_bank)
@@ -1250,16 +1324,20 @@ def default_backend_factory(*, cfg: P2PConfig, registry, runtime, geometry) -> B
     bdfs = [str(entry['pci_bus_id']).lower() for entry in devices]
     if [str(b).lower() for b in registry.shard_bdf] != bdfs:
         raise TierRefused('the registry shard map %s disagrees with the staging devices %s' % (list(registry.shard_bdf), bdfs))
-    allocate_paths = sorted(glob.glob(cfg.p2pmem_glob))
+    # /dev/tenstorrent/N is the tt-kmd index. tt-metal's logical device_id is NOT that index; pcie_device is (None when the host could
+    # not resolve it, and then the card cannot be found by number). Settled for every card before any window is opened.
+    chardevs = []
+    for position, entry in enumerate(devices):
+        index = entry.get('pcie_device')
+        if index is None:
+            raise TierRefused('the staging record of device %d carries no tt-kmd index (pcie_device)' % position)
+        chardevs.append('/dev/tenstorrent/%d' % int(index))
     links = []
     io = None
     try:
-        for entry in devices:
+        for chardev, entry in zip(chardevs, devices):
             bdf = str(entry['pci_bus_id'])
-            matches = [path for path in allocate_paths if bdf.lower() in path.lower()]
-            if len(matches) != 1:
-                raise TierRefused('expected one p2pmem allocate file for %s, found %d' % (bdf, len(matches)))
-            link = cardlink.CardLink('/dev/tenstorrent/%s' % entry['device_id'], bdf, matches[0], cfg.p2p_window_id)
+            link = cardlink.CardLink(chardev, bdf, allocate_of[bdf.lower()], cfg.p2p_window_id)
             links.append(link)
             link.open(info)
         for bank in tuple(cfg.spill_banks) + tuple(cfg.restore_banks):

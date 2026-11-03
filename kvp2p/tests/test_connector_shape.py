@@ -298,6 +298,13 @@ class RefusedTierTests(RigCase):
         self.assertEqual(rig.loads, [])
         self.assertTrue({entry[1] for entry in rig.card.log} <= {'forward', 'step'}, 'no tier op ever ran')
 
+    def test_a_refused_manager_takes_the_real_managers_complete_store_signature(self):
+        from ttkvp2p.spec import RefusedManager
+
+        manager = RefusedManager('off')
+        self.assertIsNone(manager.complete_store(['k'], None, success=True, digests=None))
+        self.assertIsNone(manager.complete_store(['k'], None, success=False))
+
     def test_an_unknown_layout_refuses_the_tier(self):
         from ttkvp2p.spec import RefusedManager
 
@@ -322,6 +329,28 @@ class RefusedTierTests(RigCase):
         self.assertIsInstance(scheduler.connector.connector_scheduler.manager._manager, RefusedManager)
 
 
+    def test_a_manager_that_fails_to_build_releases_the_schedulers_runtime_reference(self):
+        import sys
+        from ttkvp2p.spec import RefusedManager
+
+        rig = self.rig(with_scheduler=False)
+
+        def broken(cfg, runtime):
+            raise RuntimeError('the manager could not be built')
+
+        sys.modules['ttkvp2p.manager'].NvmeKVManager = broken
+        from vllm.v1.core.sched.scheduler import Scheduler
+        from vllm.v1.structured_output import StructuredOutputManager
+        scheduler = Scheduler(vllm_config=rig.vllm_config, kv_cache_config=rig.kv_cache_config,
+                              structured_output_manager=StructuredOutputManager(rig.vllm_config), block_size=128,
+                              hash_block_size=128, include_finished_set=False, log_stats=False)
+        self.assertIsInstance(scheduler.connector.connector_scheduler.manager._manager, RefusedManager)
+        self.assertEqual(FakeRuntime.acquire_log, [('/dev/test-kv', 'worker'), ('/dev/test-kv', 'scheduler')])
+        self.assertEqual(rig.runtime.released, ['scheduler'], 'the reference acquired for the manager that never came to be was given back')
+        self.assertEqual(rig.runtime.roles, ['worker'])
+        self.assertFalse(rig.runtime.closed, 'the worker role is still attached')
+
+
 class ConnectorSurfaceTests(unittest.TestCase):
     def test_the_connector_keeps_hma_and_asks_for_no_layout(self):
         from vllm.distributed.kv_transfer.kv_connector.v1 import SupportsHMA
@@ -340,10 +369,6 @@ class ConnectorSurfaceTests(unittest.TestCase):
                                   kv_load_failure_policy='recompute', kv_connector_extra_config=dict(PRODUCTION_KWARG))
         self.assertTrue(KVConnectorFactory.supports_hma_config(config))
         self.assertEqual(KVConnectorFactory.get_connector_class(config).__name__, 'TTP2PConnector')
-
-
-if __name__ == '__main__':
-    unittest.main()
 
 
 class RequestTagTests(RigCase):
@@ -370,3 +395,7 @@ class RequestTagTests(RigCase):
         rig.connector_scheduler.on_new_request(request)
         tag = rig.connector_scheduler._req_status['mm'].req_context.get_state(ReqTag)
         self.assertTrue(tag.has_mm)
+
+
+if __name__ == '__main__':
+    unittest.main()

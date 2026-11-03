@@ -122,6 +122,7 @@ class P2PConfig:
     # Additive knobs (not in the frozen kwarg; the defaults are the design's numbers).
     slot_objects: int = 128                  # cap on objects per staging slot (the digest op takes at most 128 blocks)
     shutdown_drain_s: float = 15.0           # section 2.9: the drain waits 15 s or less for in-flight bios
+    store_wait_s: float = 10.0               # a store that finds no spill bank for this long is dropped (design 2.8: a later miss, never a stall)
 
     @classmethod
     def from_extra_config(cls, extra: Mapping) -> 'P2PConfig':
@@ -182,6 +183,8 @@ class P2PConfig:
             problems.append('strikes_to_latch must be at least 1')
         if self.stall_latch_s <= 0:
             problems.append('stall_latch_s must be positive')
+        if self.store_wait_s <= 0:
+            problems.append('store_wait_s must be positive')
         if problems:
             raise ValueError('; '.join(problems))
 
@@ -234,6 +237,9 @@ class RefusedManager(OffloadingManager):
         # An EMPTY keys_to_store is a drop. None would be a warning plus a retry on every step.
         return PrepareStoreOutput(keys_to_store=[], store_spec=NvmeLoadStoreSpec([], []), evicted_keys=[])
 
+    def complete_store(self, keys, req_context, success: bool = True, digests=None) -> None:
+        return None         # no store job ever exists for a refused tier; the signature is the real manager's (digests is the additive keyword)
+
 
 # --------------------------------------------------------------------------------------------------------------------
 # The spec
@@ -245,6 +251,7 @@ class TTP2PNvmeSpec(OffloadingSpec):
         self.refusal: Optional[str] = None
         self.p2p_config: Optional[P2PConfig] = None
         self.layout_geometry: Optional[LayoutGeometry] = None
+        self.runtime: Optional[Any] = None          # the process-wide runtime the scheduler role attached to (get_manager)
         try:
             self.p2p_config = P2PConfig.from_extra_config(config.extra_config)
             self.layout_geometry = LAYOUTS.get(self.p2p_config.layout)
@@ -273,16 +280,43 @@ class TTP2PNvmeSpec(OffloadingSpec):
     def get_manager(self) -> OffloadingManager:
         if self.refusal is not None:
             return RefusedManager(self.refusal)
+        runtime = None
         try:
             runtime_module = importlib.import_module('ttkvp2p.runtime')
             manager_module = importlib.import_module('ttkvp2p.manager')
             runtime = runtime_module.KVP2PRuntime.acquire(self.p2p_config, 'scheduler')
-            return manager_module.NvmeKVManager(self.p2p_config, runtime)
+            manager = manager_module.NvmeKVManager(self.p2p_config, runtime)
         except Exception as error:     # a broken tier must not stop the engine: it stays a no-op that always misses
             logger.error('ttkvp2p: the scheduler role cannot attach to the runtime (%s: %s); the tier stays off',
                          type(error).__name__, error, exc_info=True)
+            if runtime is not None:
+                # The reference taken above must not leak: the runtime is reference counted, and a leaked 'scheduler' reference
+                # would keep it (and the drive claim) open for the life of the process.
+                try:
+                    runtime.release('scheduler')
+                except Exception:
+                    logger.exception('ttkvp2p: releasing the runtime after a failed manager build failed')
             self.refusal = 'scheduler role cannot attach: %s' % (error,)
             return RefusedManager(self.refusal)
+        self.runtime = runtime
+        return manager
+
+    # --- what the connector's scheduler role needs from the runtime (it settles each store job itself; see connector.py)
+    def take_store_result(self, job_id: int):
+        """Remove and return the worker's ``StoreResult`` for a store job, or None (the worker pruned it or never ran the job)."""
+        results = getattr(self.runtime, 'store_results', None)
+        if results is None:
+            return None
+        return results.pop(job_id, None)
+
+    def latch_tier(self, reason: str) -> None:
+        """Latch the tier from the scheduler role (the manager misbehaved). Never raises."""
+        if self.runtime is None:
+            return
+        try:
+            self.runtime.latch(reason)
+        except Exception:
+            logger.exception('ttkvp2p: runtime.latch failed')
 
     def get_worker(self, kv_caches) -> OffloadingWorker:
         raise RuntimeError('TT uses get_tt_worker')

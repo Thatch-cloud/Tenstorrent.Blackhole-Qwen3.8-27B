@@ -192,6 +192,55 @@ class Lifecycle(RigCase):
         kit.pump_until_reported(1)
         self.assertTrue(kit.results[1].success)
 
+    def test_a_store_that_waits_for_a_spill_bank_in_vain_is_dropped_not_left_waiting(self):
+        """Review minor 5, design 2.8: "a store that finds no spill slot is dropped, which is a later miss, never a stall". Left waiting, it
+        keeps its keys ALLOCATED and every lookup of them defers."""
+        rig, kit = self.kit(extra={'spill_banks': [0], 'store_wait_s': 3.0})
+        kit.use_fake_clock()
+        kit.fill_blocks([1, 2, 3, 4], 'starve')
+        rig.io.gate.clear()                                             # the drive stops answering: the only spill bank stays busy
+        kit.store(1, [1, 2])
+        kit.pump(lambda: rig.worker.free_banks['spill'] == [], what='the spill bank taken')
+        kit.store(2, [3, 4])
+        kit.pump_once()                                                 # job 2 asks for a bank and finds none: it starts to starve
+        kit.advance(2.0)
+        kit.pump_once()
+        self.assertEqual(rig.worker.active_job_ids, [1, 2], 'not yet: the wait limit is 3 s')
+        kit.advance(1.5)
+        kit.pump_once()
+        self.assertEqual((kit.results[2].success, kit.results[2].reason), (False, 'no_slot'))
+        self.assertEqual(rig.worker.active_job_ids, [1])
+        self.assertEqual(rig.worker.strikes, 0, 'a dropped store is the tier working as designed, not a strike')
+        self.assertEqual(rig.runtime.state, 'AVAILABLE')
+        self.assertFalse(rig.runtime.store_results[2].success)
+        rig.io.gate.set()                                               # the drive answers again; the first store was never harmed
+        kit.pump_until_reported(1)
+        self.assertTrue(kit.results[1].success)
+        kit.store(3, [3, 4])
+        kit.pump_until_reported(3)
+        self.assertTrue(kit.results[3].success, 'and the bank is usable again')
+
+    def test_spill_banks_that_keep_rotating_starve_nobody(self):
+        rig, kit = self.kit(slot_objects=2, extra={'spill_banks': [0], 'store_wait_s': 3.0, 'spill_subrun_objects': 2})
+        kit.use_fake_clock()
+        kit.fill_blocks(range(1, 9), 'rotate')
+        holds = rig.io.hold_next(3)                                     # the three writes of job 1, each waits for its event
+        kit.store(1, [1, 2, 3, 4, 5, 6])
+        kit.pump(lambda: len(rig.io.calls) >= 1, what='the first write issued')
+        kit.store(2, [7, 8])
+        kit.pump_once()                                                 # job 2 waits for the only bank, which job 1 keeps taking again
+        kit.advance(2.5)
+        holds[0].set()                                                  # a piece of job 1 is written: the bank comes back (and job 1 retakes it)
+        kit.pump(lambda: len(rig.io.calls) >= 2, what='the second write issued')
+        kit.advance(2.5)                                                # five seconds since job 2 began to wait, 2.5 since a bank came back
+        kit.pump_once()
+        self.assertIn(2, rig.worker.active_job_ids, 'a bank came back 2.5 s ago: job 2 is queued, not starved')
+        holds[1].set()
+        kit.pump(lambda: len(rig.io.calls) >= 3, what='the third write issued')
+        holds[2].set()
+        kit.pump_until_reported(1, 2)
+        self.assertTrue(kit.results[1].success and kit.results[2].success)
+
     # ------------------------------------------------------------------------------------------------ budgets
     def test_the_step_budget_limits_device_objects_and_idle_steps_are_unlimited(self):
         rig, kit = self.kit(slot_objects=8, extra={'device_budget_objects_per_step': 3})
@@ -524,6 +573,91 @@ class Lifecycle(RigCase):
         rig.io.gate.set()
         kit.pump(lambda: not rig.worker.quarantined_banks)
 
+    def test_a_store_flushed_after_an_idle_period_does_not_latch_a_false_stall(self):
+        """Review B1. With offload_prompt_only there is no P2P job during a long decode, and an idle server has none either. The stall
+        clock must not carry that idle time into the next job: a store gathered by the flush, whose gather has not completed at the
+        service of the same step, is work in flight for a moment, not a stall of 30 s."""
+        rig, kit = self.kit()
+        kit.use_fake_clock()
+        kit.fill_blocks([1, 2, 3], 'idle')
+        kit.advance(30.0)                                               # 30 s with no P2P job at all (stall_latch_s is 20)
+        rig.card.hold = True                                            # the flushed gather is queued behind the forward in flight
+        kit.store(1, [1, 2, 3])
+        rig.worker.wait({1})                                            # jobs_to_flush: gathered now, before the forward
+        kit.pump_once()                                                 # the _kv_finish service of the same step
+        self.assertEqual(rig.runtime.state, 'AVAILABLE', 'false stall latch: %s' % rig.runtime.latch_reason)
+        self.assertEqual(rig.worker.active_job_ids, [1])
+        rig.card.release()                                              # the forward finishes, the gather completes
+        kit.pump_until_reported(1)
+        self.assertTrue(kit.results[1].success)
+        self.assertEqual(rig.runtime.state, 'AVAILABLE')
+
+    def test_a_store_serviced_after_an_idle_period_is_given_the_whole_stall_window(self):
+        rig, kit = self.kit()
+        kit.use_fake_clock()
+        kit.fill_blocks([1, 2, 3], 'idle2')
+        kit.advance(300.0)                                              # a long idle period
+        rig.card.hold = True                                            # the queue does not move: the work is stuck for real
+        kit.store(1, [1, 2, 3])
+        kit.pump_once()                                                 # the gather is enqueued
+        kit.advance(19.0)
+        kit.pump_once()
+        self.assertEqual(rig.runtime.state, 'AVAILABLE', 'the idle time before the job does not count')
+        kit.advance(2.0)
+        kit.pump_once()
+        self.assertEqual(rig.runtime.state, 'LATCHED', 'a real stall after the enqueue still latches')
+        self.assertIn('no completion', rig.runtime.latch_reason)
+        rig.card.release()
+
+    def test_the_stall_clock_restarts_when_the_order_goes_from_empty_to_busy_but_not_while_it_is_busy(self):
+        rig, kit = self.kit()
+        kit.use_fake_clock()
+        kit.fill_blocks([1, 2, 3, 4], 'restart')
+        rig.io.gate.clear()                                             # nothing completes
+        kit.advance(50.0)
+        kit.store(1, [1, 2])
+        self.assertEqual(rig.worker._last_progress, kit.clock_now, 'work begins now, not 50 s ago')
+        kit.pump(lambda: rig.worker.free_banks['spill'] != [0, 1], what='the write issued')
+        began = kit.clock_now
+        kit.advance(6.0)
+        kit.store(2, [3, 4])                                            # a second job joins a busy order: the clock is not restarted
+        self.assertEqual(rig.worker._last_progress, began)
+        rig.io.gate.set()
+        kit.pump_until_reported(1, 2)
+
+    def test_a_device_sequence_going_onto_the_queue_counts_as_progress(self):
+        rig, kit = self.kit()
+        kit.use_fake_clock()
+        kit.fill_blocks([1, 2], 'prog')
+        rig.card.hold = True
+        kit.store(1, [1, 2])
+        submitted = kit.clock_now
+        kit.advance(5.0)
+        rig.worker.wait({1})                                            # the flush enqueues the gather outside a service pass, five seconds on
+        self.assertEqual(len(rig.card.names('gather')), TENSORS)
+        self.assertEqual(rig.worker._last_progress, submitted + 5.0)
+        rig.card.release()
+
+    def test_only_the_last_reported_store_results_are_kept_and_a_pruned_one_is_counted(self):
+        """The scheduler role reads a missing result as a failed store, so a prune of a result nobody consumed must be visible."""
+        from unittest import mock
+        from ttkvp2p import worker as worker_module
+
+        rig, kit = self.kit()
+        kit.fill_blocks([1, 2], 'prune')
+        with mock.patch.object(worker_module, 'STORE_RESULT_LIMIT', 3):
+            for job_id in range(1, 7):
+                kit.store(job_id, [1, 2])
+                kit.pump_until_reported(job_id)
+        self.assertEqual(sorted(rig.runtime.store_results), [4, 5, 6])
+        self.assertEqual(rig.runtime.counters['store_result_pruned'], 3)
+        rig.runtime.store_results.pop(6)                                # a result the scheduler role consumed is not counted when it ages out
+        with mock.patch.object(worker_module, 'STORE_RESULT_LIMIT', 3):
+            for job_id in range(7, 10):
+                kit.store(job_id, [1, 2])
+                kit.pump_until_reported(job_id)
+        self.assertEqual(rig.runtime.counters['store_result_pruned'], 3 + 2, 'jobs 4 and 5 aged out unconsumed; 6 had been consumed')
+
     def test_a_latched_worker_fails_new_jobs_at_once_with_no_device_op(self):
         rig, kit = self.kit()
         kit.fill_blocks([1, 2], 'x')
@@ -563,10 +697,19 @@ class Lifecycle(RigCase):
         poisoned = NvmeLoadStoreSpec([6], [1])
         poisoned.poison = 'I6: test'
         self.assertTrue(worker.submit_store(6, GPULoadStoreSpec([1], [1], [0]), poisoned))
-        kit.pump(lambda: len(kit.results) == 6)
+        with self.assertLogs('ttkvp2p.worker', level='ERROR') as logged:
+            # a load whose destination blocks repeat: the scatter would refuse it, a refusal is a device throw, and a throw latches
+            self.assertTrue(worker.submit_load(7, NvmeLoadStoreSpec([5, 6], [1, 1], np.zeros((2, 4), np.uint64)), GPULoadStoreSpec([9, 9], [2], [0])))
+        self.assertIn('appears twice in one load', ' '.join(logged.output))
+        with self.assertLogs('ttkvp2p.worker', level='ERROR') as logged:
+            # expected digests with the wrong number of chips
+            self.assertTrue(worker.submit_load(8, NvmeLoadStoreSpec([5], [1], np.zeros((1, 3), np.uint64)), GPULoadStoreSpec([9], [1], [0])))
+        self.assertIn('expected digests of shape (1, 4)', ' '.join(logged.output))
+        kit.pump(lambda: len(kit.results) == 8)
         self.assertTrue(all(r.reason == 'bad_spec' for r in kit.results.values()), kit.results)
         self.assertEqual(rig.card.log, [])
         self.assertEqual(rig.worker.strikes, 0)
+        self.assertEqual(rig.runtime.state, 'AVAILABLE', 'a refused spec is not a device throw: the tier does not latch')
 
     # ------------------------------------------------------------------------------------------------ test-only fault hooks
     def test_the_runtime_fault_hooks_drive_the_same_paths(self):
@@ -620,10 +763,6 @@ class Lifecycle(RigCase):
         rig.worker.shutdown()
         self.assertEqual(rig.factory.closed, 0, 'no exit with DMA in flight on purpose: the mappings stay')
         hold.set()
-
-
-if __name__ == '__main__':
-    unittest.main()
 
 
 class IdleWait(RigCase):
@@ -712,7 +851,99 @@ class SingleTerminalReport(RigCase):
 
 
 class InternalErrors(RigCase):
-    """A bug in the state machine is latched and survived: the engine never sees the exception, every job is still reported once."""
+    """A bug in the state machine is latched and survived: the engine never sees the exception, every job is still reported once (I1)."""
+
+    def internal_rig(self):
+        rig = self.rig(with_scheduler=False)
+        rig.expected_internal_errors = None                              # these tests provoke the errors themselves and count them
+        return rig, WorkerKit(rig)
+
+    @staticmethod
+    def boom(*args, **kwargs):
+        raise KeyError('a bug')
+
+    def test_an_internal_error_in_a_store_submit_still_reports_the_job_exactly_once(self):
+        """Review minor 1. Lost, the job would stay in the scheduler's table for good and the engine would loop on empty steps."""
+        rig, kit = self.internal_rig()
+        kit.fill_blocks([1, 2], 'lost')
+        real, rig.worker._make_job = rig.worker._make_job, self.boom
+        kit.store(1, [1, 2])
+        rig.worker._make_job = real
+        for _ in range(5):
+            kit.pump_once()
+        self.assertEqual((kit.results[1].success, kit.results[1].reason), (False, 'internal'))
+        self.assertEqual(kit.reports, {1: 1})
+        self.assertEqual(rig.runtime.state, 'LATCHED')
+        self.assertEqual(rig.worker.active_job_ids, [])
+        self.assertIn(1, rig.worker.tombstones)
+        self.assertFalse(rig.runtime.store_results[1].success, 'the scheduler role reads a failed store, never a success')
+        self.assertEqual(rig.worker.stats['internal_error'], 1)
+
+    def test_an_internal_error_in_a_load_submit_still_reports_the_job_exactly_once(self):
+        rig, kit = self.internal_rig()
+        kit.fill_blocks([1, 2], 'lost-load')
+        kit.store(1, [1, 2])
+        kit.pump_until_reported(1)
+        real, rig.worker._make_job = rig.worker._make_job, self.boom
+        kit.load(2, 1, [30, 31])
+        rig.worker._make_job = real
+        for _ in range(5):
+            kit.pump_once()
+        self.assertEqual((kit.results[2].success, kit.results[2].reason), (False, 'internal'))
+        self.assertEqual(kit.reports, {1: 1, 2: 1})
+        self.assertEqual(rig.worker.active_job_ids, [])
+
+    def test_an_error_after_the_job_entered_the_table_is_reported_by_the_submit_itself(self):
+        rig, kit = self.internal_rig()
+        kit.fill_blocks([1, 2], 'half')
+
+        def half_admit(job):
+            rig.worker._jobs[job.id] = job
+            raise RuntimeError('a bug right after the table insert')
+
+        rig.worker._admit = half_admit
+        kit.store(3, [1, 2])
+        for _ in range(3):
+            kit.pump_once()
+        self.assertEqual((kit.results[3].success, kit.results[3].reason), (False, 'internal'))
+        self.assertEqual(kit.reports, {3: 1})
+
+    def test_an_error_after_the_job_became_active_is_reported_once_by_the_latch_and_not_again(self):
+        rig, kit = self.internal_rig()
+        kit.fill_blocks([1, 2], 'late-bug')
+        real_admit = rig.worker._admit
+
+        def admit_then_fail(job):
+            real_admit(job)
+            raise RuntimeError('a bug right after the job joined the order')
+
+        rig.worker._admit = admit_then_fail
+        kit.store(4, [1, 2])
+        for _ in range(3):
+            kit.pump_once()
+        self.assertEqual(kit.reports, {4: 1}, 'the latch reported it; the submit reported nothing more')
+        self.assertEqual(kit.results[4].reason, 'latched')
+
+    def test_the_connector_worker_completes_a_job_lost_in_submit_exactly_once(self):
+        from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import OffloadingConnectorMetadata, TransferJob
+        from vllm.v1.kv_offload.base import GPULoadStoreSpec
+        from ttkvp2p.spec import NvmeLoadStoreSpec
+
+        rig, kit = self.internal_rig()
+        connector = rig.worker_conn
+        slots, gens = kit.alloc(2)
+        job = TransferJob('req', GPULoadStoreSpec([1, 2], [2], [0]), NvmeLoadStoreSpec(slots, gens))
+        connector.bind_connector_metadata(OffloadingConnectorMetadata(load_jobs={}, store_jobs={7: job}))
+        connector.get_transfer_results(set())                         # prepare_store_kv defers the store to the next step
+        connector.clear_connector_metadata()
+        connector.bind_connector_metadata(OffloadingConnectorMetadata(load_jobs={}, store_jobs={}))
+        rig.worker._make_job = self.boom
+        connector.start_load_kv(None)                                 # the store is submitted, and the submit hits a bug
+        connector.get_transfer_results(set())
+        meta = connector.build_connector_worker_meta()
+        self.assertEqual(meta.completed_jobs, {7: 1}, 'the scheduler is told, so it can settle the job instead of keeping it forever')
+        connector.get_transfer_results(set())
+        self.assertIsNone(connector.build_connector_worker_meta())
 
     def test_an_unexpected_exception_in_a_service_pass_latches_the_tier_and_fails_the_jobs(self):
         rig = self.rig(with_scheduler=False)
@@ -753,3 +984,8 @@ class InternalErrors(RigCase):
         rig.worker.wait({1})                                            # a second failure inside wait
         kit.pump_once()
         self.assertGreaterEqual(rig.worker.stats['internal_error'], 3)
+        self.assertEqual(kit.reports, {1: 1}, 'the job the failed submit lost is reported, once, however often the engine calls again')
+
+
+if __name__ == '__main__':
+    unittest.main()

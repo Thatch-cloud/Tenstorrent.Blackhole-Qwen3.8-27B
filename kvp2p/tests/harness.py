@@ -383,6 +383,7 @@ class WorkerKit:
     def use_fake_clock(self):
         self.worker._clock = lambda: self.clock_now
         self.worker._last_progress = self.clock_now
+        self.worker._spill_released_at = self.clock_now
 
     def advance(self, seconds: float):
         self.clock_now += seconds

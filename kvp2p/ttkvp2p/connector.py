@@ -10,7 +10,11 @@ fences, flush, preemption, LRU touch), ``SupportsHMA``, and the worker's submiss
     invariant I9) and adds the failed receives;
   * the scheduler role tags each request (tenant, multimodal, admission verdict, no-retry), flags a request no-retry when
     its load failed for a reason that leaves the keys valid, and checks that every store job pairs the right block with
-    the right key (invariant I6).
+    the right key (invariant I6);
+  * the scheduler role settles every completed store job itself: vLLM calls ``manager.complete_store(keys, ctx)`` with no job id,
+    no digests and no way to say the store failed, so ``update_connector_output`` takes the job's ``StoreResult`` from the runtime
+    and hands the manager ``complete_store(keys in the manager's order, ctx, success=..., digests=...)`` instead. A missing or
+    inconsistent result is a failed store.
 
 Importing this module imports neither ttnn nor the extension (invariant I14).
 """
@@ -88,17 +92,53 @@ class TTWorkerMetadata(OffloadingWorkerMetadata):
 # --------------------------------------------------------------------------------------------------------------------
 
 class _RecordingManager:
-    """Remembers, per store spec, the keys the manager accepted and in what order (the I6 check needs them: the scheduler keeps a set)."""
+    """Stands between the stock scheduler and the manager.
 
-    def __init__(self, manager, record):
+    * ``prepare_store``: remembers, per store spec, the keys the manager accepted and in what order (the I6 check and the settling of
+      the job need them: the scheduler keeps a set).
+    * ``complete_store``: vLLM's call carries only the job's key SET, always as a success. The scheduler role stages the real outcome of
+      each completed store job in ``staged`` (keyed by the identity of that key set) just before the stock loop runs, and this proxy
+      then makes the one call the manager is meant to get: keys in the manager's order, ``success``, and the digests. A call for a
+      job nobody staged cannot be trusted (there are no digests to hand over), so it reaches the manager as a failed store.
+    """
+
+    def __init__(self, manager, record, on_error):
         self._manager = manager
         self._record = record
+        self._on_error = on_error
+        self.staged: Dict[int, Tuple[Any, List[bytes], bool, Any]] = {}      # id(job keys) -> (job keys, ordered keys, success, digests)
 
     def prepare_store(self, keys, req_context: ReqContext) -> Optional[PrepareStoreOutput]:
         output = self._manager.prepare_store(keys, req_context)
         if output is not None and output.keys_to_store:
             self._record(output)
         return output
+
+    def complete_store(self, keys, req_context: ReqContext, success: bool = True) -> None:
+        staged = self.staged.pop(id(keys), None)
+        if staged is None or staged[0] is not keys:
+            logger.error('ttkvp2p: vLLM completed a store job this connector did not settle (%d keys); it is treated as failed', len(keys))
+            self._call(list(keys), req_context, False, None)
+            return
+        _, ordered_keys, ok, digests = staged
+        self._call(ordered_keys, req_context, ok, digests)
+
+    def _call(self, keys, req_context: ReqContext, success: bool, digests) -> None:
+        try:
+            if success:
+                self._manager.complete_store(keys, req_context, success=True, digests=digests)
+            else:
+                self._manager.complete_store(keys, req_context, success=False)      # the frozen signature, nothing added
+            return
+        except Exception:
+            logger.exception('ttkvp2p: manager.complete_store raised for %d keys (success=%s)', len(keys), success)
+            self._on_error('manager.complete_store raised')
+        if success:
+            # The keys must not stay ALLOCATED for good (every lookup of them would defer): give them up as a failed store.
+            try:
+                self._manager.complete_store(keys, req_context, success=False)
+            except Exception:
+                logger.exception('ttkvp2p: manager.complete_store(success=False) raised too')
 
     def __getattr__(self, name):
         return getattr(self._manager, name)
@@ -107,13 +147,26 @@ class _RecordingManager:
 class TTP2PConnectorScheduler(OffloadingConnectorScheduler):
     def __init__(self, spec, vllm_config, kv_cache_config):
         super().__init__(spec, vllm_config, kv_cache_config)
+        self._spec = spec
         self._block_pool = None
         self._accepted: Dict[int, Tuple[Any, List[bytes]]] = {}       # id(store_spec) -> (store_spec, keys in the manager's order)
+        self._store_jobs: Dict[int, Tuple[Any, List[bytes]]] = {}     # store job id -> (its store spec, keys in the manager's order)
         self.misalignments = 0
-        self.manager = _RecordingManager(self.manager, self._record_store)
+        self.manager = _RecordingManager(self.manager, self._record_store, self._manager_failed)
 
     def _record_store(self, output: PrepareStoreOutput) -> None:
         self._accepted[id(output.store_spec)] = (output.store_spec, list(output.keys_to_store))
+
+    def _manager_failed(self, why: str) -> None:
+        """The manager raised inside a completion: the tier goes off (the engine carries on, as with any internal error)."""
+        latch = getattr(self._spec, 'latch_tier', None)
+        if latch is not None:
+            latch(why)
+
+    def reset_cache(self) -> None:
+        super().reset_cache()
+        self._store_jobs.clear()
+        self._accepted.clear()
 
     def bind_block_pool(self, pool) -> None:
         self._block_pool = pool
@@ -139,6 +192,7 @@ class TTP2PConnectorScheduler(OffloadingConnectorScheduler):
             record = accepted.get(id(spec))
             if record is None or record[0] is not spec:
                 continue
+            self._store_jobs[job_id] = record          # the job's keys in the manager's order, for its completion
             try:
                 problem = self._misalignment(job, record[1])
             except Exception as error:      # a check that cannot run is a store that does not happen
@@ -196,7 +250,69 @@ class TTP2PConnectorScheduler(OffloadingConnectorScheduler):
                     tag.no_retry = True
         except Exception:
             logger.exception('ttkvp2p: flagging failed loads no-retry failed')
-        super().update_connector_output(connector_output)
+        try:
+            self._stage_store_outcomes(connector_output)
+        except Exception:
+            # Anything not staged reaches the manager as a failed store (see _RecordingManager.complete_store): never as a success.
+            logger.exception('ttkvp2p: settling the completed store jobs failed')
+        try:
+            super().update_connector_output(connector_output)
+        finally:
+            self.manager.staged.clear()
+
+    # --- stores: the job's real outcome and its digests reach the manager (design 2.5 steps 5 and 6)
+    def _stage_store_outcomes(self, connector_output: KVConnectorOutput) -> None:
+        """For each store job this output completes, decide ``complete_store``'s arguments and stage them for the stock loop.
+
+        The stock loop calls ``manager.complete_store(job.keys, ctx)`` for it: no job id, no digests, and a ``success`` that is
+        always True. The worker's verdict and the source digests live in the runtime's ``store_results[job_id]``, so it is here,
+        where the job id, the keys and the result meet, that the outcome is settled."""
+        completed = getattr(connector_output.kv_connector_worker_meta, 'completed_jobs', None)
+        threshold = self._stale_job_threshold
+        for job_id in [j for j in self._store_jobs if j < threshold]:
+            del self._store_jobs[job_id]
+        if not completed:
+            return
+        for job_id, count in completed.items():
+            if job_id < threshold:
+                self._spec.take_store_result(job_id)         # a job from before a reset: the stock loop skips it; drop what it left
+                continue
+            job_status = self._jobs.get(job_id)
+            if job_status is None or not job_status.is_store or job_status.pending_count - count > 0:
+                continue                                      # a load, an unknown id, or a job other workers have yet to finish
+            ordered_keys, success, digests = self._store_outcome(job_id, job_status)
+            self.manager.staged[id(job_status.keys)] = (job_status.keys, ordered_keys, success, digests)
+
+    def _store_outcome(self, job_id: int, job_status) -> Tuple[List[bytes], bool, Any]:
+        """(keys in the manager's order, success, digests [n, chips] in that order). A missing or inconsistent result is a failure."""
+        record = self._store_jobs.pop(job_id, None)
+        result = self._spec.take_store_result(job_id)
+        if record is None:
+            logger.error('ttkvp2p: store job %d has no record of its keys in the manager\'s order; it is treated as failed', job_id)
+            return list(job_status.keys), False, None
+        store_spec, keys = record
+        if result is None:
+            # The worker prunes reported results after STORE_RESULT_LIMIT, and a job it never saw has none: neither is a success.
+            logger.warning('ttkvp2p: store job %d has no result from the worker; it is treated as failed', job_id)
+            return keys, False, None
+        if not getattr(result, 'success', False):
+            return keys, False, None
+        problem = self._result_problem(result, store_spec, keys, job_status)
+        if problem is not None:
+            logger.error('ttkvp2p: the result of store job %d cannot be trusted (%s); it is treated as failed', job_id, problem)
+            return keys, False, None
+        return keys, True, result.digests
+
+    @staticmethod
+    def _result_problem(result, store_spec, keys: List[bytes], job_status) -> Optional[str]:
+        if len(keys) != len(job_status.keys) or set(keys) != set(job_status.keys):
+            return 'the keys the manager accepted are not the keys of the job'
+        digests = getattr(result, 'digests', None)
+        if digests is None or getattr(digests, 'ndim', 0) != 2 or digests.shape[0] != len(keys):
+            return 'digests %s for %d keys' % (getattr(digests, 'shape', None), len(keys))
+        if tuple(result.slot_ids) != tuple(store_spec.slot_ids) or tuple(result.generations) != tuple(store_spec.generations):
+            return 'the result names other drive slots than the job\'s store spec'
+        return None
 
 
 # --------------------------------------------------------------------------------------------------------------------
