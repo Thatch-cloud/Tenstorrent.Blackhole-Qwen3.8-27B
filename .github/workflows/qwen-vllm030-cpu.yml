@@ -1,0 +1,111 @@
+name: Qwen vLLM 0.30 CPU suites
+run-name: vLLM 0.30 CPU ${{ inputs.ref || github.head_ref || github.ref_name }}
+# CPU tests that need an installed vLLM 0.30.0 (the real scheduler and KV-cache classes) on Python 3.10, the interpreter of the
+# serving image. qwen-integration-cpu.yml has no vLLM, so vLLM tests named only there skip and read green; here a skip is a failure.
+#
+# Cloned from qwen-fast-vllm-cpu.yml (the empty-target vLLM install through the plugin's own recipe), with vLLM 0.30.0, the plugin at
+# the commit below, CPU torch 2.11.0 (the serving image's torch) and Python 3.10. The plugin is installed from its upstream git at
+# that commit; its dependency set is tblib alone. Its worker, model runner and async decode import ttnn at module level, and there
+# is no ttnn here (the job asserts that), so only tests that do not import them run; the ones that need ttnn run in the image.
+#
+# What runs is scripts/ci/vllm030_suites.json, executed by scripts/ci/vllm030_suites.py through scripts/ci/required_tests.py. A
+# suite directory that is missing fails the job unless the manifest's absent_ok table names this branch and the suite.
+# Dispatch: gh workflow run qwen-vllm030-cpu.yml --ref <branch>   (optionally -f ref=<branch|tag|sha> to test another ref)
+on:
+  push:
+    branches: ['tp4/p2p-gemma', 'tp4/p2p-gemma-*']
+  pull_request:
+    branches: ['tp4/p2p-gemma']
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch, tag or commit to test (empty - the ref the workflow was dispatched on)
+        required: false
+        default: ''
+permissions:
+  contents: read
+concurrency:
+  group: qwen-vllm030-cpu-${{ github.event_name }}-${{ inputs.ref || github.ref }}
+  cancel-in-progress: true
+jobs:
+  vllm030:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      OMP_NUM_THREADS: '2'
+      MKL_NUM_THREADS: '2'
+      VLLM_PLUGINS: ''
+      VLLM_TARGET_DEVICE: empty
+      HF_HUB_OFFLINE: '1'
+      UV_TORCH_BACKEND: cpu
+      CI_BRANCH: ${{ inputs.ref || github.head_ref || github.ref_name }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: tenstorrent/vllm-tt-plugin
+          ref: 82322afc95c44d72b72b45760564c4391f1f08aa
+          path: upstream-plugin
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: C++ compiler for the staging emulation tests
+        run: |
+          if ! command -v g++ >/dev/null && ! command -v c++ >/dev/null && ! command -v clang++ >/dev/null; then
+            sudo -n apt-get update -qq && sudo -n apt-get install -y --no-install-recommends g++
+          fi
+          cxx=$(command -v g++ || command -v c++ || command -v clang++)
+          "$cxx" --version | head -n 1
+      - name: Install pinned empty-target vLLM 0.30.0 and the plugin through the upstream recipe
+        run: |
+          python -m pip install uv
+          python -m venv "$RUNNER_TEMP/qwen-vllm030"
+          source "$RUNNER_TEMP/qwen-vllm030/bin/activate"
+          uv pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cpu
+          cd upstream-plugin
+          git log -1 --format='plugin %H %s'
+          source docs/install-vllm-tt.sh
+      - name: Installed versions, plugin import without ttnn
+        run: |
+          source "$RUNNER_TEMP/qwen-vllm030/bin/activate"
+          python - <<'PY'
+          import importlib.util
+          import sys
+
+          import torch
+          import vllm
+
+          assert sys.version_info[:2] == (3, 10), sys.version
+          assert vllm.__version__ == "0.30.0", vllm.__version__
+          assert torch.__version__.startswith("2.11.0") and "+cpu" in torch.__version__, torch.__version__
+          import vllm_tt_plugin
+          import vllm_tt_plugin.entrypoints
+          assert importlib.util.find_spec("ttnn") is None, "ttnn is importable: this job no longer shows what runs without it"
+          print(sys.version.split()[0], "vllm", vllm.__version__, "torch", torch.__version__, "plugin", vllm_tt_plugin.__file__)
+          PY
+      - name: The suite runner's own tests
+        run: |
+          source "$RUNNER_TEMP/qwen-vllm030/bin/activate"
+          PYTHONPATH=scripts/ci python -B scripts/ci/required_tests.py --min 20 test_vllm030_suites
+      - name: kvp2p, kv_region_read and p2p script suites (a skip is a failure)
+        run: |
+          source "$RUNNER_TEMP/qwen-vllm030/bin/activate"
+          mkdir -p experiment-results
+          P2P_TEST_DIR="$RUNNER_TEMP" python -B scripts/ci/vllm030_suites.py --json experiment-results/vllm030-suites.json --summary "$GITHUB_STEP_SUMMARY"
+      - name: Record the environment
+        if: always()
+        run: |
+          mkdir -p experiment-results
+          if [ -d "$RUNNER_TEMP/qwen-vllm030" ]; then
+            source "$RUNNER_TEMP/qwen-vllm030/bin/activate"
+            uv pip freeze > experiment-results/python-environment.txt
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: qwen-vllm030-cpu-${{ github.run_id }}
+          path: experiment-results/
