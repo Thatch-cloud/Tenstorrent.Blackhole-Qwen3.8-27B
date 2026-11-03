@@ -278,11 +278,17 @@ PYTHONPATH=kvp2p python -m pytest kvp2p/tests          # or: python -m unittest 
 ```
 
 The WP3a tests use a file-backed drive claimed by the real claim tool (a regular file is allowed only under `THATCH_KVP2P_TEST=1`, which the
-test kit sets), a temporary status directory, fake p2pmem files and sysfs, and a controllable clock. `test_tier_rig.py` and
-`test_object_count_262k.py` run the real runtime and manager inside vLLM's real scheduler through `harness.Rig(real_tier=...)`, with nothing
-patched: the connector sets the prompt size and binds the groups itself. `test_scale_production.py` builds an index of 340,732 objects on a
-359,030-slot drive (the slot count of 1 TB of Gemma objects; a sparse file stands in for the namespace) and bounds the latency of every call
-against it.
+test kit sets), a temporary status directory, fake p2pmem files and sysfs, and a controllable clock. `harness.Rig()` runs the integrated path by
+default: the connector, the REAL `KVP2PRuntime` and `NvmeKVManager` and the worker run together inside vLLM's real scheduler, and only the devices and
+the I/O (the numpy card, the file drive, `FakeIO`) are fakes; nothing is patched (the connector sets the prompt size and binds the groups itself).
+The stand-in runtime and manager of `tests/fakes.py` stay available, for the tests that need a fault knob on the runtime, a manager with another
+signature or a start-up refusal: `Rig(fake_tier=True)`, `RigCase.FAKE_TIER = True` or `Rig(manager_class=...)`. Most of the connector and worker tests
+run on both (`StandIn*` classes repeat them on the stand-ins) and ask the rig, not the tier, for the books (`written_slots`, `entry_digest`,
+`allocated_keys`, `slots_all_returned`, `bad_marked`, `complete_store_calls`, ...). `test_tier_rig.py` and `test_object_count_262k.py` use the same
+real tier with their own `RealTier` options. `test_runtime_p2pio_seam.py` joins the other end: the worker's production factory builds the real
+`CardLink` and `P2PIO` over the fake kernel and hands them the real runtime (descriptor, fence, canary offset, slot offsets, latch code).
+`test_scale_production.py` builds an index of 340,732 objects on a 359,030-slot drive (the slot count of 1 TB of Gemma objects; a sparse file
+stands in for the namespace) and bounds the latency of every call against it.
 
 `tests/nvml_stub` hides a GPU driver from vLLM's platform probe (set `TTKVP2P_TEST_HIDE_NVML=0` to leave it alone);
 `TTKVP2P_PACKAGE_ROOT` points the tests at another copy of the package.

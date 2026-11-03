@@ -173,7 +173,8 @@ class StoreCompletion(RigCase):
         self.assertEqual(calls[0][1:], (False, None), 'the verdict is the job\'s: a failed store is complete_store(success=False)')
         self.assertEqual(rig.manager.written(), 0)
         self.assertEqual(len(rig.manager.index), 0)
-        self.assertTrue(rig.slots_all_returned(), 'every drive slot of the failed store is allocatable again')
+        # the job is reported failed while a sibling bio may still be on its way back (its slot drains first, I5), so wait for the last one
+        rig.run_until(rig.slots_all_returned, limit=400, what='every drive slot of the failed store allocatable again')
         # the session can be stored again, and a lookup of its keys is a plain miss, not a deferral
         rig.reset_device_cache()
         rig.add('r2', prompt)

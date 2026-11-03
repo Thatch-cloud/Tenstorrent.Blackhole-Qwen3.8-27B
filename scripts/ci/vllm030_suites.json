@@ -22,6 +22,8 @@
         "test_p2pio_mutants",
         "test_roundtrip",
         "test_runtime",
+        "test_runtime_p2pio_seam",
+        "test_scale_production",
         "test_scheduler_flow",
         "test_startup_sequence",
         "test_store_claim",
@@ -29,7 +31,7 @@
         "test_tier_rig",
         "test_wp4_wiring"
       ],
-      "min_tests": 500,
+      "min_tests": 765,
       "timeout_s": 1200
     },
     "kv_region_read": {
@@ -37,7 +39,7 @@
       "glob": "test_p2p_staging*.py",
       "pythonpath": [],
       "require": ["test_p2p_staging", "test_p2p_staging_card"],
-      "min_tests": 90,
+      "min_tests": 191,
       "timeout_s": 600
     },
     "scripts_p2p": {
@@ -45,13 +47,9 @@
       "glob": "test_*.py",
       "pythonpath": [],
       "require": ["test_kv_shard_layout", "test_p2p_probe", "test_p2p_topology"],
-      "min_tests": 130,
+      "min_tests": 245,
       "timeout_s": 300
     }
   },
-  "absent_ok": {
-    "tp4/p2p-gemma-wp11": {
-      "kvp2p": "this branch carries only the CI; kvp2p/tests arrives with the connector branches, so here the run proves the install and the collection path"
-    }
-  }
+  "absent_ok": {}
 }
