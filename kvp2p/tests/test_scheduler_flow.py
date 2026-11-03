@@ -33,7 +33,7 @@ class Flow(RigCase):
         self.assertEqual(rig.worker.stats['fail_eio'], 1)
         self.assertEqual(rig.worker.stats['done_load'], 0)
         self.assertEqual(len(rig.loads), 1, 'the recompute did not look up and load again')
-        self.assertTrue(rig.runtime.bad, 'the keys behind the media error are BAD')
+        self.assertGreater(rig.bad_marked(), 0, 'the keys behind the media error are BAD')
         # the BAD entries are gone from the index; the others are untouched
         self.assertLess(rig.manager.written(), OBJECTS)
         self.assertEqual(rig.assert_drive_exact(), rig.manager.written())
@@ -51,9 +51,9 @@ class Flow(RigCase):
         rig.add('r2', prompt)
         rig.finish('r2', limit=2000)
         self.assertEqual(rig.worker.stats['fail_deadline'], 1)
-        self.assertGreater(rig.manager.lookups_refused_no_retry, 0, 'the no-retry flag turned the recompute\'s lookups into misses')
+        self.assertGreater(rig.no_retry_lookups(), 0, 'the no-retry flag turned the recompute\'s lookups into misses')
         self.assertEqual(len(rig.loads), 1)
-        self.assertEqual(rig.runtime.bad, set())
+        self.assertEqual(rig.bad_marked(), 0)
         self.assertEqual(rig.manager.written(), OBJECTS, 'a deadline never invalidates the keys')
         hold.set()                                      # the stuck bio returns into a quarantined slot
         rig.drain()
@@ -71,17 +71,16 @@ class Flow(RigCase):
         rig.finish('r2')
         self.assertEqual(rig.worker.stats['reread'], 1)
         self.assertEqual(rig.worker.stats['done_load'], 1)
-        self.assertEqual(rig.runtime.bad, set())
+        self.assertEqual(rig.bad_marked(), 0)
 
     def test_a_persistent_digest_mismatch_marks_exactly_that_object_bad_and_recomputes(self):
         rig, prompt = self.stored_rig()
         victim_key = next(k for k in rig.manager.index if int.from_bytes(k[-4:], 'big') == 0)
-        entry = rig.manager.index[victim_key]
-        rig.drive.corrupt(entry.slot)
+        rig.drive.corrupt(rig.written_slots()[victim_key])
         rig.add('r2', prompt)
         rig.finish('r2', limit=400)
         self.assertEqual(rig.worker.stats['fail_digest'], 1)
-        self.assertEqual(rig.runtime.bad, {(entry.slot, entry.gen)})
+        self.assertEqual(rig.bad_marked(), 1, 'exactly that object')
         self.assertNotIn(victim_key, rig.manager.index, 'complete_load removed the BAD key')
         self.assertEqual(rig.manager.written(), OBJECTS - 1)
 
@@ -129,11 +128,14 @@ class Flow(RigCase):
         self.assertTrue(rig.scheduler.reset_connector_cache())          # POST /reset_prefix_cache?reset_external=true
         self.assertEqual(len(rig.manager.index), 0, 'the reset emptied the index')
         for slot in under_bio:
-            self.assertIn(slot, allocator.pending_free)
-            self.assertNotIn(slot, allocator.free, 'a slot with a bio in flight is not allocatable (I5)')
+            if rig.real_tier is None:
+                self.assertIn(slot, allocator.pending_free)
+                self.assertNotIn(slot, allocator.free, 'a slot with a bio in flight is not allocatable (I5)')
+            else:
+                self.assertEqual(allocator.state_name(slot), 'draining', 'a slot with a bio in flight is not allocatable (I5)')
         rig.add('r3', tokens(PROMPT, 'after the reset'))               # a new session stores while the old bio is still out
         rig.finish('r2', 'r3', limit=800)
-        self.assertEqual(allocator.handed_out_in_flight, [])
+        self.assertEqual(getattr(allocator, 'handed_out_in_flight', []), [])       # the stand-in allocator's own book
         self.assertEqual(rig.worker.stats['fail_reset'], 1)
         hold.set()                                                      # the old bio lands into a quarantined slot
         rig.drain()
@@ -141,7 +143,7 @@ class Flow(RigCase):
         self.assertEqual(rig.assert_drive_exact(), rig.manager.written())
         self.assertGreater(rig.manager.written(), 0)
         for slot in under_bio:
-            self.assertTrue(slot in allocator.free or slot in {e.slot for e in rig.manager.index.values()})
+            self.assertTrue(rig.slot_accounted(slot))
 
     # ------------------------------------------------------------------------------------------------ an abort during a load
     def test_aborting_a_request_while_its_load_is_in_flight_frees_everything_once_the_load_lands(self):
@@ -166,7 +168,7 @@ class Flow(RigCase):
 
     # ------------------------------------------------------------------------------------------------ I6
     def test_a_manager_that_returns_the_keys_in_another_order_is_caught_and_stores_nothing_wrong(self):
-        rig = self.rig()
+        rig = self.rig(fake_tier=True)                  # the stand-in manager has the shuffle knob; the real one never reorders
         rig.manager.shuffle_keys = True
         rig.add('r1', tokens(PROMPT, 'shuffled'))
         rig.drain()
@@ -275,7 +277,7 @@ class FlushThroughTheRealScheduler(RigCase):
         # whatever reached the drive is exactly its key's object: a gather that ran after the second forward would have stored
         # the second session's KV under the first session's hashes
         self.assertGreater(rig.assert_drive_exact(), 0)
-        self.assertEqual(rig.runtime.allocator.handed_out_in_flight, [])
+        self.assertEqual(getattr(rig.runtime.allocator, 'handed_out_in_flight', []), [])       # the stand-in allocator's own book
 
     def test_with_no_free_spill_slot_the_flushed_store_is_dropped_and_nothing_wrong_is_stored(self):
         rig = self.reallocation_rig(extra={'spill_banks': [0]})                # one 8-object slot cannot hold a 57-object job
@@ -304,6 +306,26 @@ class AsyncSchedulingFlush(FlushThroughTheRealScheduler):
     def rig(self, **kwargs):
         kwargs.setdefault('async_scheduling', True)
         return super().rig(**kwargs)
+
+
+# The same tests again on the stand-in runtime and manager (tests/fakes.py): the connector and the worker are held to the seam without the WP3a modules
+# under them, so a change in either side shows up on its own.
+
+
+class StandInFlow(Flow):
+    FAKE_TIER = True
+
+
+class StandInFlushThroughTheRealScheduler(FlushThroughTheRealScheduler):
+    FAKE_TIER = True
+
+
+class StandInAsyncSchedulingFlow(AsyncSchedulingFlow):
+    FAKE_TIER = True
+
+
+class StandInAsyncSchedulingFlush(AsyncSchedulingFlush):
+    FAKE_TIER = True
 
 
 if __name__ == '__main__':

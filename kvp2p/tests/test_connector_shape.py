@@ -226,6 +226,10 @@ class TopologyTests(unittest.TestCase):
 
 
 class SharedRuntimeTests(RigCase):
+    # FAKE_TIER: these tests swap ttkvp2p.runtime / ttkvp2p.manager (a runtime without what the worker needs, a manager that cannot be built, a failing host
+    # check) and read the stand-in runtime's books (acquire_log, released). On the real tier they would replace the real module's attributes for the rest of the process.
+    FAKE_TIER = True
+
     def test_two_roles_share_one_runtime_and_the_last_release_closes_it(self):
         rig = self.rig()
         self.assertEqual(len(FakeRuntime.instances), 1, 'one runtime per drive path')
@@ -248,6 +252,8 @@ class SharedRuntimeTests(RigCase):
 
 
 class StartupTests(RigCase):
+    FAKE_TIER = True                    # see SharedRuntimeTests
+
     def test_a_failed_host_check_leaves_the_tier_unavailable_with_zero_device_footprint(self):
         rig = self.rig(start_worker=False, host_ok=False)
         rig.worker_conn.register_kv_caches(rig.registry)                # never raises
@@ -344,6 +350,8 @@ class StartupTests(RigCase):
 
 
 class RefusedTierTests(RigCase):
+    FAKE_TIER = True                    # see SharedRuntimeTests
+
     def test_an_engine_on_another_executor_serves_normally_and_the_tier_stays_a_no_op(self):
         from ttkvp2p.spec import RefusedManager
 
@@ -494,6 +502,11 @@ class RequestTagTests(RigCase):
         rig.connector_scheduler.on_new_request(request)
         tag = rig.connector_scheduler._req_status['mm'].req_context.get_state(ReqTag)
         self.assertTrue(tag.has_mm)
+
+
+# The same tests on the stand-in runtime and manager, as in the other files.
+class StandInRequestTagTests(RequestTagTests):
+    FAKE_TIER = True
 
 
 if __name__ == '__main__':

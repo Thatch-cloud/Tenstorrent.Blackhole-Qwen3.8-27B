@@ -15,6 +15,10 @@ from ttkvp2p import worker as worker_module
 
 
 class StartupSequence(RigCase):
+    # FAKE_TIER: the start-up order and the staging-record refusals are driven through the stand-in runtime (host_ok, released, the p2pmem and sysfs knobs);
+    # test_runtime and test_tier_rig cover the same start-up on the real runtime.
+    FAKE_TIER = True
+
     def stand_ins(self, rig, log, fail_at=None, kmd_index=True):
         """Install the three modules; every call is appended to ``log`` as it happens."""
         card, drive = rig.card, rig.drive
@@ -220,6 +224,8 @@ class StartupSequence(RigCase):
 
 class TopOfWindow(RigCase):
     """The staging slot of every CONFIGURED bank must stay below the top 16 MiB of the window, which is not DRAM."""
+
+    FAKE_TIER = True                    # see StartupSequence
 
     def start_with_bank_addresses(self, rig, addresses):
         real = worker_module.BACKEND_FACTORY

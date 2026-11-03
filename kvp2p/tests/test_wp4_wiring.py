@@ -168,5 +168,11 @@ class WorkerLatchesForTheIoLayer(RigCase):
         self.assertEqual(rig.runtime.state, 'AVAILABLE')
 
 
+# The same tests again on the stand-in runtime (tests/fakes.py), as in the other files.
+@unittest.skipUnless(HAVE, 'the WP4 worker needs vLLM and numpy: ' + WHY)
+class StandInWorkerLatchesForTheIoLayer(WorkerLatchesForTheIoLayer):
+    FAKE_TIER = True
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -433,7 +433,7 @@ class Lifecycle(RigCase):
             peak = max(peak, sum(rig.runtime.allocator.inflight))
             time.sleep(0.0005)
         self.assertEqual(sum(rig.runtime.allocator.inflight), 0)
-        self.assertEqual(rig.runtime.allocator.begin_refused, 0)
+        self.assertEqual(getattr(rig.runtime.allocator, 'begin_refused', 0), 0)         # the stand-in allocator counts refusals; the real io_begin returns False and counts nothing
 
     # ------------------------------------------------------------------------------------------------ I13 proof
     def test_a_digest_mismatch_is_re_read_once_and_a_transient_one_does_not_mark_anything_bad(self):
@@ -745,12 +745,15 @@ class Lifecycle(RigCase):
         timer = threading.Timer(0.2, hold.set)
         timer.start()
         self.addCleanup(timer.cancel)
+        runtime = rig.runtime                                           # the real runtime leaves its registry when the last role lets go
         started = time.monotonic()
         rig.worker.shutdown()
         self.assertGreaterEqual(time.monotonic() - started, 0.15, 'it waited for the bio')
         self.assertEqual(rig.factory.closed, 1)
-        self.assertEqual(rig.runtime.released, ['worker'])
-        self.assertEqual(sum(rig.runtime.allocator.inflight), 0)
+        if hasattr(runtime, 'released'):                                # the stand-in keeps a book of the roles it was handed back
+            self.assertEqual(runtime.released, ['worker'])
+        self.assertTrue(runtime.closed, 'the worker was the only role: its release closed the runtime')
+        self.assertEqual(sum(runtime.allocator.inflight), 0)
 
     def test_shutdown_does_not_unmap_while_a_bio_is_still_out(self):
         rig, kit = self.kit(extra={'shutdown_drain_s': 0.1})
@@ -1062,6 +1065,26 @@ class InternalErrors(RigCase):
         kit.pump_once()
         self.assertGreaterEqual(rig.worker.stats['internal_error'], 3)
         self.assertEqual(kit.reports, {1: 1}, 'the job the failed submit lost is reported, once, however often the engine calls again')
+
+
+# The same tests again on the stand-in runtime and manager (tests/fakes.py): the connector and the worker are held to the seam without the WP3a modules
+# under them, so a change in either side shows up on its own.
+
+
+class StandInLifecycle(Lifecycle):
+    FAKE_TIER = True
+
+
+class StandInIdleWait(IdleWait):
+    FAKE_TIER = True
+
+
+class StandInSingleTerminalReport(SingleTerminalReport):
+    FAKE_TIER = True
+
+
+class StandInInternalErrors(InternalErrors):
+    FAKE_TIER = True
 
 
 if __name__ == '__main__':

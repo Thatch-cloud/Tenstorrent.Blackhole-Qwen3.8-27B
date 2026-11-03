@@ -47,6 +47,7 @@ from vllm.v1.structured_output import StructuredOutputManager  # noqa: E402
 from ttkvp2p import worker as worker_module  # noqa: E402
 from ttkvp2p.connector import TTP2PConnector  # noqa: E402
 from ttkvp2p.registry import TTKVRegistry  # noqa: E402
+from ttkvp2p.runtime import S_DRAINING, S_USED  # noqa: E402
 from ttkvp2p.spec import register_layout  # noqa: E402
 
 BLOCK = 128
@@ -161,9 +162,16 @@ class Rig:
     def __init__(self, *, slot_objects: int = 8, num_slots: int = 400, num_blocks: int = 600, extra: Optional[dict] = None,
                  max_batched: int = 4096, workers: int = 1, tmp: Optional[str] = None, start_worker: bool = True,
                  checks: bool = True, with_scheduler: bool = True, executor: Optional[str] = None, host_ok: bool = True,
-                 async_scheduling: bool = False, real_tier=None, manager_class=None):
+                 async_scheduling: bool = False, real_tier=None, manager_class=None, fake_tier: bool = False):
         register_layout(TINY)
-        self.real_tier = real_tier              # WP3a: a tier_kit.RealTier makes the rig use the REAL runtime and manager instead of the fakes
+        if real_tier is None and manager_class is None and not fake_tier:
+            # The default path is the integrated one: the connector, the REAL runtime and NvmeKVManager and the worker run together, and only
+            # the devices and the I/O (the numpy card, the file drive, FakeIO) are fakes. A test that needs a stand-in manager or runtime (a
+            # manager with another signature, fault knobs on the runtime, a runtime that records its acquires) passes ``manager_class=`` or
+            # ``fake_tier=True`` and says why.
+            from tier_kit import RealTier
+            real_tier = RealTier()
+        self.real_tier = real_tier              # a tier_kit.RealTier makes the rig use the REAL runtime and manager instead of the fakes
         self.tmp = tmp or tempfile.mkdtemp(prefix='ttkvp2p-rig-')
         self.slot_objects = slot_objects
         self.num_blocks = num_blocks
@@ -231,6 +239,9 @@ class Rig:
             self.scheduler = scheduler_cls(vllm_config=self.vllm_config, kv_cache_config=self.kv_cache_config,
                                        structured_output_manager=StructuredOutputManager(self.vllm_config), block_size=BLOCK,
                                        hash_block_size=BLOCK, include_finished_set=False, log_stats=False)
+        self.complete_store_calls: List[tuple] = []     # (keys, success, digests shape or None) of every complete_store the manager receives, whichever manager
+        if self.scheduler is not None:
+            self._record_complete_store()
         self.runner = FakeRunner(self)
         self.requests: Dict[str, Request] = {}
         self.loads: List[tuple] = []            # (req_id, per-group block counts) of every load job the scheduler created
@@ -260,6 +271,54 @@ class Rig:
     @property
     def io(self):
         return self.factory.io
+
+    def _record_complete_store(self) -> None:
+        manager = self.manager
+        inner = manager.complete_store
+
+        def recording(keys, req_context, success=True, digests=None):
+            self.complete_store_calls.append((len(keys), success, None if digests is None else tuple(digests.shape)))
+            return inner(keys, req_context, success=success, digests=digests)
+
+        manager.complete_store = recording
+
+    # --- the manager's and the allocator's books, whichever tier is under test
+    def entry_digest(self, key: bytes):
+        """The digest row the manager holds for a WRITTEN key."""
+        entry = self.manager.index[key]
+        if isinstance(entry, (int, np.integer)):
+            return [int(v) for v in self.manager._digest[int(entry)]]
+        return [int(v) for v in entry.digest]
+
+    def allocated_keys(self) -> List[bytes]:
+        """Keys whose entry is ALLOCATED (a store in flight): one left behind answers HIT_PENDING for ever."""
+        manager = self.manager
+        return [k for k, e in manager.index.items()
+                if (manager.entry_state(k) == 'allocated' if isinstance(e, (int, np.integer)) else e.state == 'ALLOCATED')]
+
+    def bad_marked(self) -> int:
+        """How many (slot, generation) pairs the worker proved bad: the stand-in keeps the set, the real runtime counts them (the manager drops the pair with its entry)."""
+        runtime = self.runtime
+        return len(runtime.bad) if self.real_tier is None else int(runtime.counters['bad_marked'])
+
+    def no_retry_lookups(self) -> int:
+        """Lookups the manager turned into misses because the request carried the no-retry flag."""
+        manager = self.manager
+        return manager.lookups_refused_no_retry if self.real_tier is None else int(manager.miss_reasons['no_retry'])
+
+    def slot_accounted(self, slot: int) -> bool:
+        """A slot is either allocatable (or on its way: waiting for its TRIM) or named by an entry of the index: never lost."""
+        index_slots = {e if isinstance(e, (int, np.integer)) else e.slot for e in self.manager.index.values()}
+        if self.real_tier is None:
+            return slot in self.runtime.allocator.free or slot in index_slots
+        return self.runtime.allocator.state_name(slot) in ('free', 'trim_wait', 'trimming') or slot in index_slots
+
+    def slots_all_returned(self) -> bool:
+        """No drive slot is in use or has a bio in flight (a released slot may still wait for its TRIM on the real allocator)."""
+        allocator = self.runtime.allocator
+        if self.real_tier is not None:
+            return allocator.count(S_USED) == 0 and allocator.count(S_DRAINING) == 0 and allocator.total_inflight() == 0
+        return len(allocator.free) == self.runtime.num_slots and not allocator.pending_free and sum(allocator.inflight) == 0
 
     # --- requests and steps
     def add(self, rid: str, prompt: List[int], max_tokens: int = 1, salt: Optional[str] = None) -> Request:
@@ -317,14 +376,25 @@ class Rig:
         block_hash, group = key[:-4], int.from_bytes(key[-4:], 'big')
         return np.concatenate([np.concatenate([kv_rows(block_hash, group, t)[d] for t in range(TENSORS)]) for d in range(CHIPS)])
 
+    def written_slots(self) -> Dict[bytes, int]:
+        """key -> drive slot of every WRITTEN entry, on either tier (the stand-in manager keeps Entry objects, the real one a key -> slot index)."""
+        manager = self.manager
+        written = {}
+        for key, entry in manager.index.items():
+            if isinstance(entry, (int, np.integer)):
+                if manager.entry_state(key) == 'written':
+                    written[key] = int(entry)
+            elif entry.state == 'WRITTEN':
+                written[key] = entry.slot
+        return written
+
     def assert_drive_exact(self) -> int:
         """Every WRITTEN entry's slot on the drive holds exactly the object its key names. Returns how many were checked."""
         checked = 0
-        for key, entry in self.manager.index.items():
-            if entry.state == 'WRITTEN':
-                got = self.drive.slot_object(entry.slot)
-                assert np.array_equal(got, self.expected_object(key)), 'slot %d does not hold its key\'s object' % entry.slot
-                checked += 1
+        for key, slot in self.written_slots().items():
+            got = self.drive.slot_object(slot)
+            assert np.array_equal(got, self.expected_object(key)), 'slot %d does not hold its key\'s object' % slot
+            checked += 1
         return checked
 
     def assert_kv_exact(self) -> None:
@@ -461,9 +531,16 @@ class WorkerKit:
 
 
 class RigCase(unittest.TestCase):
-    """Base class: ``self.rig(...)`` builds a rig that is closed when the test ends."""
+    """Base class: ``self.rig(...)`` builds a rig that is closed when the test ends.
+
+    The rig runs the REAL runtime and NvmeKVManager unless the class says ``FAKE_TIER = True`` (or the test passes ``manager_class=``): a
+    class that injects faults or reads the books through the stand-in runtime and manager (``FakeRuntime.faults``, ``acquire_log``,
+    ``shuffle_keys``, a manager with another signature) names that as its reason, and the same scenarios run on the real tier in test_tier_rig."""
+
+    FAKE_TIER = False
 
     def rig(self, **kwargs) -> Rig:
+        kwargs.setdefault('fake_tier', self.FAKE_TIER)
         rig = Rig(**kwargs)
         self.addCleanup(rig.close)
         return rig

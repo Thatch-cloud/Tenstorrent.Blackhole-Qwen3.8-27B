@@ -16,8 +16,8 @@ class RoundTripTests(RigCase):
         rig.drain()
         # 17 full-attention objects and 8 per sliding group (2,088 = 2,048 + 40 at 262k: full blocks plus 5 x 8)
         by_group = {}
-        for key, entry in rig.manager.index.items():
-            assert entry.state == 'WRITTEN'
+        self.assertEqual(len(rig.written_slots()), len(rig.manager.index), 'every entry is WRITTEN')
+        for key in rig.written_slots():
             by_group[int.from_bytes(key[-4:], 'big')] = by_group.get(int.from_bytes(key[-4:], 'big'), 0) + 1
         self.assertEqual(by_group, {0: FULL_BLOCKS, **{g: 8 for g in range(1, GROUPS)}})
         self.assertEqual(rig.assert_drive_exact(), FULL_BLOCKS + 5 * 8)
@@ -30,7 +30,7 @@ class RoundTripTests(RigCase):
         self.assertEqual(rig.worker.stats['done_load'], 1)
         self.assertEqual(rig.worker.stats['objects_scattered'], FULL_BLOCKS + 5 * 8)
         # every step of the run checked that each non-null block below the computed tokens holds exactly its hash's content
-        self.assertEqual(rig.runtime.allocator.handed_out_in_flight, [])
+        self.assertEqual(getattr(rig.runtime.allocator, 'handed_out_in_flight', []), [])        # the stand-in allocator's own book; the real one has none
         self.assertEqual(sum(rig.runtime.allocator.inflight), 0)
 
     def test_a_returning_session_with_new_text_restores_the_prefix_and_prefills_the_rest(self):
@@ -64,6 +64,10 @@ class RoundTripTests(RigCase):
         everything = allocator.alloc(240)
         for slot in everything[::3]:                     # every third slot is free again: no two allocations are adjacent
             allocator.release(slot)
+        if rig.real_tier is not None:                    # the real allocator frees a released slot only after its TRIM, which the engine applies at a pass
+            self.assertTrue(rig.runtime.settle(5.0), 'the TRIM of the released slots did not finish')
+            rig.step()
+            self.assertEqual(allocator.n_free, 80)
         rig.add('r1', tokens(4000, 'long'))              # 31 full blocks + 40 sliding objects
         rig.drain()
         writes = [c for c in rig.io.calls if c[0] == 'write']
@@ -92,12 +96,55 @@ class RoundTripTests(RigCase):
         self.assertEqual(rig.worker.stats['done_load'], 3)
 
 
+class DefaultPathTests(RigCase):
+    """What the default rig is: the connector, the REAL runtime, the REAL manager and the worker run together, and only the devices and the I/O are fakes."""
+
+    def test_the_default_rig_runs_the_real_runtime_and_manager_under_the_connector_and_the_worker(self):
+        from fakes import FakeCard, FakeDrive, FakeIO, FakeNvmeKVManager, FakeRuntime
+        from ttkvp2p.manager import NvmeKVManager
+        from ttkvp2p.runtime import KVP2PRuntime
+        from ttkvp2p.worker import TTP2PWorker
+
+        rig = self.rig()
+        self.assertIs(type(rig.manager), NvmeKVManager)
+        self.assertIs(type(rig.runtime), KVP2PRuntime)
+        self.assertIs(type(rig.worker), TTP2PWorker)
+        self.assertIs(rig.manager.runtime, rig.runtime, 'the scheduler role and the worker role share the one runtime')
+        self.assertIs(rig.worker.rt.runtime, rig.runtime)
+        self.assertEqual(sorted(rig.runtime.roles), ['scheduler', 'worker'])
+        self.assertNotIsInstance(rig.manager, FakeNvmeKVManager)
+        self.assertNotIsInstance(rig.runtime, FakeRuntime)
+        # the devices and the I/O stay fakes
+        self.assertIsInstance(rig.card, FakeCard)
+        self.assertIsInstance(rig.drive, FakeDrive)
+        self.assertIsInstance(rig.io, FakeIO)
+
+    def test_the_stand_ins_are_still_there_for_the_tests_that_need_a_fault_knob(self):
+        from fakes import FakeNvmeKVManager, FakeRuntime
+
+        rig = self.rig(fake_tier=True)
+        self.assertIs(type(rig.manager), FakeNvmeKVManager)
+        self.assertIs(type(rig.runtime), FakeRuntime)
+
+
 class AsyncSchedulingRoundTripTests(RoundTripTests):
     """The same tests with async scheduling: two batches in flight, so every completion reaches the scheduler one step late."""
 
     def rig(self, **kwargs):
         kwargs.setdefault('async_scheduling', True)
         return super().rig(**kwargs)
+
+
+# The same tests again on the stand-in runtime and manager (tests/fakes.py): the connector and the worker are held to the seam without the WP3a modules
+# under them, so a change in either side shows up on its own.
+
+
+class StandInRoundTripTests(RoundTripTests):
+    FAKE_TIER = True
+
+
+class StandInAsyncSchedulingRoundTripTests(AsyncSchedulingRoundTripTests):
+    FAKE_TIER = True
 
 
 if __name__ == '__main__':

@@ -122,13 +122,13 @@ class RequiredDigestsManager(A1Manager):
 
 class StoreCompletion(RigCase):
     def assert_each_key_holds_its_own_digest(self, rig):
-        for key, entry in rig.manager.index.items():
+        for key in rig.manager.index:
             obj = rig.expected_object(key)
             want = [digest_bytes(obj[d * SHARD_OBJ:(d + 1) * SHARD_OBJ]) for d in range(4)]
-            self.assertEqual([int(v) for v in entry.digest], want, 'the digest of another key\'s bytes is stored under this key')
+            self.assertEqual(rig.entry_digest(key), want, 'the digest of another key\'s bytes is stored under this key')
 
     def assert_nothing_left_allocated(self, rig):
-        self.assertEqual([k for k, e in rig.manager.index.items() if e.state == 'ALLOCATED'], [],
+        self.assertEqual(rig.allocated_keys(), [],
                          'an ALLOCATED entry answers HIT_PENDING for ever: every lookup of its key would defer')
 
     # ------------------------------------------------------------------------------------------------ success
@@ -138,7 +138,7 @@ class StoreCompletion(RigCase):
         rig.drain()
         self.assertEqual(rig.manager.written(), OBJECTS)
         # one call per store job, from the connector (vLLM's own call is suppressed), every one a success with one digest row per key
-        calls = rig.manager.complete_store_calls
+        calls = rig.complete_store_calls
         self.assertEqual(len(calls), rig.worker.stats['done_store'])
         self.assertTrue(all(success for _, success, _ in calls), calls)
         self.assertEqual(sum(n for n, _, _ in calls), OBJECTS)
@@ -168,14 +168,12 @@ class StoreCompletion(RigCase):
         rig.drain()
         self.assertEqual(rig.worker.stats['fail_io'], 1)
         self.assertEqual(rig.worker.stats['done_store'], 0)
-        calls = rig.manager.complete_store_calls
+        calls = rig.complete_store_calls
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0][1:], (False, None), 'the verdict is the job\'s: a failed store is complete_store(success=False)')
         self.assertEqual(rig.manager.written(), 0)
         self.assertEqual(len(rig.manager.index), 0)
-        allocator = rig.runtime.allocator
-        self.assertEqual((len(allocator.free), allocator.pending_free, sum(allocator.inflight)), (rig.runtime.num_slots, set(), 0),
-                         'every drive slot of the failed store is allocatable again')
+        self.assertTrue(rig.slots_all_returned(), 'every drive slot of the failed store is allocatable again')
         # the session can be stored again, and a lookup of its keys is a plain miss, not a deferral
         rig.reset_device_cache()
         rig.add('r2', prompt)
@@ -194,8 +192,8 @@ class StoreCompletion(RigCase):
         hold.set()
         rig.drain()
         self.assertEqual(rig.manager.written(), 0)
-        self.assertTrue(rig.manager.complete_store_calls)
-        self.assertTrue(all(success is False for _, success, _ in rig.manager.complete_store_calls), rig.manager.complete_store_calls)
+        self.assertTrue(rig.complete_store_calls)
+        self.assertTrue(all(success is False for _, success, _ in rig.complete_store_calls), rig.complete_store_calls)
         self.assert_nothing_left_allocated(rig)
 
     def test_a_store_the_worker_left_no_result_for_is_a_failed_store(self):
@@ -205,7 +203,7 @@ class StoreCompletion(RigCase):
         rig.add('r1', tokens(PROMPT, 'pruned'))
         rig.drain()
         self.assertEqual(rig.worker.stats['done_store'], 1, 'the worker did store it')
-        self.assertEqual(rig.manager.complete_store_calls[0][1:], (False, None))
+        self.assertEqual(rig.complete_store_calls[0][1:], (False, None))
         self.assertEqual(len(rig.manager.index), 0)
 
     def test_the_workers_verdict_decides_not_the_presence_of_digests(self):
@@ -214,7 +212,7 @@ class StoreCompletion(RigCase):
         rig.add('r1', tokens(PROMPT, 'verdict'))
         rig.drain()
         self.assertEqual(rig.manager.written(), 0)
-        self.assertTrue(all(success is False for _, success, _ in rig.manager.complete_store_calls))
+        self.assertTrue(all(success is False for _, success, _ in rig.complete_store_calls))
         self.assertEqual(len(rig.manager.index), 0)
 
     def test_a_result_that_names_other_drive_slots_than_the_job_is_not_trusted(self):
@@ -223,7 +221,7 @@ class StoreCompletion(RigCase):
         rig.add('r1', tokens(PROMPT, 'wrong-slots'))
         rig.drain()
         self.assertEqual(rig.manager.written(), 0, 'digests that may belong to other slots are never attached to these keys')
-        self.assertTrue(all(success is False for _, success, _ in rig.manager.complete_store_calls))
+        self.assertTrue(all(success is False for _, success, _ in rig.complete_store_calls))
         self.assertEqual(len(rig.manager.index), 0)
 
     def test_a_result_that_breaks_the_digest_contract_is_a_failed_store(self):
@@ -237,7 +235,7 @@ class StoreCompletion(RigCase):
                     rig.add('r1', tokens(PROMPT, 'broken ' + name))
                     rig.drain()
                 self.assertIn('cannot be trusted', ' '.join(logged.output))
-                calls = rig.manager.complete_store_calls
+                calls = rig.complete_store_calls
                 self.assertTrue(calls)
                 self.assertTrue(all(call[1:] == (False, None) for call in calls), calls)
                 self.assertEqual(len(rig.manager.index), 0, 'the keys are dropped, none is kept with digests nobody can vouch for')
@@ -325,7 +323,7 @@ class StoreCompletion(RigCase):
         status = next(iter(rig.connector_scheduler._req_status.values()))
         keys = {b'k' * 32 + (0).to_bytes(4, 'big')}
         rig.connector_scheduler.manager.complete_store(keys, status.req_context)        # what the stock loop calls: a bare set, success=True
-        self.assertEqual(rig.manager.complete_store_calls, [(1, False, None)])
+        self.assertEqual(rig.complete_store_calls, [(1, False, None)])
 
     # ------------------------------------------------------------------------------------------------ reset
     def test_a_store_job_completing_after_a_reset_settles_nothing_and_leaves_nothing_behind(self):
@@ -370,6 +368,18 @@ class AsyncStoreCompletion(StoreCompletion):
     def rig(self, **kwargs):
         kwargs.setdefault('async_scheduling', True)
         return super().rig(**kwargs)
+
+
+# The same tests again on the stand-in runtime and manager (tests/fakes.py): the connector and the worker are held to the seam without the WP3a modules
+# under them, so a change in either side shows up on its own.
+
+
+class StandInStoreCompletion(StoreCompletion):
+    FAKE_TIER = True
+
+
+class StandInAsyncStoreCompletion(AsyncStoreCompletion):
+    FAKE_TIER = True
 
 
 if __name__ == '__main__':
