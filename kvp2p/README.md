@@ -12,9 +12,93 @@ This directory holds the connector side:
 | `ttkvp2p/spec.py` | `TTP2PNvmeSpec`, `P2PConfig` (the `kv_connector_extra_config` keys), `NvmeLoadStoreSpec`, `ReqTag`, the layout table |
 | `ttkvp2p/connector.py` | `TTP2PConnector` and its scheduler and worker roles |
 | `ttkvp2p/worker.py` | `TTP2PWorker`: the job state machine, the staging ring, budgets, deadlines, strikes and latch, `wait()` |
+| `ttkvp2p/runtime.py` | `KVP2PRuntime` (one per drive path per process, shared by both connector roles), `SlotAllocator` (invariant I5), the TRIM thread, the control directory and the state file |
+| `ttkvp2p/manager.py` | `NvmeKVManager`: the scheduler-side index (invariants I6, I7, I12, I13), TTL, LRU, capacity, the daily write cap |
+| `ttkvp2p/store.py` | the drive store, v1a: superblocks, geometry, the exclusive drive open, discard (standard library only) |
+| `ttkvp2p/health.py` | the start-up host checks, the status-file reader, the control-directory parser, the state-file writer (standard library only) |
+| `ttkvp2p/claim.py` | the claim tool, the only writer of a superblock; owner-run, never automatic (standard library only) |
 
-Importing any of them imports neither `ttnn` nor the device extension, starts no thread and opens nothing: the API-server process
+Importing any of the connector-side modules imports neither `ttnn` nor the device extension, starts no thread and opens nothing: the API-server process
 imports the connector class to decide whether the hybrid KV cache manager can stay on.
+
+## The store, the runtime and the manager (WP3a)
+
+**The drive.** A raw namespace carries a `gemma-kv` format v2 store, mode "process": two 4 KiB superblock slots, an 8 KiB DMA canary block,
+then the data region on a MiB boundary with object `i` at `data_off + i * object_bytes`. The tier **never formats**: it refuses a drive with an
+absent or unknown superblock. `python3 -m ttkvp2p.claim` is the only writer. It is gated: the by-id path, the name typed back, a fresh status
+file that names the same drive and records (or is told) its size, an exclusive open, and `--overwrite=<format seen>` for a drive that carries
+anything else. Mode "process" keeps nothing across a restart: the open verifies the superblock and queues a discard of the whole data
+region in runs of at most 1 GiB, ALL of them at once to the one I/O thread (not two runs per engine pass); a slot is allocatable as its run
+completes, and the engine thread applies the completions at its next pass. Until the last run is applied the tier is `warming`
+(`capacity.warming` in the state file): a request whose boundary does not fit the slots already freed is refused for the reason `warming`.
+
+**The runtime.** The worker role `acquire`s with role "worker" and opens it: the host checks of the design's start-up order run first and
+leave no device footprint when one fails. They are, in order: the kill switch (`off` in the control directory), the configuration (v1a keeps
+nothing across a restart, the TTL is at most a day, no gate-only value outside test mode), the zero-retention signals (the forwarded flag, the
+log control, the node's attestation key, a marker file beside the control directory) and `retention_ack`, the cache-drive status file (fresh,
+the drive named, live, unlocked, at rest by Opal, Gen4 or better), the drive (exclusive open, superblock, layout, size, the claim recomputed
+from the status file's by-id name), capacity for one maximum-context session, and one allocate file per card with the slice whole and
+mappable. A refusal carries a reason code from the closed vocabulary and is written to the state file. The scheduler role only attaches.
+`release` is reference counted; the last one closes the runtime.
+
+**Slots (I5).** A drive slot becomes allocatable only when no index entry names it, no bio of any job is in flight on it and its TRIM
+completed; each allocation bumps its generation. `io_begin` refuses a slot that is not in use or whose generation moved on, so a stale job's
+read never starts on a reallocated slot.
+
+**The manager.** Engine thread only (I7). It subclasses vLLM's public `OffloadingManager` and nothing else of vLLM's: it keeps its OWN index
+(one dict, key -> slot), its OWN LRU (an `OrderedDict`) and its own slot table, and imports nothing from `vllm.v1.kv_offload.cpu` (those
+classes moved between vLLM releases: 0.31 stops evicting through them without an error, 0.33 crashes). Every call costs O(keys in the call):
+nothing scans the index or the slot table, the per-state counts are incremental (a recount of 359,030 slots per release stalled the engine thread
+for seconds at the slot count of a 1 TB drive), evictions are collected and released in one batch per pass, and pinning an entry for a load never
+inserts or deletes in the LRU. "Now" for the TTL is frozen for a pass: the first manager call of a pass reads the clock and `on_schedule_end` ends
+the pass, so an entry that answered HIT is still there for `prepare_load`; calls vLLM makes after `on_schedule_end` (`prepare_store`, `touch`, the
+completions) never arm it. Expired entries and LRU victims go in `on_schedule_end`, which also pumps the runtime (completed TRIMs, the control
+directory once a second, the status file, the state file every 10 s). Eviction keeps `entries + reservations + reserve <= capacity`, so an
+admission does not use up the room the next one needs.
+
+`prepare_store` allocates in the order asked and checks the pairing (I6). Admission (I12) is all or nothing per request boundary: the whole
+prompt boundary must fit the free list, the capacity and the daily cap, the slots and the bytes are reserved for the request (the unused rest is
+released and refunded when it finishes), and the verdict is cached in its `ReqTag`. The size comes from `ReqTag.num_prompt_tokens`, which the
+connector's scheduler role sets from the request, and the group map, which it binds from the offloading config (`manager.bind_groups`). A
+request whose size is unknown on a layout with a group map is refused whole (`size_unknown`, counted as `admission_size_unknown`), never judged
+chunk by chunk: a chunk denied mid-prompt is a hole vLLM never revisits. A store that cannot be admitted is an EMPTY `keys_to_store`, never `None`.
+
+`complete_store(keys, ctx, success=True, digests=None)` is amendment A1 of the interface: `keys` come in the order `prepare_store` returned
+them, `digests` is a `[len(keys), chips]` uint64 array in that order, and row i belongs to `keys[i]`. The manager never reads the runtime's
+`store_results` and never pairs a digest by slot or generation: the connector consumes the worker's result and hands the verdict and the rows
+over. A success without usable digests is a failed store, a failed store drops its entries, and their slots go back through TRIM under I5. What
+the manager does check is that an entry is still the one this job's `prepare_store` allocated: it keeps a batch number per slot and, in the
+request's `ReqContext`, a ledger of the request's `prepare_store` calls, so a completion that arrives after a wipe or after the stuck-store reap
+(300 s) cannot mark a NEW entry of the same key WRITTEN, or drop it. `reset_cache` is an in-RAM invalidate plus an epoch bump; `wipe` the same
+plus a discard of the whole region; the slots go back through TRIM under I5. Neither is a format.
+
+**Files the tier writes.** The state file (`state_file` in the kwarg), atomically, every 10 s while the engine is stepping AND at once on every
+state change (opened, available, latched, a latch cleared, closing). The key names are frozen (additions are allowed, removals and renames are
+not; a test pins them):
+
+| key | meaning |
+|---|---|
+| `schema` (1), `spawn_id`, `written_at` | the standard's three additive fields (`spawn_id` echoes `THATCH_KVTIER_SPAWN_ID`, null when absent; `written_at` is ISO-8601 UTC) |
+| `state` | `UNAVAILABLE`, `AVAILABLE`, `LATCHED` or `CLOSING` |
+| `reason` | the CLOSED code of the state (`host_code` while `UNAVAILABLE`, `latch_code` while `LATCHED`, else null): the only reason field a metric label may be built from |
+| `latch_reason`, `latch_code`, `latches` | the first active latch (text and code) and the codes of every active latch, oldest first |
+| `host_ok`, `host_code`, `host_reason` | the host checks: pass/fail, the closed code, free text for people |
+| `persistence`, `layout`, `kv_epoch`, `engine_heartbeat` | configuration echo; the wall time of the last `schedule()` pass |
+| `counters` | `hits`, `misses`, `lookups`, `loads`, `stores` (jobs), `store_admitted_objects`, `store_dropped` ({reason: n}), `admission_size_unknown`, `admission_overrun`, `store_completion_stale`, `store_completion_invalid`, `store_completion_unmatched`, `evictions` ({reason: n}), `failures` ({cause: n}), `latched` ({code: n}), `trim_runs`, `trim_failed`, `bad_marked` |
+| `bytes_written_today`, `write_cap_bytes` | the rolling 24 hour write budget |
+| `capacity` | `slots`, `object_bytes`, `entries`, `capacity_slots`, `slot_states` ({free, used, trim_wait, trimming, draining, quarantined, slots, inflight, trim_failed}), `warming` |
+| `restore` | `count`, `p50_s`, `p99_s` |
+| `drive` | `state`, `link_gts`, `aer_uncorrectable`, `aer_correctable`, `status_age_s` |
+| `control` | `acks` (the last 16 control acknowledgements) and `last_edge_seq` |
+
+It reads the control directory (`control_dir`): `NNNN-off|on|wipe|delete_tenant|fault|selftest`; `off` and `on` are levels (the highest number
+wins; `on` clears an `off` and nothing else, so a latch that tripped while `off` was in force stays), the rest apply once per process, and
+`fault` and `selftest` need `THATCH_KVP2P_TEST=1`. `delete_tenant` is v1b and is acknowledged as unsupported.
+
+**What it needs from the connector side** (all of it is in `connector.py`): `ReqTag.num_prompt_tokens`, set in `on_new_request`; the KV groups
+(sliding window in objects, `None` = full attention) bound in the scheduler role's constructor from `config.kv_group_configs`; and, for every
+completed store job, one `complete_store(keys, ctx, success, digests)` as above. The built-in Gemma group map (`LAYOUT_GROUPS`) only serves a
+manager that nothing binds.
 
 ## What the worker needs from its neighbours
 
@@ -82,17 +166,20 @@ parameter and must bind `(keys, ctx, success=True|False, digests=None)`. A manag
 why, and the tier is a no-op that never stores from boot, instead of raising in the first successful store and latching then.
 
 A job from before a `reset_cache` is skipped by vLLM; its result is taken and dropped. So the manager implements `complete_store` as
-"for each key, in order: on success attach digest row i and make the entry WRITTEN; on failure drop the entry", and nothing more.
+"for each key, in order: on success attach digest row i and make the entry WRITTEN; on failure drop the entry", and nothing more (the WP3a
+manager adds one check of its own: that the entry is still the one this job's `prepare_store` allocated, so a late report cannot touch a newer
+entry of the same key).
 
 **Gate for the manager (WP3a): I6 beyond what the connector can see.** The connector checks that the keys come back in the scheduler's own
 order and that a hashed source block matches its key. It cannot see a manager that permutes `slot_ids` against its OWN key-to-slot map:
 the bytes of key `i` then land in a slot that the manager's entry for key `i` does not name, so a restore of that key reads another key's
 object. The digest check fails it (a spurious BAD and a lost session) only because the digests are attached by key position; a manager that
-attached them by slot would make wrong KV verify. `NvmeKVManager.prepare_store` must therefore assert, before it returns, that slot `i` of
-the store spec is the slot it recorded for key `i` (with a test that a permuting allocator trips it); `complete_store` may re-check
-each entry's slot and generation against the store spec it handed out. The tests here run a manager with exactly the signature above
-(`A1Manager`, which raises on any call the amendment does not allow) and a slot-permuting one (`PermutingKVManager`: key `i` gets neither the
-i-th allocated slot nor a monotone one), and check that every key ends up with the digest of its own object and restores exactly.
+attached them by slot would make wrong KV verify. `NvmeKVManager.prepare_store` therefore asserts, before it returns, that slot `i` of
+the store spec is the slot it recorded for key `i` (a corrupted spec and each kind of swap trip it, and a permuting allocator is exercised
+through the real scheduler), and `complete_store` attaches the digests by key position and by nothing else. The tests here run a manager with
+exactly the signature above (`A1Manager`, which raises on any call the amendment does not allow) and a slot-permuting one (`PermutingKVManager`:
+key `i` gets neither the i-th allocated slot nor a monotone one), and check that every key ends up with the digest of its own object and
+restores exactly.
 
 ## What the model runner calls, in this order
 
@@ -129,6 +216,13 @@ against a numpy "card" and a file "drive". They need vLLM 0.30.0 with the empty 
 ```sh
 PYTHONPATH=kvp2p python -m pytest kvp2p/tests          # or: python -m unittest discover -s kvp2p/tests
 ```
+
+The WP3a tests use a file-backed drive claimed by the real claim tool (a regular file is allowed only under `THATCH_KVP2P_TEST=1`, which the
+test kit sets), a temporary status directory, fake p2pmem files and sysfs, and a controllable clock. `test_tier_rig.py` and
+`test_object_count_262k.py` run the real runtime and manager inside vLLM's real scheduler through `harness.Rig(real_tier=...)`, with nothing
+patched: the connector sets the prompt size and binds the groups itself. `test_scale_production.py` builds an index of 340,732 objects on a
+359,030-slot drive (the slot count of 1 TB of Gemma objects; a sparse file stands in for the namespace) and bounds the latency of every call
+against it.
 
 `tests/nvml_stub` hides a GPU driver from vLLM's platform probe (set `TTKVP2P_TEST_HIDE_NVML=0` to leave it alone);
 `TTKVP2P_PACKAGE_ROOT` points the tests at another copy of the package.

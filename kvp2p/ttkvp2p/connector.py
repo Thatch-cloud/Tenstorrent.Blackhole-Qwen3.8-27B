@@ -157,6 +157,21 @@ class TTP2PConnectorScheduler(OffloadingConnectorScheduler):
         self._store_jobs: Dict[int, Tuple[Any, List[bytes]]] = {}     # store job id -> (its store spec, keys in the manager's order)
         self.misalignments = 0
         self.manager = _RecordingManager(self.manager, self._record_store, self._manager_failed)
+        self._bind_groups()
+
+    def _bind_groups(self) -> None:
+        """Hand the manager the REAL KV groups (sliding window in objects, None = full attention) from the offloading config, so that it can
+        size a request's whole boundary for the all-or-nothing admission (I12) on whatever model the engine serves. A manager that has no use
+        for them (the refused one) does not have the method."""
+        bind = getattr(self.manager, 'bind_groups', None)
+        if bind is None:
+            return
+        try:
+            configs = list(self.config.kv_group_configs)
+            if configs:
+                bind([config.sliding_window_size_in_chunks for config in configs], tokens_per_object=int(configs[0].tokens_per_chunk))
+        except Exception:
+            logger.exception('ttkvp2p: could not bind the KV groups to the manager; its built-in group map (if any) stays')
 
     def _record_store(self, output: PrepareStoreOutput) -> None:
         self._accepted[id(output.store_spec)] = (output.store_spec, list(output.keys_to_store))
@@ -182,10 +197,27 @@ class TTP2PConnectorScheduler(OffloadingConnectorScheduler):
             salt = getattr(request, 'cache_salt', None)
             tag = ReqTag(tenant=blake2b8(salt) if salt else None,
                          has_mm=bool(getattr(request, 'mm_features', None)),
-                         admitted=None, no_retry=False)
+                         admitted=None, no_retry=False,
+                         num_prompt_tokens=int(request.num_prompt_tokens))       # the manager's whole-boundary admission size (I12)
             self._req_status[request.request_id].req_context.set_state(tag)
         except Exception:      # an untagged request is treated as a plain one by the manager; the engine must not stop for it
             logger.exception('ttkvp2p: could not tag request %s', request.request_id)
+
+    def get_num_new_matched_tokens(self, request, num_computed_tokens, *args, **kwargs):
+        """vLLM's lookup, plus a note of how much of the prompt is already there (on the device or in this tier): the manager reserves, for the
+        request's full-attention group, only the blocks beyond it (a later turn of a long conversation stores little, and must not be refused
+        because it was sized as if it were new)."""
+        result = super().get_num_new_matched_tokens(request, num_computed_tokens, *args, **kwargs)
+        try:
+            matched = result[0]
+            if matched:
+                status = self._req_status.get(request.request_id)
+                tag = status.req_context.get_state(ReqTag) if status is not None else None
+                if tag is not None:
+                    tag.hit_tokens = max(tag.hit_tokens, int(num_computed_tokens) + int(matched))
+        except Exception:
+            logger.exception('ttkvp2p: could not note the matched tokens of request %s', getattr(request, 'request_id', '?'))
+        return result
 
     # --- I6: every store job pairs the right block with the right key
     def build_connector_meta(self, scheduler_output) -> KVConnectorMetadata:

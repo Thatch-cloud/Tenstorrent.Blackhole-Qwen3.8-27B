@@ -417,7 +417,8 @@ class RefusedTierTests(RigCase):
         from ttkvp2p.spec import RefusedManager
 
         rig = self.rig(with_scheduler=False)
-        saved = sys.modules.pop('ttkvp2p.manager')
+        saved = sys.modules['ttkvp2p.manager']
+        sys.modules['ttkvp2p.manager'] = None              # an import of it raises ImportError (the real module exists on disk since WP3a)
         self.addCleanup(lambda: sys.modules.__setitem__('ttkvp2p.manager', saved))
         from vllm.v1.core.sched.scheduler import Scheduler
         from vllm.v1.structured_output import StructuredOutputManager
