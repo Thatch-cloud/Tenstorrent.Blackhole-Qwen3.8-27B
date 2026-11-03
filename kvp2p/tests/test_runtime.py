@@ -1051,9 +1051,8 @@ class ControlDirectory(TierCase):
         results = [ack['result'] for ack in runtime.snapshot(self.clock.now)['control']['acks']]
         self.assertTrue(all(r.startswith('refused: test-only') for r in results), results)
         self.assertFalse(runtime.take_fault('eio'))
-        self.assertFalse(runtime.pop_selftest())
 
-    def test_fault_and_selftest_work_under_the_test_flag(self):
+    def test_fault_works_under_the_test_flag_and_selftest_is_acknowledged_as_unsupported(self):
         self.tier()
         runtime = self.open_runtime()
         self.tree.command(1, 'fault', 'eio 2')
@@ -1065,11 +1064,16 @@ class ControlDirectory(TierCase):
         self.assertTrue(runtime.take_fault('eio'))
         self.assertFalse(runtime.take_fault('eio'), 'two faults were armed')
         self.assertTrue(runtime.take_fault('throw'))
-        self.assertTrue(runtime.pop_selftest())
-        self.assertFalse(runtime.pop_selftest())
         acks = {ack['seq']: ack['result'] for ack in runtime.snapshot(self.clock.now)['control']['acks']}
         self.assertEqual(acks[1], 'ok')
         self.assertTrue(acks[3].startswith('refused'))
+        # WP13 M3: nothing implements the round-trip self-test, so the verb is acknowledged at once as unsupported. An 'ok' ack made a harness wait out its whole
+        # timeout for a verdict that never came (and report C4 inconclusive); 'unsupported' lets it report at once that the verb has no effect.
+        self.assertTrue(acks[4].startswith('unsupported'), acks[4])
+        self.assertFalse(hasattr(runtime, 'pop_selftest'), 'no dead hook that suggests a self-test exists')
+        self.assertFalse(hasattr(runtime, 'selftest_requests'))
+        self.assertEqual(runtime.counters['control_selftest'], 1, 'the verb is still counted as applied once')
+        self.assertEqual(runtime.snapshot(self.clock.now).get('selftest'), None, 'no selftest verdict is ever published in the state file')
 
     def test_delete_tenant_is_acknowledged_as_unsupported_in_v1a(self):
         self.tier()
