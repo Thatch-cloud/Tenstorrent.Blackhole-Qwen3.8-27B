@@ -565,6 +565,17 @@ class FrozenNowAndRaces(ManagerCase):
         self.end_pass()
         self.assertEqual(mgr.entries, 1, 'it is pinned: the expiry at the end of the pass cannot take it')
 
+    def test_a_store_after_the_end_of_a_pass_does_not_stale_the_next_passes_clock(self):
+        """vLLM runs on_schedule_end and THEN prepare_store inside build_connector_meta; the next pass's first lookup must read the clock afresh,
+        or an engine that sat idle judges the TTL against the time of its last store."""
+        mgr = self.build(ttl_s=100)
+        keys = self.put(2)
+        self.end_pass()
+        self.store([key_for(50)], req('x'))
+        self.clock.advance(1000)                           # the engine idles
+        self.assertIs(mgr.lookup(keys[0], req('a')), LookupResult.MISS)
+        self.assertEqual(mgr.miss_reasons['expired'], 1)
+
     def test_an_entry_that_answered_hit_is_still_there_for_prepare_load_after_the_ttl_ran_out(self):
         mgr = self.build(ttl_s=100)
         keys = self.put(2)

@@ -216,12 +216,14 @@ class NvmeKVManager(CPUOffloadingManager):
         self._slot_key = [None] * n
 
     def _freeze(self) -> float:
-        """The pass's "now": refreshed by the first manager call of a pass, held until ``on_schedule_end``."""
+        """The pass's "now" for the TTL: refreshed by the first lookup, touch or prepare_load of a pass (or by ``on_schedule_end``), held until
+        ``on_schedule_end`` ends the pass. Only those calls arm it: a ``prepare_store`` after ``on_schedule_end`` must not, or the next pass would
+        start from a stale time (after an idle engine, by the length of the idle)."""
         if not self._now_valid:
             self._now = self._clock()
             self._now_valid = True
-            if self.runtime.allocator.num_slots != self._tables_n:
-                self._sync_tables()
+        if self.runtime.allocator.num_slots != self._tables_n:
+            self._sync_tables()
         return self._now
 
     def _tag(self, ctx) -> Optional[ReqTag]:
@@ -369,7 +371,8 @@ class NvmeKVManager(CPUOffloadingManager):
     def prepare_store(self, keys: Collection[OffloadKey], req_context: ReqContext) -> Optional[PrepareStoreOutput]:
         """Allocate slots for the keys the tier does not hold yet, in the order asked (I6). Never returns None (that would be a warning and a
         retry on every step); a refusal is an EMPTY ``keys_to_store``, which the scheduler treats as a drop."""
-        self._freeze()
+        if self.runtime.allocator.num_slots != self._tables_n:
+            self._sync_tables()
         runtime = self.runtime
         if runtime.state != STATE_AVAILABLE:
             return self._drop_reason('unavailable')
@@ -425,7 +428,7 @@ class NvmeKVManager(CPUOffloadingManager):
             self._reserved_total -= used
         if extra:
             self._bytes.add(self._clock(), extra * obj)
-        now = self._now
+        now = self._clock()
         gens = [int(runtime.allocator.gen[s]) for s in slots]
         tenant = self._tenant_value(tag)
         for key, slot in zip(todo, slots):

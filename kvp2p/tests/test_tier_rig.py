@@ -76,6 +76,13 @@ class RoundTrip(RealTierCase):
             self.assertTrue(np.array_equal(rig.manager._digest[slot], np.asarray(result.digests[position], dtype=np.uint64)))
             break
 
+    def test_the_same_round_trip_under_async_scheduling_with_two_batches_in_flight(self):
+        rig, prompt = self.stored_rig(async_scheduling=True)
+        rig.add('r2', prompt)
+        rig.finish('r2')
+        self.assertEqual(rig.worker.stats['done_load'], 1)
+        self.assertEqual(self.assert_drive_exact(rig), OBJECTS)
+
     def test_two_sessions_share_nothing_and_both_restore(self):
         rig = self.rig()
         a, b = tokens(PROMPT, 'a'), tokens(PROMPT, 'b')
