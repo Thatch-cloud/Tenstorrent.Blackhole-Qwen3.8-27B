@@ -55,6 +55,164 @@ class Runs(unittest.TestCase):
         self.assertEqual((runs.starts, runs.lens), ([1, 3, 9], [1, 3, 2]))
 
 
+class MovesCounted(list):
+    """A list that counts the operations that move its tail (review M-frag: on a fragmented drive each such move is a megabyte of pointers)."""
+
+    moves = 0
+
+    def insert(self, index, value):
+        type(self).moves += 1
+        super().insert(index, value)
+
+    def __delitem__(self, index):
+        type(self).moves += 1
+        super().__delitem__(index)
+
+
+def counted_runs():
+    """A _Runs whose two lists count their tail moves (the lists the bulk operations REPLACE are counted by wrapping what they assign)."""
+    runs = _Runs()
+    runs.starts, runs.lens = MovesCounted(), MovesCounted()
+    return runs
+
+
+def fragmented(n_runs, gap=2, length=1):
+    runs = _Runs()
+    for i in range(n_runs):
+        runs.add(i * (length + gap), length)
+    return runs
+
+
+class RunsBulk(unittest.TestCase):
+    """The bulk calls the engine thread makes on a fragmented free list (review M-frag): same results as the one-at-a-time calls, a constant number
+    of list moves instead of one per run."""
+
+    def reference_add(self, base, slots):
+        expected = _Runs()
+        for start, length in zip(base.starts, base.lens):
+            expected.add(start, length)
+        for slot in sorted(slots):
+            expected.add(slot, 1)
+        return expected
+
+    def test_add_slots_in_bulk_equals_adding_the_runs_one_by_one(self):
+        rng = random.Random(11)
+        for trial in range(60):
+            universe = 400
+            held = sorted(rng.sample(range(universe), rng.randint(0, 150)))
+            incoming = rng.sample([s for s in range(universe) if s not in set(held)], rng.randint(0, 150))
+            base = _Runs()
+            base.add_slots(held)
+            expected = self.reference_add(base, incoming)
+            got = _Runs()
+            got.add_slots(held)
+            got.add_slots(incoming)
+            self.assertEqual((got.starts, got.lens, got.total), (expected.starts, expected.lens, expected.total), 'trial %d' % trial)
+            self.assertEqual(got.slots(), sorted(held + incoming))
+
+    def test_a_bulk_add_coalesces_with_both_neighbours_old_and_new(self):
+        runs = _Runs()
+        for start, length in ((0, 2), (10, 2), (20, 2), (30, 2)):
+            runs.add(start, length)
+        runs.add_slots([2, 3, 4, 5, 6, 7, 8, 9, 12, 13, 14, 15, 16, 17, 18, 19, 22, 40, 44, 48, 52, 56, 60, 64])      # (more than BULK_RUNS runs)
+        self.assertEqual(runs.starts[:3], [0, 30, 40])
+        self.assertEqual(runs.lens[:3], [23, 2, 1], 'slots 0..22 are one run: three new runs merged into the old ones on both sides')
+        self.assertEqual(sum(runs.lens), runs.total)
+
+    def test_releasing_thousands_of_scattered_slots_moves_the_list_a_constant_number_of_times(self):
+        MovesCounted.moves = 0
+        runs = counted_runs()
+        for i in range(0, 20000, 4):
+            runs.add(i, 1)                                    # 5,000 old runs
+        MovesCounted.moves = 0
+        runs.add_slots(list(range(2, 20000, 4)))              # 5,000 new scattered runs between them, touching neither neighbour
+        self.assertEqual(runs.total, 10000)
+        self.assertLessEqual(MovesCounted.moves, 4, 'one pass over the lists, not one insertion per run (%d moves)' % MovesCounted.moves)
+
+    def test_taking_a_fragmented_allocation_cuts_the_head_off_in_one_slice(self):
+        runs = fragmented(5000)
+        expected = fragmented(5000)
+        want = []
+        while len(want) < 2088:
+            start, length = expected.starts[0], expected.lens[0]
+            use = min(length, 2088 - len(want))
+            want.extend(range(start, start + use))
+            expected._shrink_front(0, use)
+        self.assertEqual(runs.take(2088), want)
+        self.assertEqual((runs.starts, runs.lens, runs.total), (expected.starts, expected.lens, expected.total))
+        moved = fragmented(5000)
+        moved.starts, moved.lens = MovesCounted(moved.starts), MovesCounted(moved.lens)
+        MovesCounted.moves = 0
+        moved.take(2088)
+        self.assertLessEqual(MovesCounted.moves, 2, 'the consumed head goes in one slice per list (%d moves)' % MovesCounted.moves)
+
+    def test_a_take_that_ends_inside_a_run_leaves_that_runs_tail(self):
+        runs = _Runs()
+        runs.add(0, 2)
+        runs.add(10, 3)
+        runs.add(30, 9)
+        self.assertEqual(runs.take(13), [0, 1, 10, 11, 12, 30, 31, 32, 33, 34, 35, 36, 37], 'no run holds 13: the first runs in order, the last one cut')
+        self.assertEqual((runs.starts, runs.lens, runs.total), ([38], [1], 1))
+        self.assertEqual(runs.take(1), [38])
+        self.assertEqual((runs.starts, runs.lens, runs.total), ([], [], 0))
+
+    def test_pop_front_runs_equals_repeated_pop_front(self):
+        rng = random.Random(3)
+        for trial in range(40):
+            one, many = _Runs(), _Runs()
+            for start in range(0, 500, 7):
+                length = rng.randint(1, 6)
+                one.add(start, length)
+                many.add(start, length)
+            max_runs, max_length = rng.randint(0, 40), rng.randint(1, 5)
+            want = []
+            for _ in range(max_runs):
+                run = one.pop_front(max_length)
+                if run is None:
+                    break
+                want.append(run)
+            self.assertEqual(many.pop_front_runs(max_runs, max_length), want, 'trial %d' % trial)
+            self.assertEqual((many.starts, many.lens, many.total), (one.starts, one.lens, one.total), 'trial %d' % trial)
+
+    def test_trims_done_equals_trim_done_run_by_run(self):
+        rng = random.Random(5)
+        for trial in range(20):
+            n = 3000
+            one, many = SlotAllocator(n), SlotAllocator(n)
+            runs = []
+            for allocator in (one, many):
+                runs = allocator.take_trim_runs(10 ** 6, rng.choice((7, 50, 3000)))
+            rng.shuffle(runs)
+            failed = set(rng.sample(range(len(runs)), min(2, len(runs))))
+            for position, (first, count) in enumerate(runs):
+                one.trim_done(first, count, position not in failed)
+            many.trims_done([run for position, run in enumerate(runs) if position not in failed])
+            for position in sorted(failed):
+                many.trim_done(*runs[position], False)
+            self.assertEqual(one.stats(), many.stats(), 'trial %d' % trial)
+            self.assertEqual((one._free.starts, one._free.lens), (many._free.starts, many._free.lens))
+            self.assertEqual(list(one.state), list(many.state))
+            self.assertEqual(many.recount()[:6], [many.count(i) for i in range(6)])
+
+    def test_a_service_pass_applies_thousands_of_scattered_trim_completions_with_one_merge(self):
+        """The engine's pump takes up to 4,096 runs at once and applies the completions of a pass in one go."""
+        allocator = free_allocator(60000)
+        slots = allocator.alloc(60000)
+        allocator.release_many(slots[::3])                    # 20,000 scattered one-slot runs wait for their TRIM
+        self.assertEqual(len(allocator._trim_wait.starts), 20000)
+        MovesCounted.moves = 0
+        allocator._trim_wait.starts, allocator._trim_wait.lens = MovesCounted(allocator._trim_wait.starts), MovesCounted(allocator._trim_wait.lens)
+        allocator._free.starts, allocator._free.lens = MovesCounted(allocator._free.starts), MovesCounted(allocator._free.lens)
+        runs = allocator.take_trim_runs(4096, 1000)
+        self.assertEqual(len(runs), 4096)
+        self.assertLessEqual(MovesCounted.moves, 2, 'the queue is cut once')
+        MovesCounted.moves = 0
+        allocator.trims_done(runs)
+        self.assertLessEqual(MovesCounted.moves, 4, 'the free list is merged once (%d moves)' % MovesCounted.moves)
+        self.assertEqual(allocator.n_free, 4096)
+        self.assertEqual(allocator.recount()[:6], [allocator.count(i) for i in range(6)])
+
+
 class AllocatorRules(unittest.TestCase):
     """Invariant I5: a slot is allocatable only when no entry names it, no bio is in flight on it, and its TRIM completed."""
 

@@ -55,6 +55,7 @@ TRIM_QUEUE_RUNS = 4096          # the most TRIM runs queued to the I/O thread at
 DEVICE_LOST_ERRNOS = (errno.ENODEV, errno.ENXIO, errno.ESHUTDOWN, errno.ENOMEDIUM)       # design 5.1: the errnos that mean the drive is gone
 RESTORE_SAMPLES = 1024
 FIT_SCAN_LIMIT = 256
+BULK_RUNS = 8                   # a release of more new runs than this merges them into the free lists in one pass (_Runs._merge_sorted)
 
 
 # --------------------------------------------------------------------------------------------------------------------
@@ -62,7 +63,11 @@ FIT_SCAN_LIMIT = 256
 # --------------------------------------------------------------------------------------------------------------------
 
 class _Runs:
-    """Disjoint runs (start, length) of slot numbers in two sorted parallel lists, coalescing on insert."""
+    """Disjoint runs (start, length) of slot numbers in two sorted parallel lists, coalescing on insert.
+
+    Every list operation here moves the tail of a list that holds one entry per run (160,000 runs on a fragmented 1 TB drive, a megabyte of pointers per
+    move), so the bulk calls the engine thread makes are written to move each list a constant number of times, not once per run: ``add_slots`` builds the
+    merged lists in one pass, ``take`` and ``pop_front_runs`` cut the consumed head off in one slice (review M-frag: 116 ms worst pass before)."""
 
     def __init__(self) -> None:
         self.starts: List[int] = []
@@ -101,8 +106,40 @@ class _Runs:
             return
         breaks = (np.nonzero(np.diff(array) != 1)[0] + 1).tolist()
         bounds = [0] + breaks + [int(array.size)]
-        for lo, hi in zip(bounds[:-1], bounds[1:]):
-            self.add(int(array[lo]), hi - lo)
+        firsts = array[np.asarray(bounds[:-1], dtype=np.int64)].tolist()
+        lengths = [hi - lo for lo, hi in zip(bounds[:-1], bounds[1:])]
+        if len(firsts) <= BULK_RUNS:
+            for first, length in zip(firsts, lengths):
+                self.add(first, length)
+            return
+        self._merge_sorted(firsts, lengths)
+
+    def _merge_sorted(self, firsts: List[int], lengths: List[int]) -> None:
+        """Insert sorted, disjoint new runs (none overlapping an old one) in ONE pass over the lists: O(new log old) lookups plus one copy of the old
+        lists, not one list insertion per new run. Runs that touch their neighbours (old or new) coalesce, as ``add`` does."""
+        old_starts, old_lens = self.starts, self.lens
+        out_starts: List[int] = []
+        out_lens: List[int] = []
+        taken = 0                                           # old runs already moved to the output
+        count_old = len(old_starts)
+        for first, length in zip(firsts, lengths):
+            at = bisect.bisect_left(old_starts, first, taken)
+            if at > taken:
+                out_starts.extend(old_starts[taken:at])
+                out_lens.extend(old_lens[taken:at])
+                taken = at
+            if out_starts and out_starts[-1] + out_lens[-1] == first:          # touches the run before it (old or new)
+                out_lens[-1] += length
+            else:
+                out_starts.append(first)
+                out_lens.append(length)
+            if taken < count_old and out_starts[-1] + out_lens[-1] == old_starts[taken]:       # touches the old run after it
+                out_lens[-1] += old_lens[taken]
+                taken += 1
+            self.total += length
+        out_starts.extend(old_starts[taken:])
+        out_lens.extend(old_lens[taken:])
+        self.starts, self.lens = out_starts, out_lens
 
     def take(self, count: int) -> Optional[List[int]]:
         """Remove and return ``count`` slots, preferring one contiguous run (first fit over a bounded scan), else the first runs in order."""
@@ -120,11 +157,21 @@ class _Runs:
             if scanned >= FIT_SCAN_LIMIT:
                 break
         slots: List[int] = []
-        while len(slots) < count:
-            start, length = self.starts[0], self.lens[0]
+        whole = 0                                           # runs consumed whole from the front
+        for start, length in zip(self.starts, self.lens):
             use = min(length, count - len(slots))
             slots.extend(range(start, start + use))
-            self._shrink_front(0, use)
+            if use < length:                                # the last run is cut: its head goes, its tail stays
+                self.starts[whole] = start + use
+                self.lens[whole] = length - use
+                break
+            whole += 1
+            if len(slots) == count:
+                break
+        if whole:
+            del self.starts[:whole]                         # the consumed head leaves in ONE slice, not one run at a time
+            del self.lens[:whole]
+        self.total -= count
         return slots
 
     def pop_front(self, max_length: int) -> Optional[Tuple[int, int]]:
@@ -134,6 +181,31 @@ class _Runs:
         use = min(self.lens[0], max_length)
         self._shrink_front(0, use)
         return start, use
+
+    def pop_front_runs(self, max_runs: int, max_length: int) -> List[Tuple[int, int]]:
+        """Up to ``max_runs`` runs from the front, each at most ``max_length`` long (a longer run is cut into pieces), removed in one slice."""
+        runs: List[Tuple[int, int]] = []
+        whole = 0
+        taken = 0
+        for start, length in zip(self.starts, self.lens):
+            while length > 0 and len(runs) < max_runs:
+                use = min(length, max_length)
+                runs.append((start, use))
+                start += use
+                length -= use
+                taken += use
+            if length > 0:                                  # stopped inside this run: its tail stays at the front
+                self.starts[whole] = start
+                self.lens[whole] = length
+                break
+            whole += 1
+            if len(runs) >= max_runs:
+                break
+        if whole:
+            del self.starts[:whole]
+            del self.lens[:whole]
+        self.total -= taken
+        return runs
 
     def _shrink_front(self, index: int, count: int) -> None:
         if self.lens[index] == count:
@@ -322,16 +394,11 @@ class SlotAllocator:
     # --- the TRIM queue
     def take_trim_runs(self, max_runs: int, max_slots: int) -> List[Tuple[int, int]]:
         """Up to ``max_runs`` runs of slots (first, count) waiting for TRIM, each at most ``max_slots`` long; they move to TRIMMING."""
-        runs: List[Tuple[int, int]] = []
-        for _ in range(max_runs):
-            run = self._trim_wait.pop_front(max_slots)
-            if run is None:
-                break
-            first, count = run
+        runs = self._trim_wait.pop_front_runs(max_runs, max_slots)
+        for first, count in runs:
             self.state[first:first + count] = S_TRIMMING
             self._counts[S_TRIM_WAIT] -= count
             self._counts[S_TRIMMING] += count
-            runs.append(run)
         return runs
 
     def trim_done(self, first: int, count: int, ok: bool) -> None:
@@ -351,6 +418,26 @@ class SlotAllocator:
             self.state[mine] = S_QUARANTINED
             self.trim_failed += int(mine.size)
             counts[S_QUARANTINED] += int(mine.size)
+
+    def trims_done(self, runs: List[Tuple[int, int]]) -> None:
+        """Many SUCCESSFUL TRIM runs at once (a service pass applies up to ``TRIM_QUEUE_RUNS`` of them): the same effect as ``trim_done(first, count,
+        True)`` for each, with the free list merged ONCE (review M-frag: on a fragmented drive one list insertion per run took 160 ms a pass)."""
+        if not runs:
+            return
+        if len(runs) == 1:
+            self.trim_done(runs[0][0], runs[0][1], True)
+            return
+        firsts = np.asarray([first for first, _count in runs], dtype=np.int64)
+        counts = np.asarray([count for _first, count in runs], dtype=np.int64)
+        ends = np.cumsum(counts)
+        slots = np.repeat(firsts - (ends - counts), counts) + np.arange(int(ends[-1]), dtype=np.int64)       # every slot of every run, run by run
+        slots = slots[self.state[slots] == S_TRIMMING]
+        if slots.size == 0:
+            return
+        self.state[slots] = S_FREE
+        self._free.add_slots(slots)
+        self._counts[S_TRIMMING] -= int(slots.size)
+        self._counts[S_FREE] += int(slots.size)
 
     def quarantine(self, slot: int) -> None:
         """Take a slot out of circulation for good (a USED or DRAINING one; the others are already on their way through TRIM)."""
@@ -742,6 +829,13 @@ class KVP2PRuntime:
             self._warm_done = True
 
     def _apply_done(self) -> None:
+        finished: List[Tuple[int, int]] = []              # the TRIM runs that succeeded: their slots become FREE in one merge
+        try:
+            self._apply_completions(finished)
+        finally:
+            self.allocator.trims_done(finished)
+
+    def _apply_completions(self, finished: List[Tuple[int, int]]) -> None:
         while True:
             try:
                 token, error = self._done.get_nowait()
@@ -763,17 +857,19 @@ class KVP2PRuntime:
                 else:
                     self.counters['trim_runs'] += 1
                     self.counters['trim_slots'] += count
-                self.allocator.trim_done(first, count, ok)
+                if ok:
+                    finished.append((first, count))
+                else:
+                    self.allocator.trim_done(first, count, False)
 
     def _pump_trims(self) -> None:
         if self.store is None or self.closed or self.state == STATE_CLOSING:
             return
         per_run = max(1, store_module.DISCARD_RUN_BYTES // self.store.object_bytes)
-        while self._trims_out < TRIM_QUEUE_RUNS:
-            runs = self.allocator.take_trim_runs(1, per_run)
-            if not runs:
-                return
-            first, count = runs[0]
+        room = TRIM_QUEUE_RUNS - self._trims_out
+        if room <= 0:
+            return
+        for first, count in self.allocator.take_trim_runs(room, per_run):          # (one slice off the queue, not one pop per run)
             drive, offset, length = self.store.drive, self.store.slot_offset(first), count * self.store.object_bytes
             self._trims_out += 1
             self._io.submit(('trim', first, count), lambda drive=drive, offset=offset, length=length: drive.discard(offset, length))
