@@ -10,6 +10,7 @@ import struct
 import subprocess
 import sys
 import unittest
+from unittest import mock
 from contextlib import redirect_stderr
 
 import tier_kit
@@ -402,9 +403,36 @@ class ClaimTool(TierCase):
         argv = ['--device', self.tree.by_id_path, '--confirm', 'wrong', '--status', os.path.join(self.tree.status_dir, 'status.json'),
                 '--allow-regular', '--layout', self.tree.layout_id]
         err = io.StringIO()
-        with redirect_stderr(err):
+        with mock.patch.dict(os.environ, {health.TEST_ENV: '1'}), redirect_stderr(err):
             self.assertEqual(claim.main(argv), 2)
-        self.assertIn('REFUSED', err.getvalue())
+        self.assertIn('typed back', err.getvalue())
+
+    def test_allow_regular_needs_the_test_flag(self):
+        """Minor 9 of the WP3a review: the flag skips the by-id gate, so it is itself gated on the test name that gates every test-only path."""
+        before = open(self.tree.drive, 'rb').read()
+        with self.assertRaises(claim.Refused) as raised:
+            self.claim(env=health.HostEnv(environ={}, wall=self.clock))
+        self.assertIn(health.TEST_ENV, str(raised.exception))
+        with self.assertRaises(claim.Refused):
+            self.claim(env=health.HostEnv(environ={health.TEST_ENV: '0'}, wall=self.clock))
+        self.assertEqual(open(self.tree.drive, 'rb').read(), before)
+        argv = ['--device', self.tree.by_id_path, '--confirm', BY_ID, '--status', os.path.join(self.tree.status_dir, 'status.json'),
+                '--allow-regular', '--layout', self.tree.layout_id]
+        err = io.StringIO()
+        with mock.patch.dict(os.environ, {}, clear=False), redirect_stderr(err):
+            os.environ.pop(health.TEST_ENV, None)
+            self.assertEqual(claim.main(argv), 2)
+        self.assertIn(health.TEST_ENV, err.getvalue())
+        self.assertEqual(open(self.tree.drive, 'rb').read(), before)
+
+    def test_allow_regular_takes_a_regular_file_only(self):
+        """Even with the test flag, the flag never opens a device node: a block device is claimed by its by-id path, without it."""
+        link = os.path.join(self.root, 'a-device-node')
+        os.symlink('/dev/null', link)
+        with self.assertRaises(claim.Refused) as raised:
+            claim.claim(link, 'a-device-node', status_path=os.path.join(self.tree.status_dir, 'status.json'), allow_regular=True,
+                        object_bytes=OBJ, env=health.HostEnv(environ={health.TEST_ENV: '1'}, wall=self.clock))
+        self.assertIn('regular file', str(raised.exception))
 
     def test_the_tool_is_importable_without_vllm(self):
         code = ('import sys; sys.modules["vllm"] = None; sys.modules["torch"] = None; import ttkvp2p.claim, ttkvp2p.store, ttkvp2p.health; print("ok")')

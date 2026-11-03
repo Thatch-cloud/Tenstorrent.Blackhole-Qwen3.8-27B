@@ -47,15 +47,12 @@ def key_for(n: int, group: int = 0) -> bytes:
 
 
 def req(req_id: str, *, tenant: Optional[bytes] = None, has_mm: bool = False, prompt_tokens: Optional[int] = None,
-        no_retry: bool = False, tag: bool = True) -> ReqContext:
-    """A request context carrying the connector scheduler's ``ReqTag`` (``num_prompt_tokens`` is the attribute the manager reads for the
-    whole-boundary admission size; the WP3a report asks WP4 to set it)."""
+        no_retry: bool = False, tag: bool = True, hit_tokens: int = 0) -> ReqContext:
+    """A request context carrying the connector scheduler's ``ReqTag`` (``num_prompt_tokens`` is what the manager sizes the whole boundary
+    from; the connector sets it from the request)."""
     ctx = ReqContext(req_id=req_id)
     if tag:
-        reqtag = ReqTag(tenant=tenant, has_mm=has_mm, admitted=None, no_retry=no_retry)
-        if prompt_tokens is not None:
-            reqtag.num_prompt_tokens = prompt_tokens
-        ctx.set_state(reqtag)
+        ctx.set_state(ReqTag(tenant=tenant, has_mm=has_mm, admitted=None, no_retry=no_retry, num_prompt_tokens=prompt_tokens, hit_tokens=hit_tokens))
     return ctx
 
 
@@ -117,7 +114,7 @@ class Tree:
 
     def claim(self, clock: Clock, *, confirm: Optional[str] = None, **kwargs) -> Dict[str, Any]:
         args = dict(status_path=os.path.join(self.status_dir, 'status.json'), layout_id=self.layout_id, allow_regular=True,
-                    object_bytes=self.object_bytes, env=health.HostEnv(wall=clock))
+                    object_bytes=self.object_bytes, env=health.HostEnv(environ={health.TEST_ENV: '1'}, wall=clock))
         args.update(kwargs)
         return claim.claim(self.by_id_path, self.by_id if confirm is None else confirm, **args)
 

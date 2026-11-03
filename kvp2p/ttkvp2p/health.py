@@ -14,6 +14,7 @@ import logging
 import mmap
 import os
 import re
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
@@ -26,7 +27,8 @@ logger = logging.getLogger(__name__)
 
 REFUSED_CODES = ('schema_invalid', 'gate_only_key', 'retention_ack_missing', 'zero_retention', 'ttl_over_floor', 'sed_not_required')
 UNAVAILABLE_CODES = ('at_rest_unverified', 'status_stale', 'device_absent', 'device_dead', 'link_below_floor', 'claim_busy',
-                     'superblock_unknown', 'layout_mismatch', 'capacity_short', 'p2pmem_unavailable', 'canary_failed')
+                     'superblock_unknown', 'layout_mismatch', 'capacity_short', 'p2pmem_unavailable', 'canary_failed',
+                     'host_check_error')        # the last one is an addition to the v1 table (an exception inside the host checks): KV-TIER-STANDARD 5.1 needs it
 LATCH_CODES = ('strikes', 'device_lost', 'aer_uncorrectable', 'stall', 'op_throw', 'bounds_violation', 'control_off', 'write_cap')
 
 TTL_FLOOR_S = 86400                    # the owner's 10-21 rule: KV lives at most a day since its last use
@@ -36,7 +38,7 @@ LINK_FLOOR_GTS = 16.0                  # Gen4 on this rig
 SPAWN_ID_ENV = 'THATCH_KVTIER_SPAWN_ID'
 TEST_ENV = 'THATCH_KVP2P_TEST'
 ZERO_RETENTION_ENV = ('THATCH_ATTESTATION_PRIVATE_KEY', 'THATCH_ZERO_RETENTION', 'THATCH_NO_LOG')
-ZERO_RETENTION_MARKER_NAME = 'zero-retention'     # a file next to the control directory; its existence is a signal
+ZERO_RETENTION_MARKER_NAME = 'zero-retention'     # a file next to the control directory, or the one named by cfg.zero_retention_marker; its existence is a signal
 STATE_SCHEMA = 1
 
 
@@ -125,9 +127,16 @@ def zero_retention_signals(cfg: Any, env: HostEnv) -> List[str]:
         reasons.append('THATCH_ZERO_RETENTION is set (the node advertises zero retention)')
     if str(environ.get('THATCH_NO_LOG', '')).strip() == '1':
         reasons.append('THATCH_NO_LOG is set (the container runs under the zero-retention log control)')
+    # The marker files: one beside the control directory (this tier's own tree) and the node-level one the node operator names in
+    # ``zero_retention_marker`` (node.env; a node-wide path is the operator's to agree, so no default is invented here).
+    markers: List[str] = []
     control_dir = getattr(cfg, 'control_dir', '') or ''
     if control_dir:
-        marker = os.path.join(os.path.dirname(control_dir.rstrip('/')), ZERO_RETENTION_MARKER_NAME)
+        markers.append(os.path.join(os.path.dirname(control_dir.rstrip('/')), ZERO_RETENTION_MARKER_NAME))
+    node_marker = getattr(cfg, 'zero_retention_marker', '') or ''
+    if node_marker:
+        markers.append(node_marker)
+    for marker in markers:
         try:
             if os.path.exists(marker):
                 reasons.append('%s exists (a zero-retention marker on the node)' % ZERO_RETENTION_MARKER_NAME)
@@ -386,7 +395,7 @@ def write_json_atomic(path: str, payload: Dict[str, Any], mode: int = 0o644) -> 
     """Write ``payload`` to ``path`` without ever exposing a partial file. Creates missing parent directories."""
     directory = os.path.dirname(path) or '.'
     os.makedirs(directory, exist_ok=True)
-    temp = '%s.tmp.%d' % (path, os.getpid())
+    temp = '%s.tmp.%d.%d' % (path, os.getpid(), threading.get_ident())      # a latch can write from an I/O thread while the engine thread writes
     data = json.dumps(payload, sort_keys=True, separators=(',', ':')).encode('utf-8')
     fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
     try:

@@ -24,6 +24,7 @@ This module does not import vLLM, ttnn or the extension (stdlib and numpy only).
 
 import bisect
 import collections
+import errno
 import logging
 import queue
 import threading
@@ -50,7 +51,8 @@ SLOT_STATE_NAMES = ('free', 'used', 'trim_wait', 'trimming', 'draining', 'quaran
 CONTROL_POLL_S = 1.0
 STATE_WRITE_S = 10.0
 STATUS_POLL_S = 5.0
-TRIMS_IN_FLIGHT = 2
+TRIM_QUEUE_RUNS = 4096          # the most TRIM runs queued to the I/O thread at once (one discard runs at a time; the rest wait in its queue)
+DEVICE_LOST_ERRNOS = (errno.ENODEV, errno.ENXIO, errno.ESHUTDOWN, errno.ENOMEDIUM)       # design 5.1: the errnos that mean the drive is gone
 RESTORE_SAMPLES = 1024
 FIT_SCAN_LIMIT = 256
 
@@ -158,7 +160,13 @@ class _Runs:
 # --------------------------------------------------------------------------------------------------------------------
 
 class SlotAllocator:
-    """Free list, generations, in-flight counts, quarantine and the TRIM queue of the drive's slots. Engine thread only."""
+    """Free list, generations, in-flight counts, quarantine and the TRIM queue of the drive's slots. Engine thread only.
+
+    Every operation costs O(slots touched), never O(slots on the drive): the per-state counts and the in-flight total are updated
+    incrementally by each transition (a 1 TB drive has about 360,000 slots, and a recount per release stalled the engine thread for
+    seconds). ``recount`` is the one O(slots) pass; it runs at ``reset``, at ``invalidate_all`` (the wipe verb) and in tests that check the
+    incremental counts against it.
+    """
 
     def __init__(self, num_slots: int = 0):
         self.num_slots = 0
@@ -168,6 +176,7 @@ class SlotAllocator:
         self._free = _Runs()
         self._trim_wait = _Runs()
         self._counts = [0] * len(SLOT_STATE_NAMES)
+        self._inflight_total = 0
         self.trim_failed = 0
         if num_slots:
             self.reset(num_slots)
@@ -179,6 +188,7 @@ class SlotAllocator:
         self.state = np.full(self.num_slots, S_TRIM_WAIT if all_need_trim else S_FREE, dtype=np.uint8)
         self.gen = np.zeros(self.num_slots, dtype=np.uint32)
         self.inflight = np.zeros(self.num_slots, dtype=np.int32)
+        self._inflight_total = 0
         self._free.clear()
         self._trim_wait.clear()
         (self._trim_wait if all_need_trim else self._free).add(0, self.num_slots)
@@ -186,6 +196,14 @@ class SlotAllocator:
 
     def _recount(self) -> None:
         self._counts = np.bincount(self.state, minlength=len(SLOT_STATE_NAMES)).tolist() if self.num_slots else [0] * len(SLOT_STATE_NAMES)
+
+    def recount(self) -> List[int]:
+        """The counts and the in-flight total recomputed from the arrays (O(slots)): for tests and the wipe verb, never for a per-call path.
+        Returns the counts the incremental bookkeeping held before, so a caller can compare."""
+        before = list(self._counts) + [self._inflight_total]
+        self._recount()
+        self._inflight_total = int(self.inflight.sum()) if self.num_slots else 0
+        return before
 
     # --- views
     @property
@@ -200,7 +218,7 @@ class SlotAllocator:
         return self._counts[state]
 
     def total_inflight(self) -> int:
-        return int(self.inflight.sum()) if self.num_slots else 0
+        return self._inflight_total
 
     def generation(self, slot: int) -> int:
         return int(self.gen[slot])
@@ -214,7 +232,7 @@ class SlotAllocator:
     def stats(self) -> Dict[str, int]:
         out = {name: self._counts[i] for i, name in enumerate(SLOT_STATE_NAMES)}
         out['slots'] = self.num_slots
-        out['inflight'] = self.total_inflight()
+        out['inflight'] = self._inflight_total
         out['trim_failed'] = self.trim_failed
         return out
 
@@ -238,7 +256,8 @@ class SlotAllocator:
         self.release_many([slot])
 
     def release_many(self, slots) -> None:
-        """The index stopped naming these slots. A slot with a bio in flight drains first (I5); the others wait for their TRIM."""
+        """The index stopped naming these slots. A slot with a bio in flight drains first (I5); the others wait for their TRIM.
+        Callers release in batches: one call costs O(len(slots) log len(slots)), whatever the size of the drive."""
         if not len(slots):
             return
         index = np.unique(np.asarray(slots, dtype=np.int64))
@@ -246,11 +265,18 @@ class SlotAllocator:
         if index.size == 0:
             return
         busy = self.inflight[index] > 0
-        self.state[index[busy]] = S_DRAINING
-        quiet = index[~busy]
-        self.state[quiet] = S_TRIM_WAIT
-        self._trim_wait.add_slots(quiet)
-        self._recount()
+        n_busy = int(np.count_nonzero(busy))
+        n_quiet = int(index.size) - n_busy
+        if n_busy:
+            self.state[index[busy]] = S_DRAINING
+        if n_quiet:
+            quiet = index[~busy] if n_busy else index
+            self.state[quiet] = S_TRIM_WAIT
+            self._trim_wait.add_slots(quiet)
+        counts = self._counts
+        counts[S_USED] -= int(index.size)
+        counts[S_DRAINING] += n_busy
+        counts[S_TRIM_WAIT] += n_quiet
 
     def invalidate_all(self) -> None:
         """Every slot goes back through TRIM (the ``wipe`` control verb): USED and FREE slots to TRIM_WAIT (a USED one with a bio in
@@ -273,6 +299,7 @@ class SlotAllocator:
                 return False
         for slot in slots:
             self.inflight[slot] += 1
+        self._inflight_total += len(slots)
         return True
 
     def io_end(self, slots) -> None:
@@ -283,12 +310,14 @@ class SlotAllocator:
                 logger.error('ttkvp2p: io_end on slot %d with no bio in flight', slot)
                 continue
             self.inflight[slot] -= 1
+            self._inflight_total -= 1
             if self.inflight[slot] == 0 and int(self.state[slot]) == S_DRAINING:
                 self.state[slot] = S_TRIM_WAIT
                 released.append(slot)
         if released:
             self._trim_wait.add_slots(released)
-            self._recount()
+            self._counts[S_DRAINING] -= len(released)
+            self._counts[S_TRIM_WAIT] += len(released)
 
     # --- the TRIM queue
     def take_trim_runs(self, max_runs: int, max_slots: int) -> List[Tuple[int, int]]:
@@ -312,93 +341,37 @@ class SlotAllocator:
         mine = np.nonzero(window == S_TRIMMING)[0] + first
         if mine.size == 0:
             return
+        counts = self._counts
+        counts[S_TRIMMING] -= int(mine.size)
         if ok:
             self.state[mine] = S_FREE
             self._free.add_slots(mine)
+            counts[S_FREE] += int(mine.size)
         else:
             self.state[mine] = S_QUARANTINED
             self.trim_failed += int(mine.size)
-        self._recount()
+            counts[S_QUARANTINED] += int(mine.size)
 
     def quarantine(self, slot: int) -> None:
         """Take a slot out of circulation for good (a USED or DRAINING one; the others are already on their way through TRIM)."""
-        if int(self.state[slot]) in (S_USED, S_DRAINING):
+        previous = int(self.state[slot])
+        if previous in (S_USED, S_DRAINING):
             self.state[slot] = S_QUARANTINED
-            self._recount()
+            self._counts[previous] -= 1
+            self._counts[S_QUARANTINED] += 1
 
     def trim_backlog(self) -> int:
         return self._counts[S_TRIM_WAIT] + self._counts[S_TRIMMING]
 
 
 # --------------------------------------------------------------------------------------------------------------------
-# Store results: what the worker leaves for the manager
+# Store results: what the worker leaves for the connector's scheduler role
 # --------------------------------------------------------------------------------------------------------------------
-
-class StoreResultsMap(dict):
-    """``job_id -> StoreResult`` (worker.StoreResult: ``success``, ``slot_ids``, ``generations``, ``digests`` [n, 4], ``reason``), with an
-    index from (slot, generation) to (job id, position). The manager pairs an entry with its digest through the index, in O(1) per
-    key: no scan over the results (a 262k session is about 2,000 keys against up to 1,024 kept results). A result the worker pruned is
-    gone for good, and the manager treats a missing result as a failed store."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self._by_slot: Dict[Tuple[int, int], Tuple[int, int]] = {}
-
-    def __setitem__(self, job_id, result) -> None:
-        if job_id in self:
-            self._unindex(job_id)
-        super().__setitem__(job_id, result)
-        slots = getattr(result, 'slot_ids', ()) or ()
-        generations = getattr(result, 'generations', ()) or ()
-        for position, (slot, generation) in enumerate(zip(slots, generations)):
-            self._by_slot[(int(slot), int(generation))] = (job_id, position)
-
-    def _unindex(self, job_id) -> None:
-        result = dict.get(self, job_id)
-        if result is None:
-            return
-        slots = getattr(result, 'slot_ids', ()) or ()
-        generations = getattr(result, 'generations', ()) or ()
-        for slot, generation in zip(slots, generations):
-            key = (int(slot), int(generation))
-            owner = self._by_slot.get(key)
-            if owner is not None and owner[0] == job_id:
-                del self._by_slot[key]
-
-    def __delitem__(self, job_id) -> None:
-        self._unindex(job_id)
-        super().__delitem__(job_id)
-
-    def pop(self, job_id, *default):
-        if job_id in self:
-            self._unindex(job_id)
-        return super().pop(job_id, *default)
-
-    def clear(self) -> None:
-        super().clear()
-        self._by_slot.clear()
-
-    def popitem(self):
-        job_id, result = super().popitem()
-        self._by_slot = {k: v for k, v in self._by_slot.items() if v[0] != job_id}
-        return job_id, result
-
-    def setdefault(self, job_id, default=None):
-        if job_id not in self:
-            self[job_id] = default
-        return self[job_id]
-
-    def update(self, *args, **kwargs) -> None:
-        for job_id, result in dict(*args, **kwargs).items():
-            self[job_id] = result
-
-    def lookup(self, slot: int, generation: int):
-        """(result, position) of the store job that wrote (slot, generation), or None."""
-        owner = self._by_slot.get((int(slot), int(generation)))
-        if owner is None:
-            return None
-        result = dict.get(self, owner[0])
-        return None if result is None else (result, owner[1])
+#
+# ``KVP2PRuntime.store_results`` is a plain ``dict`` of ``job_id -> StoreResult`` (worker.StoreResult). The worker writes one per
+# terminal store job and prunes the oldest beyond its limit; the connector's scheduler role CONSUMES it by job id (amendment A1 of
+# INTERFACE.md) and hands the manager ``complete_store(keys, ctx, success, digests)``, the digests by key position. The manager never reads
+# this dict and never pairs a digest by slot or generation: a missing, pruned or inconsistent result reaches it as ``success=False``.
 
 
 # --------------------------------------------------------------------------------------------------------------------
@@ -412,6 +385,7 @@ class _IoThread:
         self._sync = sync
         self._thread: Optional[threading.Thread] = None
         self._closed = False
+        self._cancelled = False
 
     def submit(self, token: Any, fn: Callable[[], Any]) -> None:
         if self._sync:
@@ -434,7 +408,14 @@ class _IoThread:
             item = self._jobs.get()
             if item is None:
                 return
+            if self._cancelled:
+                continue                                  # shutting down: the queued discards are dropped unread (the one running finished)
             self._run(*item)
+
+    def cancel(self) -> None:
+        """Drop everything still queued (the open-time discard is queued whole, about a thousand runs on a 1 TB drive, and shutdown must not
+        wait for it). The run in progress finishes: a BLKDISCARD cannot be interrupted."""
+        self._cancelled = True
 
     def close(self, timeout: float) -> bool:
         """Stop after the queued work; True when the thread is gone within ``timeout`` seconds."""
@@ -501,14 +482,15 @@ class KVP2PRuntime:
         self.env = env
         self.roles: List[str] = []
         self.state = STATE_UNAVAILABLE
-        self.latch_reason: Optional[str] = None
+        self.latch_reason: Optional[str] = None           # the FIRST active latch's reason and code (the others are in ``latches``)
         self.latch_code: Optional[str] = None
+        self.latches: Dict[str, str] = {}                 # every active latch: closed code -> reason, in the order they tripped
         self.latched_total: Dict[str, int] = collections.Counter()
         self.host_ok = False
         self.host_code: Optional[str] = None
         self.host_reason = 'the worker role has not opened the runtime yet'
         self.allocator = SlotAllocator()
-        self.store_results = StoreResultsMap()
+        self.store_results: Dict[int, Any] = {}          # job id -> worker.StoreResult; consumed by the connector, never read by the manager
         self.bad: Set[Tuple[int, int]] = set()
         self.counters: 'collections.Counter[str]' = collections.Counter()
         self.faults: 'collections.Counter[str]' = collections.Counter()
@@ -525,9 +507,12 @@ class KVP2PRuntime:
         self._device_ready = False
         self._pre_latch_state = STATE_UNAVAILABLE
         self._manager = None
+        self._write_lock = threading.Lock()
         self._done: 'queue.SimpleQueue' = queue.SimpleQueue()
         self._io = _IoThread(self._done, env.sync_io)
         self._trims_out = 0
+        self.discard_queued_at_open = 0                   # slots whose open-time discard was queued at open
+        self._warm_done = False                           # the open-time discard of the data region has completed
         self._edge_seq = -1
         self._level_seq_acked = -1
         self._acks: Deque[Dict[str, Any]] = collections.deque(maxlen=16)
@@ -549,6 +534,11 @@ class KVP2PRuntime:
             self.host_ok = True
             self.host_code = None
             self.host_reason = ''
+            # The whole data region goes to the I/O thread NOW, not two runs per engine pass: a slot is allocatable as its run completes, and
+            # the engine thread applies the completions at its next pass. (A request that arrives while it runs is refused for the reason
+            # `warming`, never stored half.)
+            self.discard_queued_at_open = self.allocator.trim_backlog()
+            self._pump_trims()
             logger.info('ttkvp2p: host checks passed; %d slots of %d bytes, data region discard queued', self.allocator.num_slots,
                         self.store.object_bytes if self.store else 0)
         except HostRefusal as refusal:
@@ -557,7 +547,7 @@ class KVP2PRuntime:
             self._refuse(error.code, str(error))
         except Exception as error:           # the tier must never stop the engine: it stays off with the cause on record
             logger.exception('ttkvp2p: the host checks failed unexpectedly')
-            self._refuse('superblock_unknown', 'host checks failed unexpectedly: %s: %s' % (type(error).__name__, error))
+            self._refuse('host_check_error', 'host checks failed unexpectedly: %s: %s' % (type(error).__name__, error))
         self.write_state(self.env.wall(), force=True)
 
     def _refuse(self, code: str, detail: str) -> None:
@@ -614,31 +604,62 @@ class KVP2PRuntime:
         except HostRefusal:
             return None
 
+    @property
+    def warming(self) -> bool:
+        """True from the host checks until the open-time discard of the data region has completed and been applied. Slots become allocatable
+        run by run meanwhile; a request whose boundary does not fit yet is refused with the reason `warming`."""
+        return self.host_ok and not self._warm_done
+
     # --- the frozen interface
     @property
     def drive_path(self) -> str:
         return self.cfg.nvme_device
 
     def latch(self, reason: str, code: Optional[str] = None) -> None:
-        """Turn the tier off until the engine restarts (or a control ``on`` clears a control ``off``). Idempotent: the first reason is kept."""
+        """Turn the tier off until the engine restarts (or a control ``on`` clears a control ``off``). Idempotent per code: the first reason
+        of a code is kept, and every code that trips is remembered, so clearing one (``on`` after ``off``) never hides another."""
         self._set_latched(reason, code or health.latch_code(reason))
 
     def _set_latched(self, reason: str, code: str) -> None:
-        if self.state == STATE_CLOSING:
+        if self.state == STATE_CLOSING or code in self.latches:
             return
-        if self.state != STATE_LATCHED:
-            self._pre_latch_state = self.state
+        first = not self.latches
+        self.latches[code] = reason
+        self.latched_total[code] += 1
+        if first:
+            if self.state != STATE_LATCHED:
+                self._pre_latch_state = self.state
             self.state = STATE_LATCHED
             self.latch_reason = reason
             self.latch_code = code
-            self.latched_total[code] += 1
-            logger.error('ttkvp2p: LATCHED (%s): %s', code, reason)
+        logger.error('ttkvp2p: LATCHED (%s): %s', code, reason)
+        self._state_changed()
+
+    def _clear_latch(self, code: str) -> bool:
+        """Drop one latch. True when none is left (the tier leaves LATCHED); False when another is still active (it stays LATCHED, now
+        reporting the oldest remaining one)."""
+        if code not in self.latches:
+            return not self.latches
+        del self.latches[code]
+        if self.latches:
+            self.latch_code = next(iter(self.latches))
+            self.latch_reason = self.latches[self.latch_code]
+            return False
+        self.state = self._pre_latch_state if self._device_ready else STATE_UNAVAILABLE
+        self.latch_reason = self.latch_code = None
+        return True
+
+    def _state_changed(self) -> None:
+        """Every state change is written at once (the state file is also rewritten every 10 s from the engine's pass): a post-check that
+        waits for AVAILABLE, and the latch alert, must not wait for the next schedule() pass, which an idle engine never runs."""
+        self.write_state(self.env.wall(), force=True)
 
     def set_available(self) -> None:
         """The worker's last start-up step. Only a runtime whose host checks passed goes AVAILABLE; a latched one stays latched."""
         if self.state == STATE_UNAVAILABLE and self.host_ok:
             self.state = STATE_AVAILABLE
             self._device_ready = True
+            self._state_changed()
         elif self.state == STATE_LATCHED and self.host_ok:
             self._device_ready = True
             self._pre_latch_state = STATE_AVAILABLE
@@ -716,6 +737,11 @@ class KVP2PRuntime:
             logger.exception('ttkvp2p: the runtime service pass failed')
 
     def _drain_done(self) -> None:
+        self._apply_done()
+        if not self._warm_done and self.host_ok and self._trims_out == 0 and self.allocator.trim_backlog() == 0:
+            self._warm_done = True
+
+    def _apply_done(self) -> None:
         while True:
             try:
                 token, error = self._done.get_nowait()
@@ -730,7 +756,7 @@ class KVP2PRuntime:
                     self.counters['trim_failed'] += count
                     logger.error('ttkvp2p: TRIM of slots %d..%d failed: %s: %s; the slots are quarantined', first, first + count - 1,
                                  type(error).__name__, error)
-                    if getattr(error, 'errno', None) in (19, 6):        # ENODEV, ENXIO: the drive is gone
+                    if getattr(error, 'errno', None) in DEVICE_LOST_ERRNOS:        # the drive is gone (design 5.1)
                         self.latch('device lost: TRIM failed with %s' % (error,), 'device_lost')
                     elif self.allocator.trim_failed >= max(3, getattr(self.cfg, 'strikes_to_latch', 3)):
                         self.latch('%d slots failed their TRIM' % self.allocator.trim_failed, 'strikes')
@@ -743,7 +769,7 @@ class KVP2PRuntime:
         if self.store is None or self.closed or self.state == STATE_CLOSING:
             return
         per_run = max(1, store_module.DISCARD_RUN_BYTES // self.store.object_bytes)
-        while self._trims_out < TRIMS_IN_FLIGHT:
+        while self._trims_out < TRIM_QUEUE_RUNS:
             runs = self.allocator.take_trim_runs(1, per_run)
             if not runs:
                 return
@@ -771,13 +797,21 @@ class KVP2PRuntime:
         self._next_control = now + CONTROL_POLL_S
         commands = health.list_control(self.cfg.control_dir)
         off = health.switch_is_off(commands)
-        if off and self.state != STATE_LATCHED and self.state != STATE_CLOSING:
+        if off and 'control_off' not in self.latches and self.state != STATE_CLOSING:
             self._set_latched('control off', 'control_off')
             self._ack_level(commands, 'off', 'latched')
-        elif not off and self.state == STATE_LATCHED and self.latch_code == 'control_off':
-            self.state = self._pre_latch_state if self._device_ready else STATE_UNAVAILABLE
-            self.latch_reason = self.latch_code = None
-            self._ack_level(commands, 'on', 'cleared' if self._device_ready else 'cleared (the engine must restart to start the tier)')
+        elif not off and 'control_off' in self.latches:
+            # `on` clears the `off` latch and nothing else: a latch that tripped while `off` was in force (an op throw, a bounds
+            # violation, strikes) is still active, and the tier stays LATCHED for it.
+            cleared = self._clear_latch('control_off')
+            if not cleared:
+                result = 'cleared (the tier stays latched for: %s)' % ', '.join(self.latches)
+            elif not self._device_ready:
+                result = 'cleared (the engine must restart to start the tier)'
+            else:
+                result = 'cleared'
+            self._ack_level(commands, 'on', result)
+            self._state_changed()
         for command in commands:
             if command.verb in health.EDGE_VERBS and command.seq > self._edge_seq:
                 self._edge_seq = command.seq
@@ -813,7 +847,11 @@ class KVP2PRuntime:
         """Control ``wipe``: invalidate the index, bump the epoch, and send every slot back through TRIM (the whole data region)."""
         manager = self._manager
         if manager is not None:
-            manager.invalidate_all('wipe')
+            wipe = getattr(manager, 'wipe', None)
+            if wipe is not None:
+                wipe()                                  # invalidate the index AND bump the epoch (INTERFACE 3.6: wipe = invalidate + epoch bump + discard)
+            else:
+                manager.invalidate_all('wipe')
         self.allocator.invalidate_all()
         self.store_results.clear()
         self.bad.clear()
@@ -845,14 +883,25 @@ class KVP2PRuntime:
         restore = list(self.restore_seconds)
         counters = dict(self.counters)
         failures = {k[len('fail_'):]: v for k, v in counters.items() if k.startswith('fail_')}
+        # ``reason`` is the CLOSED code of the state (health.UNAVAILABLE_CODES / REFUSED_CODES / LATCH_CODES): the only reason field a metric
+        # label may be built from. ``latch_reason`` and ``host_reason`` are free text for people.
+        if self.state == STATE_LATCHED:
+            reason = self.latch_code
+        elif self.state == STATE_UNAVAILABLE:
+            reason = self.host_code
+        else:
+            reason = None
         out: Dict[str, Any] = {
             'schema': health.STATE_SCHEMA,
             'spawn_id': self.env.spawn_id,
             'written_at': health.iso_utc(now),
             'state': self.state,
+            'reason': reason,
             'latch_reason': self.latch_reason,
             'latch_code': self.latch_code,
+            'latches': list(self.latches),
             'host_ok': self.host_ok,
+            'host_code': None if self.host_ok else self.host_code,
             'host_reason': None if self.host_ok else self.host_reason,
             'persistence': self.cfg.persistence,
             'layout': self.cfg.layout,
@@ -864,6 +913,11 @@ class KVP2PRuntime:
                 'loads': counters.get('done_load', 0), 'stores': counters.get('done_store', 0),
                 'store_admitted_objects': manager_stats.get('admitted_objects', 0),
                 'store_dropped': manager_stats.get('dropped', {}),
+                'admission_size_unknown': manager_stats.get('admission_size_unknown', 0),
+                'admission_overrun': manager_stats.get('admission_overrun', 0),
+                'store_completion_stale': manager_stats.get('store_completion_stale', 0),
+                'store_completion_invalid': manager_stats.get('store_completion_invalid', 0),
+                'store_completion_unmatched': manager_stats.get('store_completion_unmatched', 0),
                 'evictions': manager_stats.get('evictions', {}),
                 'failures': failures,
                 'latched': dict(self.latched_total),
@@ -878,6 +932,7 @@ class KVP2PRuntime:
                 'entries': manager_stats.get('entries', 0),
                 'capacity_slots': manager_stats.get('capacity_slots', 0),
                 'slot_states': self.allocator.stats(),
+                'warming': self.warming,
             },
             'restore': {'count': len(restore), 'p50_s': health.quantile(restore, 0.5), 'p99_s': health.quantile(restore, 0.99)},
             'drive': {
@@ -900,7 +955,9 @@ class KVP2PRuntime:
         if not path:
             return
         try:
-            health.write_json_atomic(path, self.snapshot(now))
+            payload = self.snapshot(now)
+            with self._write_lock:                              # a latch can come from an I/O thread while the engine thread writes
+                health.write_json_atomic(path, payload)
         except Exception:
             logger.warning('ttkvp2p: cannot write the state file', exc_info=True)
 
@@ -922,6 +979,7 @@ class KVP2PRuntime:
         self.state = STATE_CLOSING
         drain = float(getattr(self.cfg, 'shutdown_drain_s', 15.0))
         self._drain_done()
+        self._io.cancel()
         stopped = self._io.close(min(drain, 5.0))
         self._drain_done()
         self.write_state(self.env.wall(), force=True)

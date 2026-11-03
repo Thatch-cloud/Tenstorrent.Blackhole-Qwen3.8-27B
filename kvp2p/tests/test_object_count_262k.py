@@ -79,6 +79,10 @@ class ObjectCount(unittest.TestCase):
         self.assertEqual(max(by_group.values()), FULL)
         self.assertEqual(rig.manager.stored_objects, EXPECTED)
         self.assertEqual(estimate_objects(PROMPT_TOKENS, (None, 8, 8, 8, 8, 8)), EXPECTED, 'the admission estimate is the same number')
+        self.assertEqual(manager.groups, (None, 8, 8, 8, 8, 8), 'bound by the connector from the real offloading config')
+        self.assertEqual(manager.admitted_objects, EXPECTED, 'the whole boundary was reserved at the first chunk, from the real prompt size')
+        self.assertEqual(manager.admission_overrun, 0, 'and the real scheduler stored no more than that')
+        self.assertEqual(manager.admission_size_unknown, 0)
         self.assertEqual(rig.runtime.counters['done_store'] > 0, True)
 
     def test_the_count_follows_the_sliding_window_so_the_counter_is_not_blind(self):
@@ -88,6 +92,9 @@ class ObjectCount(unittest.TestCase):
         self.addCleanup(setattr, harness, 'WINDOW', saved)
         rig, calls = self.count_stored('default')
         self.assertEqual(rig.manager.written(), FULL + SLIDING_GROUPS * 16)
+        self.assertEqual(rig.manager.groups, (None, 16, 16, 16, 16, 16))
+        self.assertEqual(rig.manager.admitted_objects, FULL + SLIDING_GROUPS * 16)
+        self.assertEqual(rig.manager.admission_overrun, 0)
         self.assertEqual(estimate_objects(PROMPT_TOKENS, (None, 16, 16, 16, 16, 16)), FULL + SLIDING_GROUPS * 16)
 
     def test_the_dense_fallback_is_12288_objects_by_arithmetic(self):

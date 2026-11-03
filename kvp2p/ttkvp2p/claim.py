@@ -119,6 +119,9 @@ def claim(device_arg: str, confirm: str, *, status_path: str, layout_id: str = '
     """Claim the drive. Returns a report dict; raises Refused (nothing written) or a StoreError. ``object_bytes`` (tests, regular files
     only) names a layout the table does not know."""
     env = env or health.HostEnv()
+    if allow_regular and not env.test_mode:
+        # the by-id gate is skipped for a regular file, so the flag itself is gated (the same name that gates every other test-only path)
+        raise Refused('--allow-regular is for tests: it needs %s=1 in the environment' % health.TEST_ENV)
     if object_bytes is not None and not allow_regular:
         raise Refused('an explicit object size is for regular-file tests only')
     if object_bytes is None:
@@ -130,6 +133,8 @@ def claim(device_arg: str, confirm: str, *, status_path: str, layout_id: str = '
     if overwrite is not None and overwrite not in FORMATS:
         raise Refused('--overwrite names no format this tool knows: %r (known: %s)' % (overwrite, ', '.join(FORMATS)))
     name, path = check_by_id(device_arg, confirm, allow_regular)
+    if allow_regular and not os.path.isfile(path):
+        raise Refused('--allow-regular takes a regular file; %s is not one (a block device is claimed by its by-id path, without the flag)' % path)
     try:
         drive = store.DriveFile(path, allow_regular=allow_regular, exclusive=True)
     except store.DeviceBusy as error:
@@ -181,7 +186,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument('--mode', default='process', choices=store.MODES)
     parser.add_argument('--overwrite', default=None, help='the format the drive carries now, named exactly (see the refusal message)')
     parser.add_argument('--dry-run', action='store_true')
-    parser.add_argument('--allow-regular', action='store_true', help='tests only: a regular file instead of a by-id block device')
+    parser.add_argument('--allow-regular', action='store_true', help='tests only (needs %s=1): a regular file instead of a by-id block device' % health.TEST_ENV)
     args = parser.parse_args(argv)
     try:
         report = claim(args.device, args.confirm, status_path=args.status, layout_id=args.layout, mode=args.mode, typed_size=args.size,

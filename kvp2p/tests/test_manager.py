@@ -5,6 +5,7 @@ These tests call the manager the way the real OffloadingConnectorScheduler does 
 the connector's ``ReqTag``); the scheduler-driven tests are in test_tier_rig.py.
 """
 
+import inspect
 import unittest
 
 import numpy as np
@@ -15,19 +16,27 @@ from tier_kit import OBJ, TierCase, key_for, req
 from vllm.v1.kv_offload.base import (
     LookupResult, Medium, OffloadingManager, PrepareStoreOutput, RequestOffloadingContext, ScheduleEndContext,
 )
-from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 
+from ttkvp2p import store as store_module
 from ttkvp2p.manager import ALLOCATED_REAP_S, NvmeKVManager, PairingError, estimate_objects
 from ttkvp2p.runtime import S_TRIM_WAIT, S_USED, STATE_LATCHED
 from ttkvp2p.spec import NvmeLoadStoreSpec
-from ttkvp2p.worker import StoreResult
 
 GEMMA_GROUPS = (None, 8, 8, 8, 8, 8)
 
 
-def digest_rows(slots):
-    """A deterministic digest per object: [n, 4] uint64 derived from the slot."""
-    return np.array([[s * 7 + 1, s * 7 + 2, s * 7 + 3, s * 7 + 4] for s in slots], dtype=np.uint64)
+def key_digest(key):
+    """A deterministic digest per KEY (not per slot): 4 uint64 derived from the key's number and group, so a digest that ends up on another
+    key's entry is visible."""
+    n = int.from_bytes(key[:32], 'big')
+    group = int.from_bytes(key[32:], 'big')
+    base = n * 7 + group * 1_000_003
+    return [base + 1, base + 2, base + 3, base + 4]
+
+
+def digest_rows(keys):
+    """The ``[len(keys), 4]`` uint64 array the connector hands to ``complete_store``: row i belongs to keys[i]."""
+    return np.array([key_digest(k) for k in keys], dtype=np.uint64).reshape(len(keys), 4)
 
 
 class ManagerCase(TierCase):
@@ -47,18 +56,13 @@ class ManagerCase(TierCase):
     def store(self, keys, ctx):
         return self.mgr.prepare_store(keys, ctx)
 
-    def finish_store(self, out, ctx, ok=True, via='runtime'):
-        """The worker reports the job: a StoreResult in the runtime, then the scheduler's complete_store(job.keys as a SET, ctx)."""
-        self.job += 1
-        spec = out.store_spec
-        result = StoreResult(self.job, ok, tuple(spec.slot_ids), tuple(spec.generations), digest_rows(spec.slot_ids) if ok else None,
-                             '' if ok else 'eio')
-        self.runtime.store_results[self.job] = result
-        if via == 'result':
-            self.mgr.complete_store(set(out.keys_to_store), ctx, success=ok, result=result)
-        else:
-            self.mgr.complete_store(set(out.keys_to_store), ctx)           # exactly what vLLM's update_connector_output calls
-        return result
+    def finish_store(self, out, ctx, ok=True):
+        """The connector's scheduler role reports the job (amendment A1): the keys in the manager's prepare_store order, the verdict, and on
+        success one digest row per key in that order. Returns the digest rows (None on a failure)."""
+        keys = list(out.keys_to_store)
+        rows = digest_rows(keys) if ok else None
+        self.mgr.complete_store(keys, ctx, success=ok, digests=rows)
+        return rows
 
     def put(self, count, ctx=None, first=0, group=0):
         """Store ``count`` fresh keys and complete the job."""
@@ -73,11 +77,57 @@ class ManagerCase(TierCase):
 class Contract(ManagerCase):
     """The shape vLLM 0.30.0's OffloadingConnectorScheduler relies on."""
 
-    def test_it_is_a_cpu_offloading_manager_for_the_storage_medium(self):
+    def test_it_is_an_offloading_manager_for_the_storage_medium(self):
         mgr = self.build()
-        self.assertIsInstance(mgr, CPUOffloadingManager)
         self.assertIsInstance(mgr, OffloadingManager)
         self.assertIs(mgr.medium, Medium.STORAGE)
+        self.assertEqual(NvmeKVManager.__mro__[1], OffloadingManager, 'the only vLLM class it derives from is the public base')
+
+    def test_it_depends_on_no_internal_lru_class_of_vllm(self):
+        """vLLM 0.31 silently stops evicting through its CPU manager's policy classes and 0.33 crashes: the tier keeps its own index and LRU."""
+        from ttkvp2p import manager as manager_module
+        with open(manager_module.__file__, encoding='utf-8') as handle:
+            source = handle.read()
+        code = '\n'.join(line for line in source.splitlines() if line.lstrip().startswith(('import ', 'from ')))
+        for forbidden in ('kv_offload.cpu', 'CPUOffloadingManager', 'ChunkStatus', 'CachePolicy', 'policies'):
+            self.assertNotIn(forbidden, code, 'the manager imports %s' % forbidden)
+        self.assertFalse(hasattr(self.build(), '_policy'), 'no vLLM cache-policy object')
+
+    def test_eviction_works_with_vllms_cpu_offload_modules_unimportable(self):
+        """Import the manager afresh with every vllm.v1.kv_offload.cpu module blocked, and let it evict by TTL and by LRU."""
+        import importlib
+        import sys
+        blocked = ['vllm.v1.kv_offload.cpu', 'vllm.v1.kv_offload.cpu.manager', 'vllm.v1.kv_offload.cpu.policies',
+                   'vllm.v1.kv_offload.cpu.policies.base', 'vllm.v1.kv_offload.cpu.policies.lru', 'vllm.v1.kv_offload.cpu.policies.arc',
+                   'vllm.v1.kv_offload.cpu.policies.factory', 'vllm.v1.kv_offload.cpu.common']
+        import ttkvp2p
+        saved = {name: sys.modules.get(name) for name in blocked + ['ttkvp2p.manager']}
+        saved_attribute = ttkvp2p.manager
+        for name in blocked:
+            sys.modules[name] = None                     # an import of it now raises ImportError
+        sys.modules.pop('ttkvp2p.manager', None)
+        try:
+            fresh = importlib.import_module('ttkvp2p.manager')
+            self.tier(num_slots=16, ttl_s=100, free_floor_pct=25, reserve_bytes=3 * OBJ)       # capacity 12, standing reserve 3
+            self.runtime = self.open_runtime()
+            mgr = self.mgr = fresh.NvmeKVManager(self.cfg, self.runtime, clock=self.clock, groups=None)
+            self.job = 0
+            keys = self.put(12)
+            self.assertEqual(mgr.entries, 12)
+            self.end_pass()
+            self.assertEqual(mgr.entries, 9, 'the LRU evicted the three coldest to keep the reserve')
+            self.assertEqual([k in mgr.index for k in keys], [False] * 3 + [True] * 9)
+            self.clock.advance(101)
+            self.end_pass()
+            self.assertEqual(mgr.entries, 0, 'the TTL evicts everything idle, through our own LRU')
+            mgr.check_invariants()
+        finally:
+            for name, module in saved.items():
+                if module is None:
+                    sys.modules.pop(name, None)
+                else:
+                    sys.modules[name] = module
+            ttkvp2p.manager = saved_attribute            # (the import rebound the package attribute to the fresh module)
 
     def test_the_abstract_methods_are_all_implemented(self):
         self.build()
@@ -251,6 +301,18 @@ class LookupRules(ManagerCase):
         self.assertEqual(mgr.entries, 0, 'the stuck entry is given up at the end of the pass')
         self.assertEqual(self.runtime.allocator.count(S_USED), 0)
 
+    def test_the_reaper_only_ever_gives_up_a_store_still_in_flight(self):
+        """A bookkeeping slip must not turn into a lost session: a WRITTEN entry that is (wrongly) still on the pending list survives the reap."""
+        mgr = self.build()
+        keys = self.put(3)
+        for key in keys:
+            mgr._pending[mgr.index[key]] = self.clock.now
+        self.end_pass()
+        self.clock.advance(ALLOCATED_REAP_S + 5)
+        self.end_pass()
+        self.assertEqual(mgr.written(), 3, 'written entries are not stores in flight')
+        self.assertEqual(mgr.evictions['stuck_store'], 0)
+
     def test_multimodal_requests_may_hit_but_never_store(self):
         mgr = self.build()
         keys = self.put(2)
@@ -336,26 +398,93 @@ class StoreOrder(ManagerCase):
         self.assertEqual(second.keys_to_store, [key_for(1)])
 
 
-class CompleteStore(ManagerCase):
-    """The failed-store seam: complete_store(keys, ctx, success=...) with the digests of the job's own result, found by (slot, generation)."""
+class TrapDict(dict):
+    """A ``store_results`` the manager must never touch (amendment A1: the connector consumes it; the manager never reads it)."""
 
-    def test_a_successful_store_makes_the_keys_loadable_with_the_workers_digests(self):
+    def __getitem__(self, key):
+        raise AssertionError('the manager read runtime.store_results[%r]' % (key,))
+
+    def get(self, *args):
+        raise AssertionError('the manager read runtime.store_results.get%r' % (args,))
+
+    def __iter__(self):
+        raise AssertionError('the manager iterated runtime.store_results')
+
+    def values(self):
+        raise AssertionError('the manager read runtime.store_results.values()')
+
+    def items(self):
+        raise AssertionError('the manager read runtime.store_results.items()')
+
+    def pop(self, *args):
+        raise AssertionError('the manager popped runtime.store_results%r' % (args,))
+
+    def __contains__(self, key):
+        raise AssertionError('the manager tested runtime.store_results for %r' % (key,))
+
+    def lookup(self, *args):
+        raise AssertionError('the manager looked a result up by slot and generation')
+
+
+class CompleteStore(ManagerCase):
+    """Amendment A1: complete_store(keys, ctx, success, digests). keys in prepare_store order, digests [n, chips] uint64 in that order,
+    attached BY POSITION. The manager never reads store_results and never pairs by slot or generation."""
+
+    def test_the_signature_is_the_one_amendment_a1_names(self):
+        signature = inspect.signature(NvmeKVManager.complete_store)
+        self.assertEqual(list(signature.parameters), ['self', 'keys', 'req_context', 'success', 'digests'])
+        self.assertIs(signature.parameters['success'].default, True)
+        self.assertIsNone(signature.parameters['digests'].default)
+
+    def test_a_successful_store_makes_the_keys_loadable_with_the_digests_of_their_positions(self):
         mgr = self.build()
         keys = [key_for(i) for i in range(5)]
         out = self.store(keys, req('a'))
-        result = self.finish_store(out, req('a'))
+        rows = self.finish_store(out, req('a'))
         spec = mgr.prepare_load(keys, req('b'))
-        self.assertTrue(np.array_equal(spec.expected, result.digests), 'the expected digests are the source digests of the store (I4)')
+        self.assertTrue(np.array_equal(spec.expected, rows), 'the expected digests are the source digests of the store (I4)')
         self.assertEqual(spec.slot_ids, out.store_spec.slot_ids)
 
-    def test_the_stock_call_with_a_set_of_keys_in_any_order_pairs_by_slot_not_by_position(self):
+    def test_the_manager_never_reads_the_store_results(self):
+        mgr = self.build(num_slots=40)
+        self.runtime.store_results = TrapDict()
+        for i in range(3):
+            keys = [key_for(100 * i + j) for j in range(6)]
+            out = self.store(keys, req('a%d' % i))
+            self.finish_store(out, req('a%d' % i), ok=(i != 1))
+        self.assertEqual(mgr.written(), 12)
+        spec = mgr.prepare_load([key_for(0), key_for(5)], req('b'))
+        mgr.complete_load([key_for(0), key_for(5)], req('b'))
+        mgr.reset_cache()
+        self.assertIsNone(spec.poison)
+
+    def test_a_digest_follows_its_key_whatever_slot_the_allocator_hands_out(self):
+        """The slot-permuting case of the README gate I6: the allocator returns the free slots in a shuffled order; row i still belongs to key i."""
+        mgr = self.build(num_slots=64)
+        real_alloc = self.runtime.allocator.alloc
+
+        def permuting(count):
+            slots = real_alloc(count)
+            return None if slots is None else slots[::-1] if count % 2 else slots[1::2] + slots[::2]
+
+        self.runtime.allocator.alloc = permuting
+        for count in (7, 8, 12):
+            keys = [key_for(1000 * count + i, group=i % 3) for i in range(count)]
+            out = self.store(keys, req('p%d' % count))
+            self.assertNotEqual(out.store_spec.slot_ids, sorted(out.store_spec.slot_ids), 'the slots really are out of order')
+            self.finish_store(out, req('p%d' % count))
+            spec = mgr.prepare_load(keys, req('b'))
+            self.assertTrue(np.array_equal(spec.expected, digest_rows(keys)), 'every key carries its own digest')
+            for key, slot in zip(keys, spec.slot_ids):
+                self.assertEqual(mgr.index[key], slot)
+            mgr.complete_load(keys, req('b'))
+
+    def test_keys_in_a_set_order_fail_the_same_way_and_a_failure_needs_no_digests(self):
         mgr = self.build()
-        keys = [key_for(i) for i in range(30)]
+        keys = [key_for(i) for i in range(9)]
         out = self.store(keys, req('a'))
-        self.finish_store(out, req('a'))                    # complete_store(set(keys), ctx): a set has no order
-        spec = mgr.prepare_load(keys, req('b'))
-        for key, slot, row in zip(keys, spec.slot_ids, spec.expected):
-            self.assertEqual(int(row[0]), slot * 7 + 1, 'key %d got another object\'s digest' % int.from_bytes(key[:32], 'big'))
+        mgr.complete_store(set(out.keys_to_store), req('a'), success=False)          # the connector's call for a job it did not settle
+        self.assertEqual(mgr.entries, 0)
 
     def test_success_false_drops_the_entries_and_the_slots_go_through_trim(self):
         mgr = self.build()
@@ -368,89 +497,161 @@ class CompleteStore(ManagerCase):
         self.assertEqual(self.runtime.allocator.count(S_TRIM_WAIT), 4, 'released under I5: not allocatable before the TRIM')
         self.assertEqual(mgr.evictions['store_failed'], 4)
 
-    def test_an_explicit_failure_flag_beats_a_result_that_says_success(self):
+    def test_digests_are_ignored_when_success_is_false(self):
         mgr = self.build()
         keys = [key_for(i) for i in range(3)]
-        out = self.store(keys, req('a'))
-        self.job += 1
-        result = StoreResult(self.job, True, tuple(out.store_spec.slot_ids), tuple(out.store_spec.generations), digest_rows(out.store_spec.slot_ids))
-        self.runtime.store_results[self.job] = result
-        mgr.complete_store(set(keys), req('a'), success=False)
+        self.store(keys, req('a'))
+        mgr.complete_store(keys, req('a'), success=False, digests=digest_rows(keys))
         self.assertEqual(mgr.entries, 0)
 
-    def test_a_missing_or_pruned_result_means_the_store_failed(self):
-        mgr = self.build()
-        keys = [key_for(i) for i in range(3)]
-        out = self.store(keys, req('a'))
-        mgr.complete_store(set(keys), req('a'))             # the worker never left a result (or pruned it)
-        self.assertEqual(mgr.entries, 0)
+    def test_a_success_without_usable_digests_is_a_failed_store(self):
+        mgr = self.build(num_slots=64)
+        good = digest_rows([key_for(0), key_for(1), key_for(2)])
+        for name, bad in (('none', None), ('too few rows', good[:2]), ('too many rows', np.vstack([good, good[:1]])), ('three columns', good[:, :3]),
+                          ('one dimension', good[:, 0]), ('floats', good.astype(np.float64)), ('negative', good.astype(np.int64) * -1),
+                          ('not an array', 'digests')):
+            keys = [key_for(500 + len(name) * 10 + i) for i in range(3)]
+            self.store(keys, req(name))
+            before = mgr.store_completion_invalid
+            mgr.complete_store(keys, req(name), success=True, digests=bad)
+            self.assertEqual(mgr.store_completion_invalid, before + 1, name)
+            for key in keys:
+                self.assertEqual(mgr.entry_state(key), 'none', '%s: no entry may be left half-written or published' % name)
+        self.assertEqual(mgr.written(), 0)
 
-    def test_a_result_for_another_generation_of_the_slot_does_not_count(self):
+    def test_the_digest_dtype_may_be_any_unsigned_or_nonnegative_integer(self):
         mgr = self.build()
-        keys = [key_for(1)]
-        out = self.store(keys, req('a'))
-        self.job += 1
-        stale = StoreResult(self.job, True, tuple(out.store_spec.slot_ids), (out.store_spec.generations[0] + 1,), digest_rows(out.store_spec.slot_ids))
-        self.runtime.store_results[self.job] = stale
-        mgr.complete_store(set(keys), req('a'))
-        self.assertEqual(mgr.entries, 0, 'never publish bytes that a different store wrote')
-
-    def test_a_failed_job_result_fails_every_key_of_the_job(self):
-        mgr = self.build()
-        keys = [key_for(i) for i in range(3)]
-        out = self.store(keys, req('a'))
-        self.finish_store(out, req('a'), ok=False)
-        self.assertEqual(mgr.entries, 0)
-
-    def test_the_result_can_be_handed_over_directly(self):
-        mgr = self.build()
-        keys = [key_for(i) for i in range(6)]
-        out = self.store(keys, req('a'))
-        self.finish_store(out, req('a'), via='result')
-        self.assertEqual(mgr.written(), 6)
-        spec = mgr.prepare_load(keys, req('b'))
-        self.assertEqual(int(spec.expected[2][0]), out.store_spec.slot_ids[2] * 7 + 1)
-
-    def test_a_handed_over_failure_drops_the_keys(self):
-        mgr = self.build()
-        keys = [key_for(i) for i in range(6)]
-        out = self.store(keys, req('a'))
-        self.finish_store(out, req('a'), ok=False, via='result')
-        self.assertEqual(mgr.entries, 0)
-
-    def test_pairing_is_an_index_lookup_not_a_scan_over_the_results(self):
-        mgr = self.build(num_slots=3000)
-        for job in range(1, 1025):                          # the worker keeps up to 1,024 reported results
-            slots = (job % 2900,)
-            self.runtime.store_results[job] = StoreResult(job, True, slots, (1,), digest_rows(slots))
-        ctx = req('a')
-        keys = [key_for(i) for i in range(2088)]            # a 262k session
-        out = self.store(keys, ctx)
-        self.job = 5000
-        result = StoreResult(self.job, True, tuple(out.store_spec.slot_ids), tuple(out.store_spec.generations), digest_rows(out.store_spec.slot_ids))
-        self.runtime.store_results[self.job] = result
-        calls = []
-        real_lookup = self.runtime.store_results.lookup
-        self.runtime.store_results.lookup = lambda s, g: calls.append((s, g)) or real_lookup(s, g)
-        import time
-        started = time.perf_counter()
-        mgr.complete_store(set(keys), ctx)
-        elapsed = time.perf_counter() - started
-        self.assertEqual(len(calls), 2088, 'one index lookup per key')
-        self.assertEqual(mgr.written(), 2088)
-        self.assertLess(elapsed, 1.0)
+        keys = [key_for(i) for i in range(2)]
+        self.store(keys, req('a'))
+        mgr.complete_store(keys, req('a'), success=True, digests=digest_rows(keys).astype(np.int64))
+        self.assertEqual(mgr.written(), 2)
 
     def test_a_repeated_completion_and_a_completion_after_a_reset_change_nothing(self):
         mgr = self.build()
         keys = [key_for(i) for i in range(3)]
         out = self.store(keys, req('a'))
-        result = self.finish_store(out, req('a'))
-        mgr.complete_store(set(keys), req('a'))
+        rows = self.finish_store(out, req('a'))
+        mgr.complete_store(keys, req('a'), success=True, digests=rows + np.uint64(1))
         self.assertEqual(mgr.written(), 3)
+        self.assertTrue(np.array_equal(mgr.prepare_load(keys, req('b')).expected, rows), 'a repeated report did not overwrite the digests')
         mgr.reset_cache()
-        mgr.complete_store(set(keys), req('a'))
-        mgr.complete_store(set(keys), req('a'), success=False)
+        mgr.complete_store(keys, req('a'), success=True, digests=rows)
+        mgr.complete_store(keys, req('a'), success=False)
         self.assertEqual(mgr.entries, 0)
+
+    def test_a_completion_for_keys_the_manager_does_not_hold_is_ignored(self):
+        mgr = self.build()
+        self.put(2)
+        mgr.complete_store([key_for(900), key_for(901)], req('a'), success=True, digests=digest_rows([key_for(900), key_for(901)]))
+        mgr.complete_store([key_for(902)], req('a'), success=False)
+        self.assertEqual((mgr.entries, mgr.written()), (2, 2))
+
+    def test_a_late_completion_cannot_publish_a_new_entry_of_the_same_key_after_the_stuck_store_reap(self):
+        """The job's store hangs; the manager gives the entry up after 300 s; the same keys are stored again (a NEW entry, a new job); then the
+        OLD job reports. Its digests belong to the old entry: the new one is not written yet and must stay ALLOCATED."""
+        mgr = self.build(num_slots=64)
+        keys = [key_for(i) for i in range(4)]
+        a, b = req('a'), req('b')
+        old = self.store(keys, a)
+        self.end_pass()
+        self.clock.advance(ALLOCATED_REAP_S + 1)
+        self.end_pass()
+        self.assertEqual(mgr.entries, 0, 'reaped')
+        self.settle()
+        new = self.store(keys, b)
+        self.assertEqual(new.keys_to_store, keys)
+        self.finish_store(old, a)                             # the old job finally reports success
+        self.assertEqual(mgr.written(), 0)
+        self.assertEqual({mgr.entry_state(k) for k in keys}, {'allocated'}, 'the new entries are still waiting for THEIR job')
+        self.assertEqual(mgr.store_completion_stale, 4)
+        mgr.complete_store(keys, a, success=False)            # (a second report of the old job) nor may a FAILURE drop the new entries
+        self.assertEqual({mgr.entry_state(k) for k in keys}, {'allocated'})
+        self.finish_store(new, b)
+        self.assertEqual(mgr.written(), 4)
+        self.assertEqual(mgr.store_completion_unmatched, 1, 'only the repeated report had no record')
+
+    def test_a_late_completion_after_a_wipe_leaves_the_new_entries_alone(self):
+        mgr = self.build(num_slots=64)
+        keys = [key_for(i) for i in range(4)]
+        a, b = req('a'), req('b')
+        old = self.store(keys, a)
+        mgr.wipe()
+        self.settle()
+        new = self.store(keys, b)
+        self.finish_store(old, a)
+        self.assertEqual({mgr.entry_state(k) for k in keys}, {'allocated'})
+        self.finish_store(new, b)
+        self.assertEqual(mgr.written(), 4)
+        self.assertEqual(mgr.store_completion_unmatched, 0)
+
+    def test_the_same_request_storing_the_same_keys_again_is_told_apart_by_the_order_of_its_jobs(self):
+        """A wipe in the middle of one request: the old job and the new job carry the SAME keys in the SAME order. They report in the order
+        they were issued, and the request's ledger pairs each report with its own batch."""
+        mgr = self.build(num_slots=64)
+        keys = [key_for(i) for i in range(4)]
+        a = req('a')
+        old = self.store(keys, a)
+        mgr.wipe()
+        self.settle()
+        new = self.store(keys, a)
+        self.finish_store(old, a)
+        self.assertEqual({mgr.entry_state(k) for k in keys}, {'allocated'}, 'the first report is the old job\'s')
+        self.finish_store(new, a)
+        self.assertEqual(mgr.written(), 4)
+        self.assertEqual(mgr.store_completion_unmatched, 0)
+
+    def test_a_job_that_shares_a_key_with_a_newer_entry_still_completes_its_other_keys(self):
+        mgr = self.build(num_slots=64)
+        keys = [key_for(i) for i in range(6)]
+        a, b = req('a'), req('b')
+        old = self.store(keys, a)
+        mgr._remove_many([keys[0]], 'stuck_store')            # as if the reaper had given up ONE key ...
+        newer = self.store([keys[0]], b)                      # ... and it was stored again
+        self.finish_store(old, a)
+        self.assertEqual(mgr.entry_state(keys[0]), 'allocated', 'the newer entry of key 0 is not the old job\'s')
+        self.assertEqual([mgr.entry_state(k) for k in keys[1:]], ['written'] * 5)
+        self.assertEqual(mgr.store_completion_stale, 1)
+        self.finish_store(newer, b)
+        self.assertEqual(mgr.written(), 6)
+        mgr.check_invariants()
+
+    def test_a_rolled_back_prepare_store_leaves_no_record_behind(self):
+        mgr = self.build(num_slots=64)
+        original = mgr._check_pairing
+
+        def corrupt(output):
+            output.store_spec.slot_ids[0], output.store_spec.slot_ids[1] = output.store_spec.slot_ids[1], output.store_spec.slot_ids[0]
+            return original(output)
+
+        mgr._check_pairing = corrupt
+        a = req('a')
+        self.store([key_for(1), key_for(2)], a)
+        from ttkvp2p.manager import _StoreLedger
+        self.assertEqual(len(a.get_state(_StoreLedger).batches), 0)
+
+    def test_2088_keys_complete_without_a_scan(self):
+        mgr = self.build(num_slots=3000)
+        self.runtime.store_results = TrapDict()
+        keys = [key_for(i) for i in range(2088)]            # a 262k session
+        out = self.store(keys, req('a'))
+        import time
+        started = time.perf_counter()
+        self.finish_store(out, req('a'))
+        elapsed = time.perf_counter() - started
+        self.assertEqual(mgr.written(), 2088)
+        self.assertLess(elapsed, 1.0)
+        mgr.check_invariants()
+
+    def test_the_counts_of_the_states_stay_exact_through_a_mix_of_outcomes(self):
+        mgr = self.build(num_slots=64)
+        a = [key_for(i) for i in range(5)]
+        b = [key_for(100 + i) for i in range(5)]
+        out_a, out_b = self.store(a, req('a')), self.store(b, req('b'))
+        self.assertEqual(mgr._n_state[1:], [10, 0, 0])
+        self.finish_store(out_a, req('a'))
+        self.finish_store(out_b, req('b'), ok=False)
+        self.assertEqual((mgr.written(), mgr.entries), (5, 5))
+        mgr.check_invariants()
 
 
 class LoadsAndPins(ManagerCase):
@@ -485,6 +686,31 @@ class LoadsAndPins(ManagerCase):
         self.end_pass()
         self.assertEqual(mgr.entries, 0)
 
+    def test_lru_pressure_passes_over_a_pinned_entry_and_takes_the_next_coldest(self):
+        """M26 of the batch-D mutation run: capacity eviction must never take an entry a load is reading, however cold it is."""
+        mgr = self.build(num_slots=20, free_floor_pct=0, reserve_bytes=4 * OBJ)         # capacity 20, standing reserve 4: keep at most 16
+        keys = self.put(20)
+        pinned = mgr.prepare_load(keys[2:4], req('a'))                                  # the third and fourth coldest are being read
+        self.assertIsNone(pinned.poison)
+        self.end_pass()
+        self.assertEqual(mgr.entries, 16)
+        self.assertEqual([k in mgr.index for k in keys[:8]], [False, False, True, True, False, False, True, True],
+                         'the four coldest UNPINNED entries went; the pinned ones stayed')
+        mgr.complete_load(keys[2:4], req('a'))
+        self.end_pass()
+        self.assertEqual(mgr.entries, 16)
+        mgr.check_invariants()
+
+    def test_a_pinned_entry_at_the_cold_end_is_passed_over_by_the_ttl_scan_too(self):
+        mgr = self.build(num_slots=20, ttl_s=100)
+        keys = self.put(6)
+        mgr.prepare_load(keys[:2], req('a'))                                            # the coldest two are being read
+        self.end_pass()
+        self.clock.advance(1000)
+        self.end_pass()
+        self.assertEqual(sorted(mgr.index.values()), sorted(mgr.index[k] for k in keys[:2]), 'only the pinned pair is left')
+        mgr.check_invariants()
+
     def test_two_loads_pin_twice_and_both_must_complete(self):
         mgr = self.build(ttl_s=100)
         keys = self.put(2)
@@ -498,6 +724,21 @@ class LoadsAndPins(ManagerCase):
         self.clock.advance(1000)
         self.end_pass()
         self.assertEqual(mgr.entries, 0)
+
+    def test_a_key_that_is_not_written_poisons_the_spec_whatever_else_is_true_of_it(self):
+        """A store in flight (ALLOCATED) and a BAD entry are in the index; neither may be handed to a load (mutation R2 of the WP3a review)."""
+        mgr = self.build()
+        self.store([key_for(1)], req('a'))                        # ALLOCATED
+        spec = mgr.prepare_load([key_for(1)], req('b'))
+        self.assertIsNotNone(spec.poison, 'a half-written entry must never be read')
+        keys = self.put(2, first=10)
+        pinned = mgr.prepare_load([keys[0]], req('c'))
+        self.runtime.mark_bad(pinned.slot_ids[0], pinned.generations[0])        # BAD, still pinned by the first load
+        again = mgr.prepare_load([keys[0]], req('d'))
+        self.assertIsNotNone(again.poison, 'a BAD entry is never loaded again')
+        self.assertEqual(mgr._ref[mgr.index[keys[0]]], 1, 'the poisoned call pinned nothing')
+        ok = mgr.prepare_load([keys[1]], req('e'))
+        self.assertIsNone(ok.poison)
 
     def test_a_key_that_vanished_before_prepare_load_poisons_the_spec_instead_of_crashing_the_engine(self):
         mgr = self.build()
@@ -576,6 +817,26 @@ class FrozenNowAndRaces(ManagerCase):
         self.assertIs(mgr.lookup(keys[0], req('a')), LookupResult.MISS)
         self.assertEqual(mgr.miss_reasons['expired'], 1)
 
+    def test_a_touch_after_the_end_of_a_pass_does_not_stale_the_next_passes_clock_either(self):
+        """vLLM calls touch AFTER on_schedule_end too (minor 3 of the WP3a review): it must not arm the clock the next pass's first lookup reads."""
+        mgr = self.build(ttl_s=100)
+        keys = self.put(2)
+        self.end_pass()
+        mgr.touch([keys[1]], req('x'))
+        self.clock.advance(1000)                           # the engine idles
+        self.assertIs(mgr.lookup(keys[0], req('a')), LookupResult.MISS)
+        self.assertEqual(mgr.miss_reasons['expired'], 1)
+
+    def test_a_touch_inside_a_pass_stamps_the_passes_now(self):
+        mgr = self.build(ttl_s=100)
+        keys = self.put(1)
+        self.end_pass()
+        self.clock.advance(50)
+        self.assertIs(mgr.lookup(keys[0], req('a')), LookupResult.HIT)       # arms the pass's now (T0 + 50)
+        self.clock.advance(30)
+        mgr.touch(keys, req('a'))
+        self.assertEqual(float(mgr._last_used[mgr.index[keys[0]]]), self.clock.now - 30, 'stamped with the held "now", like every call of the pass')
+
     def test_an_entry_that_answered_hit_is_still_there_for_prepare_load_after_the_ttl_ran_out(self):
         mgr = self.build(ttl_s=100)
         keys = self.put(2)
@@ -613,9 +874,7 @@ class FrozenNowAndRaces(ManagerCase):
             keys.append(key_for(i))
         ctx = req('a')
         out = mgr.prepare_store(keys, ctx)
-        self.job = 1
-        runtime.store_results[1] = StoreResult(1, True, tuple(out.store_spec.slot_ids), tuple(out.store_spec.generations), digest_rows(out.store_spec.slot_ids))
-        mgr.complete_store(set(keys), ctx)
+        mgr.complete_store(list(out.keys_to_store), ctx, success=True, digests=digest_rows(out.keys_to_store))
         self.assertIs(mgr.lookup(keys[0], ctx), LookupResult.HIT)
         mgr.reset_cache()                                   # releases 8 slots: their TRIMs run on the I/O thread
         import time
@@ -834,11 +1093,14 @@ class Admission(ManagerCase):
         long = req('l')
         self.assertEqual(len(self.store([key_for(100 + i) for i in range(32)], long).keys_to_store), 32)
 
-    def test_the_verdict_is_cached_in_the_req_tag_and_a_tagless_request_is_cached_by_id(self):
-        mgr = self.build_gemma_like(num_slots=200)
+    def test_the_verdict_is_cached_in_the_req_tag(self):
+        self.build_gemma_like(num_slots=200)
         tagged = req('a', prompt_tokens=6000)
         self.store(self.keys_for(6000)[:10], tagged)
         self.assertIs(tagged.get_state(tier_kit.ReqTag).admitted, True)
+
+    def test_a_tagless_request_is_cached_by_id_where_the_layout_has_no_group_map(self):
+        mgr = self.build(num_slots=200)                       # no group map: each call is judged, so a tagless request is admitted per call
         tagless = req('t', tag=False)
         self.store([key_for(70000 + i) for i in range(5)], tagless)
         self.assertEqual(mgr._verdicts['t'], True)
@@ -851,12 +1113,189 @@ class Admission(ManagerCase):
         self.assertEqual(self.store(self.keys_for(6000)[:32], a).keys_to_store, [])
         self.assertEqual(mgr.dropped['no_slot'] + mgr.dropped['capacity'], 1)
 
+    def test_a_second_long_request_is_not_denied_while_evictable_entries_exist(self):
+        """Minor 2 of the WP3a review: the first admission's reservation used up the standing reserve, so a second long request was denied
+        while LRU entries that could make room sat in the index. Eviction now keeps entries + reservations + reserve <= capacity."""
+        mgr = self.build_gemma_like(num_slots=300, reserve_bytes=90 * OBJ)             # capacity 300, standing reserve 90 (one boundary is 86)
+        old = req('old', prompt_tokens=250 * 128)
+        self.put(250, old)
+        mgr.on_request_finished(old)                      # (the 40 sliding objects it reserved but never wrote are released)
+        self.end_pass()
+        self.settle()                                     # (the evicted slots finish their TRIM and become allocatable)
+        self.assertEqual(mgr.entries, 210, 'the reserve: 300 - 90')
+        a = req('a', prompt_tokens=6000)
+        self.assertEqual(len(self.store(self.keys_for(6000, 1)[:32], a).keys_to_store), 32)
+        self.assertEqual(mgr.snapshot()['reserved_slots'], 54)
+        self.end_pass()
+        self.settle()
+        self.assertEqual(mgr.entries, 300 - 90 - 54, 'the old session made room for the rest of a\'s boundary AND the reserve for the next request')
+        b = req('b', prompt_tokens=6000)
+        self.assertEqual(len(self.store(self.keys_for(6000, 2)[:32], b).keys_to_store), 32, 'b is admitted although a is still storing')
+        self.assertEqual(mgr.dropped['capacity'] + mgr.dropped['no_slot'], 0)
+
+    def test_the_estimate_takes_the_prefix_a_later_turn_already_has_off_the_full_attention_groups_only(self):
+        self.assertEqual(estimate_objects(262144, GEMMA_GROUPS, 128, hit_tokens=0), 2088)
+        self.assertEqual(estimate_objects(262144, GEMMA_GROUPS, 128, hit_tokens=258048), 32 + 5 * 8, '2,016 blocks are already there: 32 new + 5 windows')
+        self.assertEqual(estimate_objects(262144, GEMMA_GROUPS, 128, hit_tokens=262144), 5 * 8, 'the windows at the new end are still stored')
+        self.assertEqual(estimate_objects(1000, GEMMA_GROUPS, 128, hit_tokens=10 ** 9), 5 * 7, 'a hit beyond the prompt cannot go negative')
+
+    def test_a_later_turn_reserves_and_charges_only_what_is_beyond_its_hit(self):
+        mgr = self.build_gemma_like(num_slots=300, daily_write_cap_bytes=1000 * OBJ)
+        a = req('a', prompt_tokens=12 * 128 * 10, hit_tokens=100 * 128)          # 120 blocks, 100 of them already there: 20 + 40 objects
+        out = self.store(self.keys_for(120 * 128, 1)[100:132], a)
+        self.assertEqual(len(out.keys_to_store), 32)
+        self.assertEqual(mgr.admitted_objects, 20 + 40)
+        self.assertEqual(mgr.snapshot()['bytes_written_today'], 60 * OBJ)
+        self.assertEqual(mgr.snapshot()['reserved_slots'], 60 - 32)
+
+    def test_a_request_of_unknown_size_is_refused_whole_on_a_layout_with_a_group_map(self):
+        """B2 of the WP3a review: without the size the tier cannot promise all-or-nothing, and a chunk denied mid-prompt is a hole vLLM never
+        revisits. The request is refused at its first chunk (counted, and logged once), never judged chunk by chunk."""
+        mgr = self.build_gemma_like(num_slots=200)
+        for name, ctx in (('unsized tag', req('a')), ('no tag at all', req('b', tag=False))):
+            before = mgr.admission_size_unknown
+            out = self.store(self.keys_for(6000, 1)[:32], ctx)
+            self.assertEqual(out.keys_to_store, [], name)
+            self.assertEqual(mgr.admission_size_unknown, before + 1, name)
+            again = self.store(self.keys_for(6000, 1)[32:46], ctx)
+            self.assertEqual(again.keys_to_store, [], '%s: the refusal is cached for the request' % name)
+        self.assertEqual(mgr.dropped['size_unknown'], 2)
+        self.assertEqual(mgr.written() + mgr.entries, 0)
+        self.assertEqual(mgr.snapshot()['bytes_written_today'], 0)
+        self.assertTrue(mgr._warned_size_unknown)
+
+    def test_a_layout_without_a_group_map_judges_each_call_and_counts_it(self):
+        mgr = self.build(num_slots=200)
+        out = self.store([key_for(i) for i in range(5)], req('a'))
+        self.assertEqual(len(out.keys_to_store), 5)
+        self.assertEqual(mgr.admission_size_unknown, 1, 'the degraded mode shows in the state file')
+
     def test_a_denied_boundary_charges_nothing(self):
         mgr = self.build_gemma_like(num_slots=50)
         a = req('a', prompt_tokens=6000)
         self.store(self.keys_for(6000)[:32], a)
         self.assertEqual(mgr.snapshot()['bytes_written_today'], 0)
         self.assertEqual(mgr.admitted_objects, 0)
+
+
+class WarmUp(TierCase):
+    """Minor 1 of the WP3a review: the open-time discard advanced two runs per engine pass and a refusal was final for the request, so the
+    first long session after every restart was never stored. The whole discard is queued to the I/O thread at open now."""
+
+    def gated_discard(self, allow):
+        """Let ``allow`` discard runs through; hold the rest until the gate opens."""
+        import threading
+        gate, count, original = threading.Event(), {'n': 0}, store_module.DriveFile.discard
+        lock = threading.Lock()
+
+        def discard(drive, offset, length):
+            with lock:
+                count['n'] += 1
+                mine = count['n']
+            if mine > allow:
+                gate.wait(10)
+            return original(drive, offset, length)
+
+        store_module.DriveFile.discard = discard
+        self.addCleanup(setattr, store_module.DriveFile, 'discard', original)
+        self.addCleanup(gate.set)
+        self.discard_calls = count
+        return gate
+
+    def open_gemma_like(self, allow, num_slots=200, **cfg):
+        saved = store_module.DISCARD_RUN_BYTES
+        store_module.DISCARD_RUN_BYTES = 50 * OBJ                      # 4 runs of 50 slots
+        self.addCleanup(setattr, store_module, 'DISCARD_RUN_BYTES', saved)
+        self.tier(num_slots=num_slots, sync_io=False, **cfg)
+        gate = self.gated_discard(allow)
+        self.runtime = self.open_runtime(settle=False)
+        self.assertTrue(self.runtime.host_ok, self.runtime.host_reason)
+        self.mgr = self.manager(self.runtime, groups=GEMMA_GROUPS)
+        return gate
+
+    def wait_runs(self, count):
+        import time
+        deadline = time.time() + 5
+        while self.runtime._done.qsize() < count and time.time() < deadline:
+            time.sleep(0.005)
+        self.runtime.service()
+
+    def test_the_whole_discard_is_queued_at_open_not_two_runs_per_pass(self):
+        gate = self.open_gemma_like(allow=0)
+        self.assertEqual(self.runtime._trims_out, 4, 'all four runs went to the I/O thread at open')
+        self.assertEqual(self.runtime.allocator.count(S_TRIM_WAIT), 0)
+        self.assertEqual(self.runtime.discard_queued_at_open, 200)
+        self.assertTrue(self.runtime.warming)
+        gate.set()
+        self.assertTrue(self.runtime.settle(5.0))
+        self.assertFalse(self.runtime.warming)
+        self.assertEqual(self.runtime.allocator.n_free, 200)
+
+    def test_a_boundary_that_arrives_during_the_warm_up_is_refused_as_warming_and_the_next_one_is_stored(self):
+        gate = self.open_gemma_like(allow=0)
+        a = req('a', prompt_tokens=6000)                                   # 86 objects
+        out = self.mgr.prepare_store(AdmissionKeys.keys_for(6000, 1)[:32], a)
+        self.assertEqual(out.keys_to_store, [])
+        self.assertEqual(self.mgr.dropped['warming'], 1, 'named: not the same as a full drive')
+        self.assertEqual(self.mgr.dropped['no_slot'], 0)
+        gate.set()
+        self.assertTrue(self.runtime.settle(5.0))
+        b = req('b', prompt_tokens=6000)
+        self.assertEqual(len(self.mgr.prepare_store(AdmissionKeys.keys_for(6000, 2)[:32], b).keys_to_store), 32, 'once the discard is done it is stored')
+        self.assertEqual(self.mgr.prepare_store(AdmissionKeys.keys_for(6000, 1)[32:46], a).keys_to_store, [],
+                         'but the request that was refused stays refused: its first chunk is gone for good')
+
+    def test_a_boundary_that_fits_the_slots_already_freed_is_admitted_during_the_warm_up(self):
+        gate = self.open_gemma_like(allow=2)                               # two of four runs complete: 100 slots are free
+        self.wait_runs(2)
+        self.assertEqual(self.runtime.allocator.n_free, 100)
+        self.assertTrue(self.runtime.warming)
+        a = req('a', prompt_tokens=6000)                                   # 86 objects fit in 100
+        self.assertEqual(len(self.mgr.prepare_store(AdmissionKeys.keys_for(6000, 1)[:32], a).keys_to_store), 32)
+        b = req('b', prompt_tokens=6000)
+        out = self.mgr.prepare_store(AdmissionKeys.keys_for(6000, 2)[:32], b)
+        self.assertEqual(out.keys_to_store, [])
+        self.assertEqual(self.mgr.dropped['warming'], 1)
+        gate.set()
+
+    def test_the_first_long_session_after_a_restart_is_stored_without_waiting_for_engine_passes(self):
+        """The reviewer's repro: 3,999 slots, a 262k-token request right after open, NO settle() beforehand. The discard completes in the
+        background; one pass applies every completion."""
+        self.tier(num_slots=3999, sync_io=False, free_floor_pct=5, min_store_tokens=4096)
+        saved = store_module.DISCARD_RUN_BYTES
+        store_module.DISCARD_RUN_BYTES = 385 * OBJ
+        self.addCleanup(setattr, store_module, 'DISCARD_RUN_BYTES', saved)
+        self.runtime = self.open_runtime(settle=False)
+        mgr = self.mgr = self.manager(self.runtime, groups=GEMMA_GROUPS)
+        import time
+        deadline = time.time() + 10
+        while self.runtime._done.qsize() < 11 and time.time() < deadline:         # 3,999 / 385 = 11 runs
+            time.sleep(0.005)
+        mgr.on_schedule_end(ScheduleEndContext(new_req_ids=(), preempted_req_ids=()))      # ONE pass applies them all
+        self.assertEqual(self.runtime.allocator.n_free, 3999)
+        self.assertFalse(self.runtime.warming)
+        ctx = req('long', prompt_tokens=262144)
+        keys = AdmissionKeys.keys_for(262144, 1)
+        for first in range(0, len(keys), 64):
+            out = mgr.prepare_store(keys[first:first + 64], ctx)
+            self.assertEqual(len(out.keys_to_store), len(keys[first:first + 64]), 'every chunk of the first long session is stored (%d)' % first)
+            mgr.complete_store(out.keys_to_store, ctx, success=True, digests=digest_rows(out.keys_to_store))
+        self.assertEqual(mgr.written(), 2088)
+        self.assertEqual(sum(mgr.dropped.values()), 0)
+
+    def test_shutdown_drops_the_queued_discards_and_lets_the_one_running_finish(self):
+        gate = self.open_gemma_like(allow=0)
+        import time
+        deadline = time.time() + 5
+        while self.discard_calls['n'] < 1 and time.time() < deadline:      # the first run is inside the (held) discard; three more are queued
+            time.sleep(0.005)
+        thread = self.runtime._io._thread
+        self.runtime.release('worker')                                     # the last role: the shutdown
+        self.assertEqual(self.runtime.state, 'CLOSING')
+        gate.set()
+        thread.join(5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(self.discard_calls['n'], 1, 'the queued runs were dropped unread; only the run in progress finished')
 
 
 class DailyCap(ManagerCase):
@@ -987,16 +1426,20 @@ class ResetCache(ManagerCase):
 
 
 class WipeVerb(ManagerCase):
-    def test_wipe_through_the_control_directory_invalidates_the_index(self):
+    def test_wipe_through_the_control_directory_invalidates_the_index_and_bumps_the_epoch(self):
         mgr = self.build(num_slots=32)
         self.put(6)
+        self.assertEqual(mgr.epoch, 0)
         self.tree.command(1, 'wipe')
         self.clock.advance(2)
         self.end_pass()
         self.assertEqual(mgr.entries, 0)
         self.assertEqual(mgr.evictions['wipe'], 6)
+        self.assertEqual(mgr.epoch, 1, 'INTERFACE 3.6: wipe = invalidate + epoch bump + discard')
         self.settle()
         self.assertEqual(self.runtime.allocator.n_free, 32)
+        self.assertEqual(self.runtime.counters['wipes'], 1)
+        self.assertEqual(self.tree.read_state()['state'], 'AVAILABLE')
 
 
 class EnginePassFuzz(ManagerCase):
@@ -1096,7 +1539,8 @@ class Accounting(ManagerCase):
 
     def test_the_slot_table_is_modest(self):
         mgr = self.build(num_slots=64)
-        per_slot = (mgr._state.itemsize + mgr._tenant.itemsize + mgr._created.itemsize + mgr._last_used.itemsize + mgr._digest.itemsize * 4
+        per_slot = (mgr._state.itemsize + mgr._ref.itemsize + mgr._tenant.itemsize + mgr._created.itemsize + mgr._last_used.itemsize
+                    + mgr._digest.itemsize * 4 + mgr._batch.itemsize + mgr._slot_key.itemsize
                     + self.runtime.allocator.gen.itemsize + self.runtime.allocator.inflight.itemsize + self.runtime.allocator.state.itemsize)
         self.assertLess(per_slot, 100, 'bytes per slot of the structure-of-arrays table (the dict and the LRU add about 300 B per entry)')
 

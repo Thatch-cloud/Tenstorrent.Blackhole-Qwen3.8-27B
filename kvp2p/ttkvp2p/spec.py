@@ -119,6 +119,7 @@ class P2PConfig:
     control_dir: str = '/var/lib/kvp2p/ctl'
     state_file: str = '/var/lib/kvp2p/state.json'
     kv_epoch: int = 1
+    zero_retention_marker: str = ''          # a node-level zero-retention marker file (node.env); '' = only the one beside the control directory
     # Additive knobs (not in the frozen kwarg; the defaults are the design's numbers).
     slot_objects: int = 128                  # cap on objects per staging slot (the digest op takes at most 128 blocks)
     shutdown_drain_s: float = 15.0           # section 2.9: the drain waits 15 s or less for in-flight bios
@@ -199,6 +200,8 @@ class ReqTag:
     has_mm: bool = False                 # the request carries multimodal features (never stored: D9)
     admitted: Optional[bool] = None      # the I12 verdict, decided once at the request's first store
     no_retry: bool = False               # a deadline or stall failed this request's load: its recompute must not look up again (I13)
+    num_prompt_tokens: Optional[int] = None   # the request's prompt length: the manager sizes the WHOLE boundary from it (I12); None = unknown
+    hit_tokens: int = 0                  # tokens already on the device or restored from this tier: a later turn stores only what lies beyond them
 
 
 # --------------------------------------------------------------------------------------------------------------------

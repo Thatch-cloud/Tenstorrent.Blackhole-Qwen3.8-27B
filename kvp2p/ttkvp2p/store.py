@@ -227,8 +227,10 @@ def _fallocate_punch(fd: int, offset: int, length: int) -> bool:
 class DriveFile:
     """A raw block device (O_DIRECT) or, for the CPU tests only, a regular file. Reads and writes are aligned.
 
-    The open takes the kernel's exclusive claim (``O_EXCL`` on a block device fails with EBUSY while anything else holds or mounts it)
-    and an advisory ``flock``, so a second engine in another container cannot use the same drive.
+    The open takes the kernel's exclusive claim (``O_EXCL`` on a block device fails with EBUSY while anything else holds or mounts it):
+    that is what keeps a second engine, in this container or another, off the drive. The advisory ``flock`` on top only excludes a second
+    opener of the SAME device node (the same inode): each container has its own ``/dev`` node for the drive, so it does not reach across
+    containers.
     """
 
     def __init__(self, path: str, *, allow_regular: bool = False, exclusive: bool = True, readonly: bool = False):

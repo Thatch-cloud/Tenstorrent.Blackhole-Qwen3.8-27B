@@ -7,9 +7,6 @@ import os
 import random
 import threading
 import unittest
-from types import SimpleNamespace
-
-import numpy as np
 
 import tier_kit
 from tier_kit import OBJ, TierCase
@@ -17,7 +14,7 @@ from tier_kit import OBJ, TierCase
 from ttkvp2p import health, runtime as runtime_module, store
 from ttkvp2p.runtime import (
     S_DRAINING, S_QUARANTINED, S_TRIM_WAIT, S_TRIMMING, S_USED, STATE_AVAILABLE, STATE_CLOSING, STATE_LATCHED,
-    STATE_UNAVAILABLE, KVP2PRuntime, SlotAllocator, StoreResultsMap, _Runs,
+    STATE_UNAVAILABLE, KVP2PRuntime, SlotAllocator, _Runs,
 )
 
 
@@ -232,47 +229,81 @@ def collections_counter():
     return collections.defaultdict(int)
 
 
-class StoreResultsIndex(unittest.TestCase):
-    def result(self, job, slots, gens, ok=True):
-        return SimpleNamespace(job_id=job, success=ok, slot_ids=tuple(slots), generations=tuple(gens),
-                               digests=np.arange(len(slots) * 4, dtype=np.uint64).reshape(-1, 4) + job * 1000 if ok else None)
+class AllocatorCostsNoScan(unittest.TestCase):
+    """B3 of the WP3a review: every release recounted all slots (np.bincount over 359,030 slots = 0.8 ms per call, 1.7 s for one 262k
+    session's 2,088 single releases, seconds for an eviction burst) on the engine thread. The counts are kept incrementally now."""
 
-    def test_pairing_is_an_index_lookup_by_slot_and_generation(self):
-        results = StoreResultsMap()
-        results[7] = self.result(7, [10, 11, 12], [1, 1, 3])
-        found, position = results.lookup(11, 1)
-        self.assertEqual((found.job_id, position), (7, 1))
-        self.assertIsNone(results.lookup(11, 2), 'another generation of the slot is another store')
-        self.assertIsNone(results.lookup(99, 1))
+    def test_no_operation_recounts_the_slot_table(self):
+        allocator = free_allocator(500)
+        calls = []
+        allocator._recount = lambda: calls.append(1)
+        slots = allocator.alloc(100)
+        allocator.release_many(slots[:40])
+        allocator.release(slots[40])
+        self.assertTrue(allocator.io_begin(slots[50:60], [allocator.generation(s) for s in slots[50:60]]))
+        allocator.release_many(slots[50:60])                       # draining
+        allocator.io_end(slots[50:60])
+        for run in allocator.take_trim_runs(10, 17):
+            allocator.trim_done(*run, True)
+        allocator.take_trim_runs(1, 5)
+        allocator.quarantine(slots[70])
+        for run in allocator.take_trim_runs(10, 17):
+            allocator.trim_done(*run, False)
+        self.assertEqual(calls, [], 'the incremental counts replace the O(slots) recount in every transition')
+        allocator._recount = SlotAllocator._recount.__get__(allocator)
+        self.assertEqual(allocator.recount(), [allocator.count(i) for i in range(6)] + [allocator.total_inflight()],
+                         'and they agree with a recount from the arrays')
 
-    def test_pop_clear_and_overwrite_keep_the_index_exact(self):
-        results = StoreResultsMap()
-        results[1] = self.result(1, [0, 1], [1, 1])
-        results[2] = self.result(2, [2], [1])
-        results.pop(1)
-        self.assertIsNone(results.lookup(0, 1))
-        self.assertIsNotNone(results.lookup(2, 1))
-        results[2] = self.result(2, [5], [4])
-        self.assertIsNone(results.lookup(2, 1))
-        self.assertIsNotNone(results.lookup(5, 4))
-        results.clear()
-        self.assertIsNone(results.lookup(5, 4))
-        self.assertEqual(len(results), 0)
+    def test_the_counts_stay_exact_through_a_random_workload(self):
+        rng = random.Random(77)
+        allocator = free_allocator(300)
+        used, bios, issued = set(), collections_counter(), []
+        for step in range(4000):
+            action = rng.random()
+            if action < 0.25:
+                got = allocator.alloc(rng.randint(1, 9))
+                if got:
+                    used.update(got)
+            elif action < 0.45 and used:
+                victims = rng.sample(sorted(used), min(len(used), rng.randint(1, 8)))
+                allocator.release_many(victims)
+                used.difference_update(victims)
+            elif action < 0.58 and used:
+                slot = rng.choice(sorted(used))
+                allocator.io_begin([slot], [allocator.generation(slot)])
+                bios[slot] += 1
+            elif action < 0.70:
+                busy = [s for s, c in bios.items() if c > 0]
+                if busy:
+                    slot = rng.choice(busy)
+                    allocator.io_end([slot])
+                    bios[slot] -= 1
+            elif action < 0.74 and used:
+                allocator.quarantine(rng.choice(sorted(used)))
+            elif action < 0.90:
+                issued.extend(allocator.take_trim_runs(rng.randint(1, 3), rng.randint(1, 15)))
+            elif issued:
+                allocator.trim_done(*issued.pop(rng.randrange(len(issued))), rng.random() < 0.95)
+            if step % 50 == 0:
+                before = allocator.recount()
+                self.assertEqual(before[:6], [allocator.count(i) for i in range(6)])
+                self.assertEqual(before, [allocator.count(i) for i in range(6)] + [allocator.total_inflight()], 'step %d' % step)
+        counts = list(allocator._counts) + [allocator._inflight_total]
+        self.assertEqual(allocator.recount(), counts)
 
-    def test_a_pruned_result_is_gone_from_the_index_too(self):
-        results = StoreResultsMap()
-        results[1] = self.result(1, [3], [1])
-        results.pop(1, None)
-        results.pop(1, None)
-        self.assertIsNone(results.lookup(3, 1))
-
-    def test_a_newer_store_of_the_same_slot_generation_wins_and_the_old_unindexing_does_not_remove_it(self):
-        results = StoreResultsMap()
-        results[1] = self.result(1, [3], [1])
-        results[2] = self.result(2, [3], [1])
-        results.pop(1)
-        found, _ = results.lookup(3, 1)
-        self.assertEqual(found.job_id, 2)
+    def test_a_batched_release_is_one_pass_and_a_single_release_does_not_scale_with_the_drive(self):
+        import time
+        small, big = free_allocator(1000), free_allocator(359_030)               # 1 TB of Gemma objects
+        timings = {}
+        for name, allocator in (('small', small), ('big', big)):
+            slots = allocator.alloc(900 if name == 'small' else 2088)
+            started = time.perf_counter()
+            for slot in slots:
+                allocator.release(slot)
+            timings[name] = (time.perf_counter() - started) / len(slots)
+        self.assertLess(timings['big'], 20 * timings['small'] + 5e-5,
+                        'a single release on a 359,030-slot drive costs %.1f us against %.1f us on 1,000 slots' % (timings['big'] * 1e6, timings['small'] * 1e6))
+        self.assertLess(timings['big'] * 2088, 0.25, 'one 262k session of single releases stalled the engine for 1.7 s before')
 
 
 class SharedRuntime(TierCase):
@@ -477,6 +508,17 @@ class HostChecks(TierCase):
         open(marker, 'w').close()
         self.refused('zero_retention')
 
+    def test_a_node_level_zero_retention_marker_named_in_the_config_refuses(self):
+        """Minor 10: the marker beside the control directory is this tier's own tree; the node operator names a node-wide one in node.env."""
+        self.tier()
+        node_marker = os.path.join(self.root, 'node-level-zero-retention')
+        self.cfg.zero_retention_marker = node_marker
+        self.assertTrue(self.open_runtime().host_ok, 'no marker, no refusal')
+        self.runtimes.pop().release('worker')
+        KVP2PRuntime.reset_registry()
+        open(node_marker, 'w').close()
+        self.refused('zero_retention')
+
     def test_zero_retention_off_values_do_not_refuse(self):
         self.tier(environ={'THATCH_ZERO_RETENTION': '0', 'THATCH_NO_LOG': '0'})
         self.assertTrue(self.open_runtime().host_ok)
@@ -507,6 +549,21 @@ class HostChecks(TierCase):
         self.tier()
         runtime_module.set_host_env(tier_kit.make_env(self.tree, self.clock, environ={'THATCH_KVP2P_TEST': '0'}))
         self.refused('device_absent')
+
+    def test_an_unexpected_exception_in_the_host_checks_is_reported_as_itself(self):
+        """Minor 12: it used to say `superblock_unknown`, which sends the operator to the wrong place."""
+        self.tier()
+        original = health.check_policy
+
+        def explode(cfg, env):
+            raise RuntimeError('a bug in the checks')
+
+        health.check_policy = explode
+        self.addCleanup(setattr, health, 'check_policy', original)
+        runtime = self.refused('host_check_error')
+        self.assertIn('RuntimeError', runtime.host_reason)
+        self.assertIn('host_check_error', health.UNAVAILABLE_CODES)
+        self.assertEqual(self.tree.read_state()['reason'], 'host_check_error')
 
     # --- the cache-drive status file
     def test_a_missing_status_file_means_at_rest_unverified(self):
@@ -656,7 +713,10 @@ class Latch(TierCase):
         self.assertEqual(runtime.state, STATE_LATCHED)
         self.assertEqual(runtime.latch_code, 'strikes')
         self.assertIn('consecutive', runtime.latch_reason)
-        self.assertEqual(dict(runtime.latched_total), {'strikes': 1})
+        self.assertEqual(list(runtime.latches), ['strikes', 'op_throw'], 'every code that tripped is remembered, in order')
+        self.assertEqual(dict(runtime.latched_total), {'strikes': 1, 'op_throw': 1})
+        runtime.latch('3 consecutive job failures (last: digest)')
+        self.assertEqual(dict(runtime.latched_total), {'strikes': 1, 'op_throw': 1}, 'a code that is already latched is not counted again')
         runtime.set_available()
         self.assertEqual(runtime.state, STATE_LATCHED, 'nothing but a control on revives a latch')
 
@@ -668,6 +728,57 @@ class Latch(TierCase):
                            ('bounds violation', 'bounds_violation'), ('the daily write cap', 'write_cap')):
             self.assertEqual(health.latch_code(text), code, text)
             self.assertIn(code, health.LATCH_CODES)
+
+    def test_clearing_the_kill_switch_does_not_clear_a_latch_that_tripped_while_it_was_in_force(self):
+        """Minor 6: only the first reason was kept, and `on` cleared the tier whatever else had tripped while `off` was in force."""
+        self.tier()
+        runtime = self.open_runtime()
+        self.tree.command(1, 'off')
+        self.clock.advance(2)
+        runtime.service()
+        self.assertEqual((runtime.state, runtime.latch_code), (STATE_LATCHED, 'control_off'))
+        runtime.latch('a device op threw')                       # trips while off is in force
+        runtime.latch('uncorrectable AER on the drive path')
+        self.assertEqual(list(runtime.latches), ['control_off', 'op_throw', 'aer_uncorrectable'])
+        self.tree.command(2, 'on')
+        self.clock.advance(2)
+        runtime.service()
+        self.assertEqual(runtime.state, STATE_LATCHED, 'op_throw and aer_uncorrectable are still active')
+        self.assertEqual(runtime.latch_code, 'op_throw', 'the oldest remaining latch is the one reported')
+        self.assertEqual(list(runtime.latches), ['op_throw', 'aer_uncorrectable'])
+        acks = runtime.snapshot(self.clock.now)['control']['acks']
+        self.assertIn('stays latched', acks[-1]['result'])
+        self.assertIn('op_throw', acks[-1]['result'])
+        self.assertEqual(self.tree.read_state()['state'], 'LATCHED')
+        runtime.set_available()
+        self.assertEqual(runtime.state, STATE_LATCHED)
+
+    def test_off_on_off_again_latches_again(self):
+        self.tier()
+        runtime = self.open_runtime()
+        for seq, verb in ((1, 'off'), (2, 'on'), (3, 'off')):
+            self.tree.command(seq, verb)
+            self.clock.advance(2)
+            runtime.service()
+        self.assertEqual(runtime.state, STATE_LATCHED)
+        self.assertEqual(runtime.latched_total['control_off'], 2)
+
+    def test_the_device_lost_errnos_of_the_standard_all_latch(self):
+        import errno
+        for number in (errno.ENODEV, errno.ENXIO, errno.ESHUTDOWN, errno.ENOMEDIUM):
+            self.setUp()
+            self.tier(num_slots=8)
+            original = store.DriveFile.discard
+
+            def gone(drive, offset, length, number=number):
+                raise OSError(number, os.strerror(number))
+
+            store.DriveFile.discard = gone
+            self.addCleanup(setattr, store.DriveFile, 'discard', original)
+            runtime = self.open_runtime(settle=False)
+            runtime.settle(2.0)
+            self.assertEqual((runtime.state, runtime.latch_code), (STATE_LATCHED, 'device_lost'), os.strerror(number))
+            store.DriveFile.discard = original
 
     def test_a_latch_on_a_closing_runtime_is_ignored(self):
         self.tier()
@@ -940,6 +1051,67 @@ class StateFile(TierCase):
         counters = self.tree.read_state()['counters']
         self.assertEqual(counters['failures'], {'eio': 2, 'deadline': 1})
         self.assertEqual(counters['stores'], 5)
+
+    def test_every_state_change_is_written_at_once_not_at_the_next_pass(self):
+        """Minor 4: after start-up the file said UNAVAILABLE until a schedule() pass at least 10 s later (or for ever on an idle engine)."""
+        self.tier()
+        runtime = KVP2PRuntime.acquire(self.cfg, 'worker')
+        self.runtimes.append(runtime)
+        self.assertEqual(self.tree.read_state()['state'], 'UNAVAILABLE', 'opened, not yet available')
+        runtime.settle(5.0)
+        runtime.set_available()                                   # no service(), no schedule pass, no clock movement
+        self.assertEqual(self.tree.read_state()['state'], 'AVAILABLE')
+        runtime.latch('3 consecutive job failures (last: eio)')
+        state = self.tree.read_state()
+        self.assertEqual((state['state'], state['reason']), ('LATCHED', 'strikes'))
+        self.tree.command(1, 'off')
+        self.clock.advance(2)
+        runtime.service()
+        self.assertEqual(self.tree.read_state()['latches'], ['strikes', 'control_off'])
+        runtime.release('worker')
+        self.assertEqual(self.tree.read_state()['state'], 'CLOSING')
+
+    def test_the_closed_reason_is_the_only_label_safe_reason(self):
+        """`reason` is from the closed vocabulary (or null); `latch_reason` and `host_reason` are free text for people."""
+        self.tier()
+        runtime = self.open_runtime()
+        runtime.write_state(self.clock.now, force=True)
+        self.assertIsNone(self.tree.read_state()['reason'], 'AVAILABLE has no reason')
+        runtime.latch('internal error: a free text that varies: eio at 0x1f2e')
+        state = self.tree.read_state()
+        self.assertEqual(state['reason'], 'op_throw')
+        self.assertIn(state['reason'], health.LATCH_CODES)
+        self.assertIn('0x1f2e', state['latch_reason'])
+
+    def test_a_refused_start_names_a_closed_code_as_the_reason(self):
+        for change, code in (({'retention_ack': False}, 'retention_ack_missing'), ({'ttl_s': 86401}, 'ttl_over_floor')):
+            self.setUp()
+            self.tier(**change)
+            self.open_runtime()
+            state = self.tree.read_state()
+            self.assertEqual((state['state'], state['reason'], state['host_code']), ('UNAVAILABLE', code, code))
+            self.assertIn(code, health.REFUSED_CODES + health.UNAVAILABLE_CODES)
+
+    def test_the_key_names_of_the_state_file_are_frozen(self):
+        """The renderer, the gate harness and the post-checks read these names; a rename is a break. Additions are allowed (the test lists the
+        required ones), removals and renames are not."""
+        self.tier(environ={'THATCH_KVTIER_SPAWN_ID': 'spawn-1'})
+        runtime = self.open_runtime()
+        runtime.write_state(self.clock.now, force=True)
+        state = self.tree.read_state()
+        top = {'schema', 'spawn_id', 'written_at', 'state', 'reason', 'latch_reason', 'latch_code', 'latches', 'host_ok', 'host_code', 'host_reason',
+               'persistence', 'layout', 'kv_epoch', 'engine_heartbeat', 'counters', 'bytes_written_today', 'write_cap_bytes', 'capacity', 'restore',
+               'drive', 'control'}
+        self.assertLessEqual(top, set(state), 'a top-level key was removed or renamed')
+        counters = {'hits', 'misses', 'lookups', 'loads', 'stores', 'store_admitted_objects', 'store_dropped', 'admission_size_unknown', 'admission_overrun',
+                    'store_completion_stale', 'store_completion_invalid', 'store_completion_unmatched', 'evictions', 'failures', 'latched',
+                    'trim_runs', 'trim_failed', 'bad_marked'}
+        self.assertLessEqual(counters, set(state['counters']))
+        self.assertLessEqual({'slots', 'object_bytes', 'entries', 'capacity_slots', 'slot_states', 'warming'}, set(state['capacity']))
+        self.assertLessEqual({'count', 'p50_s', 'p99_s'}, set(state['restore']))
+        self.assertLessEqual({'state', 'link_gts', 'aer_uncorrectable', 'aer_correctable', 'status_age_s'}, set(state['drive']))
+        self.assertLessEqual({'acks', 'last_edge_seq'}, set(state['control']))
+        self.assertEqual(state['schema'], 1)
 
     def test_a_latched_state_file_names_the_reason_and_code(self):
         self.tier()

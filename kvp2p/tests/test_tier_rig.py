@@ -15,18 +15,34 @@ import tier_kit
 from harness import BLOCK, Rig, tokens
 from tier_kit import OBJ, RealTier
 
+from ttkvp2p.manager import estimate_objects
+
 from ttkvp2p.runtime import S_USED, STATE_AVAILABLE, STATE_LATCHED
 
 PROMPT = 2300                                # 17 full blocks + 5 sliding groups x 8 = 57 objects
 OBJECTS = PROMPT // BLOCK + 5 * 8
 
 
+class Recording(dict):
+    """A ``store_results`` that remembers every result the worker leaves in it (the connector's scheduler role consumes them, amendment A1)."""
+
+    def __init__(self):
+        super().__init__()
+        self.seen = []
+
+    def __setitem__(self, job_id, result):
+        self.seen.append(result)
+        super().__setitem__(job_id, result)
+
+
 class RealTierCase(unittest.TestCase):
-    def rig(self, tier_extra=None, **kwargs) -> Rig:
+    def rig(self, tier_extra=None, record=False, **kwargs) -> Rig:
         tier = RealTier(**(tier_extra or {}))
         rig = Rig(real_tier=tier, **kwargs)
         rig.tier = tier
         self.addCleanup(rig.close)
+        if record:
+            rig.runtime.store_results = Recording()
         return rig
 
     # --- accessors for the real manager
@@ -44,7 +60,7 @@ class RealTierCase(unittest.TestCase):
         return checked
 
     def stored_rig(self, name='p', **kwargs):
-        rig = self.rig(**kwargs)
+        rig = self.rig(record=True, **kwargs)
         prompt = tokens(PROMPT, name)
         rig.add('seed', prompt)
         rig.drain()
@@ -67,14 +83,22 @@ class RoundTrip(RealTierCase):
         self.assertEqual(rig.runtime.allocator.total_inflight(), 0)
 
     def test_the_digests_the_manager_hands_the_worker_are_the_stores_source_digests(self):
+        """The worker's result row for a slot is the digest of the bytes that were written to it; the connector hands row i to keys[i]; the
+        manager keeps it on the key's entry. The two must agree for every written key, and the connector must have consumed every result."""
         rig, prompt = self.stored_rig()
+        by_slot = {}
+        for result in rig.runtime.store_results.seen:
+            self.assertTrue(result.success)
+            for position, slot in enumerate(result.slot_ids):
+                by_slot[(slot, result.generations[position])] = np.asarray(result.digests[position], dtype=np.uint64)
+        checked = 0
         for key in self.written_keys(rig):
             slot = rig.manager.index[key]
-            found = rig.runtime.store_results.lookup(slot, rig.runtime.allocator.generation(slot))
-            self.assertIsNotNone(found, 'the worker left a result for every stored slot')
-            result, position = found
-            self.assertTrue(np.array_equal(rig.manager._digest[slot], np.asarray(result.digests[position], dtype=np.uint64)))
-            break
+            row = by_slot[(slot, rig.runtime.allocator.generation(slot))]
+            self.assertTrue(np.array_equal(rig.manager._digest[slot], row), 'the entry of slot %d carries another object\'s digest' % slot)
+            checked += 1
+        self.assertEqual(checked, OBJECTS)
+        self.assertEqual(dict(rig.runtime.store_results), {}, 'the connector\'s scheduler role consumed every result')
 
     def test_the_same_round_trip_under_async_scheduling_with_two_batches_in_flight(self):
         rig, prompt = self.stored_rig(async_scheduling=True)
@@ -111,12 +135,56 @@ class RoundTrip(RealTierCase):
         self.assertGreaterEqual(state['restore']['count'], 1)
 
 
+class SlotPermutingAllocator(RealTierCase):
+    """README gate I6, through vLLM's real scheduler and the connector's seam: the allocator hands the slots of one job out in a scrambled
+    order. Row i of the digests still belongs to key i, the store lands where the manager's own map says, and the restore verifies."""
+
+    def scramble(self, rig):
+        real = rig.runtime.allocator.alloc
+        calls = []
+
+        def scrambled(count):
+            slots = real(count)
+            if slots is None:
+                return None
+            calls.append(count)
+            half = len(slots) // 2
+            return slots[half:][::-1] + slots[:half]
+
+        rig.runtime.allocator.alloc = scrambled
+        return calls
+
+    def test_a_session_survives_an_allocator_that_scrambles_the_slots_of_every_job(self):
+        rig = self.rig(record=True, max_batched=1024)                  # 3 prefill chunks: several jobs
+        calls = self.scramble(rig)
+        prompt = tokens(PROMPT, 'p')
+        rig.add('seed', prompt)
+        rig.drain()
+        self.assertGreater(len(calls), 1)
+        self.assertEqual(rig.manager.written(), OBJECTS)
+        slots = [rig.manager.index[k] for k in self.written_keys(rig)]
+        self.assertNotEqual(slots, sorted(slots), 'the slots really are out of order against the keys')
+        self.assertEqual(self.assert_drive_exact(rig), OBJECTS, 'every slot holds the object its key names')
+        rig.reset_device_cache()
+        rig.add('r2', prompt)
+        rig.finish('r2')
+        self.assertEqual(rig.worker.stats['done_load'], 1)
+        self.assertEqual(rig.worker.stats.get('fail_digest', 0), 0, 'no digest of one key was attached to another key\'s entry')
+        by_slot = {}
+        for result in rig.runtime.store_results.seen:
+            for position, slot in enumerate(result.slot_ids):
+                by_slot[(slot, result.generations[position])] = np.asarray(result.digests[position], dtype=np.uint64)
+        for key in self.written_keys(rig):
+            slot = rig.manager.index[key]
+            self.assertTrue(np.array_equal(rig.manager._digest[slot], by_slot[(slot, rig.runtime.allocator.generation(slot))]))
+
+
 class FailedStores(RealTierCase):
     """The seam of the failed store: vLLM's stock update_connector_output calls complete_store(keys, ctx) with no success flag and no job id.
     The manager finds the job's own result by (slot, generation) and drops the keys of a failed job."""
 
     def test_a_failed_store_job_leaves_no_entry_that_a_lookup_can_reach(self):
-        rig = self.rig()
+        rig = self.rig(record=True)
         rig.io.write_errors.append(OSError(errno.EIO, 'media error'))
         rig.add('r1', tokens(PROMPT, 'x'))
         rig.drain()
@@ -125,11 +193,11 @@ class FailedStores(RealTierCase):
         self.assertGreater(mgr.evictions['store_failed'], 0, 'the failed job\'s entries were dropped')
         states = {mgr.entry_state(k) for k in mgr.index}
         self.assertEqual(states, {'written'} if mgr.index else set(), 'no entry is left half-written or in flight')
-        failed = [r for r in rig.runtime.store_results.values() if not r.success]
+        failed = [r for r in rig.runtime.store_results.seen if not r.success]
         self.assertEqual(len(failed), 1)
         for slot, generation in zip(failed[0].slot_ids, failed[0].generations):
-            self.assertNotEqual(rig.runtime.allocator.state_name(slot), 'used' if slot not in mgr.index.values() else 'x')
             self.assertNotIn(slot, mgr.index.values(), 'the failed job\'s slot is not named by the index')
+            self.assertNotEqual(rig.runtime.allocator.state_name(slot), 'used', 'and it is on its way back through TRIM')
         self.assertEqual(self.assert_drive_exact(rig), mgr.written())
 
     def test_after_a_failed_store_the_same_prompt_is_computed_not_restored_from_garbage(self):
@@ -290,25 +358,19 @@ class TtlAndControl(RealTierCase):
 
 
 class AllOrNothingInTheRealScheduler(RealTierCase):
-    """I12 with the real scheduler: the connector scheduler's tag carries the prompt size (the WP4 change this report asks for) and the
-    manager knows the KV groups; a request whose whole boundary does not fit stores NOTHING."""
+    """I12 with the real scheduler and NOTHING patched in: the connector's scheduler role tags every request with its prompt size and binds
+    the real KV groups to the manager, so a request whose whole boundary does not fit stores NOTHING (not a prefix of its prompt)."""
 
-    def rig_with_prompt_sizes(self, **kwargs):
-        rig = self.rig(**kwargs)
-        scheduler = rig.connector_scheduler
-        original = scheduler.on_new_request
-
-        def tagged(request):
-            original(request)
-            tier_kit.ReqTag
-            scheduler._req_status[request.request_id].req_context.get_state(tier_kit.ReqTag).num_prompt_tokens = request.num_prompt_tokens
-
-        scheduler.on_new_request = tagged
-        rig.manager.bind_groups((None, 8, 8, 8, 8, 8))
-        return rig
+    def test_the_connector_gives_the_manager_the_real_groups_and_every_request_its_size(self):
+        rig = self.rig(num_slots=100, max_batched=1024)
+        self.assertEqual(rig.manager.groups, (None, 8, 8, 8, 8, 8), 'the groups come from the offloading config of the engine')
+        self.assertEqual(rig.manager.tokens_per_object, 128)
+        rig.add('a', tokens(PROMPT, 'a'))
+        tag = rig.connector_scheduler._req_status['a'].req_context.get_state(tier_kit.ReqTag)
+        self.assertEqual(tag.num_prompt_tokens, PROMPT)
 
     def test_a_boundary_that_does_not_fit_stores_not_even_its_first_chunk(self):
-        rig = self.rig_with_prompt_sizes(num_slots=100, max_batched=1024)       # 2300 tokens prefill in 3 chunks
+        rig = self.rig(num_slots=100, max_batched=1024)              # 2300 tokens prefill in 3 chunks
         rig.add('a', tokens(PROMPT, 'a'))
         rig.add('b', tokens(PROMPT, 'b'))
         rig.drain()
@@ -317,25 +379,94 @@ class AllOrNothingInTheRealScheduler(RealTierCase):
         self.assertEqual(mgr.written(), OBJECTS, 'and exactly one: the other request wrote nothing, not even a prefix of its prompt')
         self.assertEqual(mgr.dropped['no_slot'] + mgr.dropped['capacity'], 1)
         self.assertGreaterEqual(mgr.dropped['denied'], 1, 'its later chunks were dropped on the cached verdict')
+        self.assertEqual(mgr.admission_size_unknown, 0)
         self.assertEqual(self.assert_drive_exact(rig), OBJECTS)
         self.assertEqual(rig.runtime.allocator.count(S_USED), OBJECTS)
 
     def test_both_fit_when_the_drive_has_room(self):
-        rig = self.rig_with_prompt_sizes(num_slots=200, max_batched=1024)
+        rig = self.rig(num_slots=200, max_batched=1024)
         rig.add('a', tokens(PROMPT, 'a'))
         rig.add('b', tokens(PROMPT, 'b'))
         rig.drain()
         self.assertEqual(rig.manager.written(), 2 * OBJECTS)
         self.assertEqual(rig.manager.snapshot()['reserved_slots'], 0)
+        self.assertEqual(rig.manager.admission_overrun, 0, 'the estimate was not short')
 
     def test_the_daily_cap_denies_a_whole_boundary(self):
-        rig = self.rig_with_prompt_sizes(num_slots=200, max_batched=1024, tier_extra={'daily_write_cap_bytes': 100 * OBJ})
+        rig = self.rig(num_slots=200, max_batched=1024, tier_extra={'daily_write_cap_bytes': 100 * OBJ})
         rig.add('a', tokens(PROMPT, 'a'))
         rig.add('b', tokens(PROMPT, 'b'))
         rig.drain()
         self.assertEqual(rig.manager.written(), OBJECTS)
         self.assertEqual(rig.manager.dropped['cap'], 1)
         self.assertEqual(rig.manager.snapshot()['bytes_written_today'], OBJECTS * OBJ)
+
+    def test_every_chunk_of_a_denied_request_is_dropped_and_none_is_judged_alone(self):
+        """No call of the integrated system is judged per call: with the drive too small for ANY boundary, a request stores nothing at all."""
+        rig = self.rig(num_slots=40, max_batched=1024)
+        rig.add('a', tokens(PROMPT, 'a'))
+        rig.drain()
+        self.assertEqual(rig.manager.written(), 0)
+        self.assertEqual(rig.manager.entries, 0)
+        self.assertEqual(rig.runtime.allocator.count(S_USED), 0)
+        self.assertEqual(rig.manager.admission_size_unknown, 0)
+        self.assertEqual(sum(rig.manager.dropped.values()) - rig.manager.dropped['denied'], 1, 'one verdict, then the cached refusal')
+
+    def test_the_estimate_covers_what_the_real_scheduler_stores_for_prompts_of_every_alignment(self):
+        """The reservation is an upper bound of the boundary the real scheduler offers: no length overruns it (an overrun is judged chunk by
+        chunk, which is what I12 forbids), and the reservation is sharp where the prompt is long enough to fill the windows."""
+        for prompt in (127, 128, 129, 640, 1000, 1024, 1025, 1152, 1536, 2300, 3000, 5000):
+            rig = self.rig(num_slots=400, max_batched=1024)
+            rig.add('a', tokens(prompt, 'p%d' % prompt))
+            rig.drain()
+            mgr = rig.manager
+            expected = estimate_objects(prompt, (None, 8, 8, 8, 8, 8))
+            self.assertEqual(mgr.admission_overrun, 0, 'prompt of %d tokens stored more than its reservation' % prompt)
+            self.assertLessEqual(mgr.written(), expected, 'prompt of %d tokens' % prompt)
+            if prompt >= 1280:
+                self.assertEqual(mgr.written(), expected, 'prompt of %d tokens: the estimate is exact once the windows are full' % prompt)
+            self.assertEqual(mgr.snapshot()['reserved_slots'], 0)
+            rig.close()
+
+    def test_a_later_turn_reserves_only_what_lies_beyond_its_prefix(self):
+        """Minor 11: a later turn of a long conversation stores little; it must not be refused (or charged to the daily cap) as if it were new."""
+        rig = self.rig(num_slots=200, max_batched=1024)
+        mgr = rig.manager
+        first = tokens(PROMPT, 'conversation')
+        rig.add('t1', first)
+        rig.drain()
+        self.assertEqual(mgr.admitted_objects, OBJECTS)
+        rig.reset_device_cache()                                       # the device forgot the conversation; the tier did not
+        second = first + tokens(600, 'next turn')
+        rig.add('t2', second)
+        tag = rig.connector_scheduler._req_status['t2'].req_context.get_state(tier_kit.ReqTag)
+        rig.finish('t2')
+        rig.drain()
+        self.assertGreaterEqual(tag.hit_tokens, 17 * 128, 'the connector noted how much of the prompt the tier restored')
+        reserved = mgr.admitted_objects - OBJECTS
+        self.assertEqual(reserved, estimate_objects(len(second), (None, 8, 8, 8, 8, 8), 128, tag.hit_tokens))
+        self.assertLess(reserved, estimate_objects(len(second), (None, 8, 8, 8, 8, 8)), 'sized as a new conversation it would reserve more')
+        self.assertEqual(mgr.admission_overrun, 0, 'and the turn stored no more than that')
+        self.assertEqual(mgr.snapshot()['reserved_slots'], 0)
+        self.assertEqual(self.assert_drive_exact(rig), mgr.written())
+
+    def test_a_request_without_its_size_is_refused_whole_and_counted(self):
+        rig = self.rig(num_slots=200, max_batched=1024)
+        original = rig.connector_scheduler.on_new_request
+
+        def unsized(request):
+            original(request)
+            rig.connector_scheduler._req_status[request.request_id].req_context.get_state(tier_kit.ReqTag).num_prompt_tokens = None
+
+        rig.connector_scheduler.on_new_request = unsized
+        rig.add('a', tokens(PROMPT, 'a'))
+        rig.drain()
+        mgr = rig.manager
+        self.assertEqual(mgr.written(), 0, 'a request of unknown size is not stored chunk by chunk')
+        self.assertEqual(mgr.dropped['size_unknown'], 1)
+        self.assertEqual(mgr.admission_size_unknown, 1)
+        rig.runtime.write_state(rig.tier.clock.now, force=True)
+        self.assertEqual(rig.tier.tree.read_state()['counters']['admission_size_unknown'], 1, 'the degraded mode is visible in the state file')
 
 
 class Shutdown(RealTierCase):
