@@ -21,6 +21,7 @@ ROW = card.BLOCK_BYTES
 SHARD = card.SHARD
 STAGING_MIB = 8
 BLOCKS = 40
+WINDOW_TOP = card.WINDOW_TOP
 
 
 class Refused(ValueError):
@@ -94,6 +95,7 @@ class FakeTTNN(object):
         self.staging = []
         self.tracing = False
         self.trace_log = []                          # 'begin' / 'end' / 'release', in order
+        self.mesh_calls = []                         # when qwen_p2p_mesh_devices was called: before or after a staging buffer exists
         self.adds = 0
 
     # --- the trace API of ttnn, and the one ordinary op the check puts into a capture
@@ -152,11 +154,7 @@ class FakeTTNN(object):
         self.staging.append(staging)
         return staging
 
-    def qwen_p2p_staging_info(self, staging):
-        address = 1048576 + 192 + (7 if self.knobs.get('misaligned') else 0)
-        lead = (4096 - address % 4096) % 4096
-        banks = [dict(bank=b, noc_x=17 + b // 4, noc_y=12 + 3 * (b % 4), noc_endpoints=[[17 + b // 4, 12 + 3 * (b % 4) + p] for p in range(3)], bank_offset=0,
-                      address=address) for b in range(8 - (1 if self.knobs.get('short_banks') else 0))]
+    def _device_records(self):
         coordinate = (lambda d: [0, d]) if self.knobs.get('wrong_coords') else (lambda d: [d, 0])       # the production mesh is (devices, 1)
         # the tt-kmd device number is NOT the logical chip id (the mock cluster says chip 0 is device 1): the fake permutes it too
         devices = [dict(mesh_coord=coordinate(d), mesh_index=d, device_id=d, mmio_chip_id=d, pcie_device=(d + 1) % self.devices, pci_bus_id='0000:%02x:00.0' % (0x10 + d),
@@ -167,6 +165,28 @@ class FakeTTNN(object):
             devices[1].update(pcie_device=None)
         if self.knobs.get('pci_disagree'):
             devices[3].update(pci_bus_id_sysfs='0000:%02x:00.0' % (0x20 + 3), pci_bus_id_agrees=False)
+        return devices
+
+    def qwen_p2p_mesh_devices(self, mesh):
+        """The shard map without a staging allocation (INTERFACE A3): one record per device in mesh order, the very records staging_info()['devices'] carries."""
+        self.mesh_calls.append('after the allocation' if self.staging else 'before the allocation')
+        if self.knobs.get('mesh_devices_raises'):
+            raise Refused('qwen_p2p_mesh_devices: the mesh is closed')
+        devices = self._device_records()
+        if self.knobs.get('mesh_map_differs'):
+            devices[2].update(pci_bus_id='0000:%02x:00.0' % 0x77, pci_bus_id_sysfs='0000:%02x:00.0' % 0x77)       # another card in slot 2 than the allocation later reports
+        if self.knobs.get('mesh_map_reordered'):
+            devices[0], devices[1] = devices[1], devices[0]
+        return devices
+
+    def qwen_p2p_staging_info(self, staging):
+        address = 1048576 + 192 + (7 if self.knobs.get('misaligned') else 0)
+        if self.knobs.get('high_address'):
+            address = WINDOW_TOP - (2 << 20) + 192             # 2 MiB below the top of the window: the slot of a bank of 8 MiB reaches into the top 16 MiB
+        lead = (4096 - address % 4096) % 4096
+        banks = [dict(bank=b, noc_x=17 + b // 4, noc_y=12 + 3 * (b % 4), noc_endpoints=[[17 + b // 4, 12 + 3 * (b % 4) + p] for p in range(3)], bank_offset=0,
+                      address=address) for b in range(8 - (1 if self.knobs.get('short_banks') else 0))]
+        devices = self._device_records()
         if self.knobs.get('short_info'):
             devices = devices[:-1]
         return dict(address=address, size=staging.size_bytes, page_bytes=staging.page_bytes, aligned_4k_offset=lead, aligned_4k_address=address + lead,
@@ -298,7 +318,7 @@ class FakeTTNN(object):
 
 def run(**knobs):
     ttnn = FakeTTNN(**knobs)
-    return ttnn, card.run(ttnn, FakeMesh(), DEVICES, blocks=BLOCKS, staging_mib=STAGING_MIB)
+    return ttnn, card.run(ttnn, FakeMesh(), DEVICES, blocks=BLOCKS, staging_mib=STAGING_MIB, host_checks=True)
 
 
 class CardCheckOnTheFakeTests(unittest.TestCase):
@@ -364,6 +384,10 @@ class CardCheckOnTheFakeTests(unittest.TestCase):
             'wrong_coords': 'mesh coordinates',
             'trace_other_reason': 'but not because of the trace',
             'trace_wrong_type': 'trace capture: gather raised RuntimeError, not QwenP2PRefused',
+            'mesh_map_differs': 'differs from staging_info()["devices"] at device 2',
+            'mesh_map_reordered': 'differs from staging_info()["devices"] at device 0',
+            'mesh_devices_raises': 'qwen_p2p_mesh_devices raised Refused',
+            'high_address': 'inside the top 16 MiB of the window',
         }
         for knob, text in mistakes.items():
             with self.subTest(mistake=knob):
@@ -463,6 +487,69 @@ class CardCheckOnTheFakeTests(unittest.TestCase):
         finally:
             old.__class__.qwen_blocks_to_staging = _GATHER
         self.assertEqual((report['ok'], report['status'], report['missing']), (False, 'absent', ['qwen_blocks_to_staging']))
+
+    def test_the_shard_map_before_the_allocation_equals_the_devices_of_the_info(self):
+        ttnn, report = run()
+        self.assertTrue(report['ok'], report['problems'])
+        mesh_map = report['mesh_map']
+        self.assertTrue(mesh_map['checked'] and mesh_map['equal'] and mesh_map['devices'] == DEVICES, mesh_map)
+        self.assertEqual(mesh_map['pcie_devices'], [1, 2, 3, 0])
+        self.assertEqual(mesh_map['pci_bus_ids'], ['0000:%02x:00.0' % (0x10 + d) for d in range(DEVICES)])
+        self.assertEqual(ttnn.mesh_calls, ['before the allocation'], 'the binding is called once, before the staging buffer exists (the registry is built before anything is allocated)')
+
+    def test_the_window_top_table_has_one_row_per_bank_and_the_tiers_slot(self):
+        _, report = run()
+        top = report['window_top']
+        self.assertEqual(top['window_top'], 0xFF000000)
+        self.assertEqual(len(top['banks']), 8)
+        self.assertTrue(top['ok'])
+        lead = report['staging']['aligned_4k_offset']
+        usable = (STAGING_MIB << 20) - lead
+        usable -= usable % 4096
+        self.assertEqual(top['slot_objects'], min(128, (usable - card.CANARY) // card.SHARD), 'the tier asks for 128 objects and takes what a bank holds')
+        for row in top['banks']:
+            self.assertEqual(row['slot_end'], row['address'] + lead + card.CANARY + top['slot_objects'] * card.SHARD)
+            self.assertEqual(row['headroom'], 0xFF000000 - row['slot_end'])
+            self.assertGreater(row['headroom'], 0)
+        self.assertEqual(top['min_headroom_bytes'], min(row['headroom'] for row in top['banks']))
+        text = card.window_top_table(report)
+        self.assertEqual(len(text.splitlines()), 9)
+        self.assertIn('window top 0xff000000', text)
+        self.assertIn('bank 7', text)
+
+    def test_a_slot_that_reaches_the_top_16_mib_fails_with_host_checks_and_is_only_reported_without(self):
+        ttnn = FakeTTNN(high_address=1)
+        report = card.run(ttnn, FakeMesh(), DEVICES, blocks=BLOCKS, staging_mib=STAGING_MIB, host_checks=True)
+        self.assertFalse(report['ok'])
+        self.assertFalse(report['window_top']['ok'])
+        self.assertLess(report['window_top']['min_headroom_bytes'], 0)
+        self.assertEqual(len([p for p in report['problems'] if 'top 16 MiB' in p]), 8, 'every bank is named')
+        quiet = card.run(FakeTTNN(high_address=1), FakeMesh(), DEVICES, blocks=BLOCKS, staging_mib=STAGING_MIB)
+        self.assertTrue(quiet['ok'], quiet['problems'])
+        self.assertFalse(quiet['window_top']['ok'], 'still measured and reported when the older probe calls run()')
+
+    def test_without_host_checks_a_missing_or_disagreeing_shard_map_is_reported_not_enforced(self):
+        report = card.run(FakeTTNN(mesh_map_differs=1), FakeMesh(), DEVICES, blocks=BLOCKS, staging_mib=STAGING_MIB)
+        self.assertTrue(report['ok'], report['problems'])
+        self.assertFalse(report['mesh_map']['equal'])
+        self.assertIn('not enforced', report['mesh_map']['note'])
+        saved = FakeTTNN.qwen_p2p_mesh_devices
+        del FakeTTNN.qwen_p2p_mesh_devices
+        try:
+            report = card.run(FakeTTNN(), FakeMesh(), DEVICES, blocks=BLOCKS, staging_mib=STAGING_MIB)
+            self.assertTrue(report['ok'], report['problems'])
+            self.assertFalse(report['mesh_map']['checked'])
+            report = card.run(FakeTTNN(), FakeMesh(), DEVICES, blocks=BLOCKS, staging_mib=STAGING_MIB, host_checks=True)
+        finally:
+            FakeTTNN.qwen_p2p_mesh_devices = saved
+        self.assertEqual((report['ok'], report['status'], report['missing']), (False, 'absent', ['qwen_p2p_mesh_devices']), 'with host_checks the binding is required (INTERFACE A3)')
+
+    def test_the_main_program_turns_the_host_checks_on_and_prints_the_bank_table_to_stderr(self):
+        with open(os.path.join(HERE, 'p2p_staging_card.py'), encoding='utf-8') as handle:
+            text = handle.read()
+        self.assertIn('host_checks=True', text)
+        self.assertIn('file=sys.stderr', text)
+        self.assertIn("HOST_NAMES = ('qwen_p2p_mesh_devices',)", text)
 
     def test_the_formula_mirror_is_the_probe_formula(self):
         self.assertEqual([card.formula_endpoint(b) for b in range(8)], [(17, 12), (17, 15), (17, 18), (17, 21), (18, 12), (18, 15), (18, 18), (18, 21)])

@@ -95,7 +95,7 @@ not; a test pins them):
 
 It reads the control directory (`control_dir`): `NNNN-off|on|wipe|delete_tenant|fault|selftest`; `off` and `on` are levels (the highest number
 wins; `on` clears an `off` and nothing else, so a latch that tripped while `off` was in force stays), the rest apply once per process, and
-`fault` and `selftest` need `THATCH_KVP2P_TEST=1`. `delete_tenant` is v1b and is acknowledged as unsupported.
+`fault` and `selftest` need `THATCH_KVP2P_TEST=1`. `delete_tenant` is v1b and `selftest` has no implementation (the byte-exact check of the device ops is the card check, `p2p_staging_card.py`); both are acknowledged as unsupported.
 
 **What it needs from the connector side** (all of it is in `connector.py`): `ReqTag.num_prompt_tokens`, set in `on_new_request`; the KV groups
 (sliding window in objects, `None` = full attention) bound in the scheduler role's constructor from `config.kv_group_configs`; and, for every

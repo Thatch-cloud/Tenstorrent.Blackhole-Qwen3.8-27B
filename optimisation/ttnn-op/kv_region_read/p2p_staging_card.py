@@ -29,7 +29,10 @@ What it settles, per device and with different bytes on every device and every t
   * a REAL trace capture (begin_trace_capture on CQ0, one small op so that the trace is not empty): every op that enqueues, and the allocation, raises QwenP2PRefused naming
     the trace; the capture ends and is released; the next valid digest and gather are byte-exact;
   * the refusals (bad bank, offset, stride, ids, counts) raise QwenP2PRefused before anything is enqueued, and the next valid call is unaffected;
-  * the cost: enqueue time and completion time of a slot of 96 objects, gather, scatter and digest, and the effective GB/s per card.
+  * the cost: enqueue time and completion time of a slot of 96 objects, gather, scatter and digest, and the effective GB/s per card;
+  * the host's start-up facts (the command-line program runs these with host_checks=True): the shard map the host builds BEFORE anything is allocated
+    (qwen_p2p_mesh_devices) equals the devices of staging_info() record by record, and every bank's slot (canary page plus the tier's 128 objects, or the whole
+    range when it holds fewer) ends below the top 16 MiB of the 4 GiB window (0xFF000000), which is not DRAM: the table is printed per bank to stderr.
 
 Prints one JSON object and exits 1 on any mismatch.
 """
@@ -52,6 +55,9 @@ P2P_NAMES = ('qwen_p2p_staging_alloc', 'qwen_p2p_staging_info', 'qwen_blocks_to_
 RAW_NAMES = ('qwen_block_bytes', 'qwen_read_blocks_raw', 'qwen_write_blocks_raw')
 POLL_LIMIT_S = 30.0
 DEFAULT_BLOCKS = 256                     # blocks of each scratch cache (see the memory note above)
+HOST_NAMES = ('qwen_p2p_mesh_devices',)  # what the host's shard map needs (INTERFACE A3); required only with host_checks
+WINDOW_TOP = 0xFF000000                  # the top 16 MiB of a 4 GiB TLB window is not DRAM
+TIER_SLOT_OBJECTS = 128                  # objects per staging slot the tier asks for (P2PConfig.slot_objects), capped by what a bank holds
 
 
 def _ref():
@@ -169,15 +175,79 @@ def check_info(info, devices, staging_bytes, report, problems, dims=None):
         report['staging']['note'] = 'the probe formula names an endpoint tt-metal does not list for some bank: aim the window at noc_x/noc_y from info'
 
 
-def run(ttnn, mesh, devices, blocks=DEFAULT_BLOCKS, staging_mib=8, banks_to_test=None, **version_3_arguments):
+def check_mesh_map(before, listed, report, problems, enforce):
+    """The registry's shard map is read from qwen_p2p_mesh_devices BEFORE the staging allocation; the host then cross-checks it with the devices of staging_info()
+    after it and refuses a disagreement. They come from one function, so they must be equal record by record: the same cards, in the same mesh order."""
+    if before is None:
+        report['mesh_map'] = dict(checked=False, reason='the extension has no qwen_p2p_mesh_devices, or it raised')
+        return
+    listed = [dict(entry) for entry in listed]
+    differing = []
+    for index in range(max(len(before), len(listed))):
+        a = before[index] if index < len(before) else None
+        b = listed[index] if index < len(listed) else None
+        if a == b:
+            continue
+        if a is None or b is None:
+            differing.append([index, 'a record is missing on one side'])
+        else:
+            differing.append([index, {key: [a.get(key), b.get(key)] for key in sorted(set(a) | set(b)) if a.get(key) != b.get(key)}])
+    report['mesh_map'] = dict(checked=True, equal=not differing, devices=len(before), differing=differing,
+                              pcie_devices=[entry.get('pcie_device') for entry in before], pci_bus_ids=[entry.get('pci_bus_id') for entry in before])
+    if differing and enforce:
+        problems.append('the shard map before the allocation (qwen_p2p_mesh_devices) differs from staging_info()["devices"] at device %s: the host would refuse to start the tier' % (
+            '; '.join('%d (%s)' % (index, detail) for index, detail in differing[:3])))
+    elif differing:
+        report['mesh_map']['note'] = 'differs, not enforced (host_checks is off)'
+
+
+def window_top_rows(info):
+    """Per bank: where the tier's slot ends in the window (the canary page after the 4 KiB lead, then the slot's objects) and how far that is below the top 16 MiB."""
+    lead = int(info.get('aligned_4k_offset', 0))
+    usable = int(info.get('aligned_4k_size', 0))
+    capacity = max(0, (usable - CANARY) // SHARD)
+    slot_objects = min(TIER_SLOT_OBJECTS, capacity)
+    rows = []
+    for entry in info.get('banks', []):
+        address = int(entry.get('address', info.get('address', 0)))
+        end = address + lead + CANARY + slot_objects * SHARD
+        rows.append(dict(bank=entry.get('bank'), address=address, slot_end=end, headroom=WINDOW_TOP - end))
+    return slot_objects, rows
+
+
+def check_window_top(info, report, problems, enforce):
+    """The worker and the card link refuse a staging slot that reaches the top 16 MiB of the window; this says so before the tier is started."""
+    slot_objects, rows = window_top_rows(info)
+    low = min((row['headroom'] for row in rows), default=None)
+    report['window_top'] = dict(window_top=WINDOW_TOP, slot_objects=slot_objects, banks=rows, min_headroom_bytes=low, ok=bool(rows) and low >= 0)
+    if enforce:
+        for row in rows:
+            if row['headroom'] < 0:
+                problems.append('bank %s: the slot ends at window offset %#x, %d bytes inside the top 16 MiB of the window (from %#x), which is not DRAM: the tier would refuse this staging' % (
+                    row['bank'], row['slot_end'], -row['headroom'], WINDOW_TOP))
+
+
+def window_top_table(report):
+    """The per-bank table as text (one line per bank), for the person at the terminal."""
+    top = report.get('window_top') or {}
+    lines = ['window top %#x; the tier\'s slot is %d objects (canary page + objects) from each bank\'s first 4 KiB-aligned byte' % (top.get('window_top', WINDOW_TOP), top.get('slot_objects', 0))]
+    for row in top.get('banks', []):
+        lines.append('  bank %s  address %#x  slot ends %#x  headroom %s%.1f MiB  %s' % (row['bank'], row['address'], row['slot_end'], '-' if row['headroom'] < 0 else '', abs(row['headroom']) / 1048576.0,
+                                                                                   'OK' if row['headroom'] >= 0 else 'INSIDE THE TOP 16 MiB'))
+    return '\n'.join(lines)
+
+
+def run(ttnn, mesh, devices, blocks=DEFAULT_BLOCKS, staging_mib=8, banks_to_test=None, host_checks=False, **version_3_arguments):
     """The checks on an open mesh -> the report dict (ok, problems, one entry per case, the cost figures). staging_mib: bytes per bank (a slot of 96 objects needs 64).
+    host_checks: also REQUIRE the host's start-up facts (the shard-map binding must exist and agree with staging_info(); no bank's slot may reach the top 16 MiB of the
+    window); the command-line program turns it on. Off, both are still measured and reported, but neither fails the run (the older probe that calls run() is unaffected).
     version_3_arguments (heads_per_chip, bank, long_run, strided): the keywords the version 3 host probe passes; they mean nothing here and are ignored, so that probe
     reaches the check, which then reports a version 3 extension as `absent` (it lacks the version 4 ops) instead of dying on a TypeError."""
     import numpy as np
 
     ref = _ref()
     problems, report, cases = [], {}, {}
-    absent = missing_names(ttnn)
+    absent = missing_names(ttnn) + ([name for name in HOST_NAMES if not callable(getattr(ttnn, name, None))] if host_checks else [])
     if absent:
         return dict(ok=False, status='absent', missing=absent, problems=['the extension lacks %s' % ', '.join(absent)])
     refused = getattr(ttnn, 'QwenP2PRefused', ValueError)
@@ -186,11 +256,21 @@ def run(ttnn, mesh, devices, blocks=DEFAULT_BLOCKS, staging_mib=8, banks_to_test
     objects_max = (staging_bytes - CANARY) // SHARD
     if objects_max < 12:
         return dict(ok=False, status='small', problems=['a ring of %d MiB per bank holds %d objects: the check needs at least 12' % (staging_mib, objects_max)])
+    mesh_function = getattr(ttnn, 'qwen_p2p_mesh_devices', None)
+    mesh_map = None
+    if callable(mesh_function):
+        try:
+            mesh_map = [dict(entry) for entry in mesh_function(mesh)]          # as the host builds the registry: before anything is allocated
+        except Exception as error:  # noqa: BLE001
+            if host_checks:
+                problems.append('qwen_p2p_mesh_devices raised %s: %s (the host cannot build the shard map and would refuse to start the tier)' % (type(error).__name__, str(error)[:160]))
     staging = ttnn.qwen_p2p_staging_alloc(mesh, staging_bytes, False, STAGING_PAGE)
     caches = []
     try:
         info = ttnn.qwen_p2p_staging_info(staging)
         check_info(info, devices, staging_bytes, report, problems, mesh_dims(mesh, devices))
+        check_mesh_map(mesh_map, info.get('devices', []), report, problems, host_checks)
+        check_window_top(info, report, problems, host_checks)
         caches = [make_cache(ttnn, mesh, blocks, t) for t in range(TENSORS)]
         slice_bytes = int(ttnn.qwen_block_bytes(caches[0]))
         report['slice_bytes'] = slice_bytes
@@ -494,22 +574,27 @@ def main(argv=None):
 
     import ttnn
 
-    absent = missing_names(ttnn)
+    def lacking():
+        return missing_names(ttnn) + [name for name in HOST_NAMES if not callable(getattr(ttnn, name, None))]
+
+    absent = lacking()
     if absent:
         try:
             import qwen_kv_read  # noqa: F401
         except Exception as error:  # noqa: BLE001
             print(json.dumps({'ok': False, 'problem': 'qwen_kv_read did not import: %s: %s' % (type(error).__name__, str(error)[:200])}))
             return 1
-        absent = missing_names(ttnn)
+        absent = lacking()
     if absent:
-        print(json.dumps({'ok': False, 'problem': 'this ttnn lacks %s: the extension is not version 4' % ', '.join(absent)}))
+        print(json.dumps({'ok': False, 'problem': 'this ttnn lacks %s: the extension is not the build the host needs (version 4 with the shard-map binding)' % ', '.join(absent)}))
         return 1
     mesh = ttnn.open_mesh_device(ttnn.MeshShape(options.devices, 1))      # as production opens it: the coordinate order of the info is the one the worker reads
     try:
-        report = run(ttnn, mesh, options.devices, options.blocks, options.staging_mib, options.banks)
+        report = run(ttnn, mesh, options.devices, options.blocks, options.staging_mib, options.banks, host_checks=True)
     finally:
         ttnn.close_mesh_device(mesh)
+    if report.get('window_top'):
+        print(window_top_table(report), file=sys.stderr)
     print(json.dumps(report, indent=1))
     return 0 if report['ok'] else 1
 

@@ -40,7 +40,7 @@
       "glob": "test_p2p_staging*.py",
       "pythonpath": [],
       "require": ["test_p2p_staging", "test_p2p_staging_card"],
-      "min_tests": 192,
+      "min_tests": 197,
       "timeout_s": 1200
     },
     "scripts_p2p": {

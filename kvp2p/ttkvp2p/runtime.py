@@ -589,7 +589,6 @@ class KVP2PRuntime:
         self.closed = False
         self.opened_at: Optional[float] = None
         self.last_schedule_wall: Optional[float] = None
-        self.selftest_requests = 0
         self._opened = False
         self._device_ready = False
         self._pre_latch_state = STATE_UNAVAILABLE
@@ -790,13 +789,6 @@ class KVP2PRuntime:
             return True
         return False
 
-    def pop_selftest(self) -> bool:
-        """True once per control ``selftest`` (test mode); the connector runs the round-trip self-test when it sees it."""
-        if self.selftest_requests > 0:
-            self.selftest_requests -= 1
-            return True
-        return False
-
     # --- the manager
     def attach_manager(self, manager) -> None:
         self._manager = manager
@@ -935,7 +927,9 @@ class KVP2PRuntime:
             else:
                 self.faults[parsed[0]] += parsed[1]
         elif verb == 'selftest':
-            self.selftest_requests += 1
+            # There is no round-trip self-test in the tier (nothing reads THATCH_KVP2P_SELFTEST either): say so at once, so that a harness does not wait for a
+            # verdict that never comes. The byte-exact check of the device ops is the card check (p2p_staging_card.py), run before the tier boots.
+            result = 'unsupported: the tier has no round-trip self-test; the device ops are checked byte-exact by the card check before the tier boots'
         self._acks.append({'seq': command.seq, 'verb': verb, 'result': result})
         self.counters['control_' + verb] += 1
 
