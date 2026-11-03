@@ -9,6 +9,7 @@ import re
 import struct
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -418,6 +419,33 @@ class MockRunTest(unittest.TestCase):
         self.assertTrue(report['bus_addr_check'])
         self.assertEqual(report['plan']['noc'], {'x': 17, 'y': 12, 'addr': 0, 'ordering': 0})
         self.assertTrue(any('uncached' in note for note in report['notes']))
+
+    def test_the_read_arm_reports_the_cpu_of_each_reading_thread(self):
+        real = probe.MockSource.read_into
+        spins = []
+
+        def read_into(source, view, offset):
+            end = time.thread_time() + 0.02                    # 20 ms of this thread's CPU per chunk, as a copy would
+            while time.thread_time() < end:
+                pass
+            spins.append(0.02)
+            return real(source, view, offset)
+
+        with mock.patch.object(probe.MockSource, 'read_into', read_into):
+            report = self.run_with(probe.MockCard(), '--threads', '4', '--repeat', '2', '--verify', 'none')
+        p2p = report['p2p']
+        timed = len(spins)                                      # 8 chunks of 1M, two timed runs
+        self.assertEqual(timed, 16)
+        self.assertGreaterEqual(p2p['worker_seconds'], 0.8 * 0.02 * timed)
+        self.assertLess(p2p['busiest_worker_seconds'], p2p['worker_seconds'])
+        self.assertTrue(2 <= p2p['worker_threads'] <= 4)
+        self.assertGreater(p2p['worker_cores'], 0)
+        self.assertGreaterEqual(p2p['cpu_seconds'], 0.8 * 0.02 * timed)          # the same CPU seen from the process
+
+    def test_one_reading_thread_has_its_cpu_counted_too(self):
+        report = self.run_with(probe.MockCard(), '--threads', '1', '--verify', 'none')
+        self.assertEqual(report['p2p']['worker_threads'], 1)
+        self.assertAlmostEqual(report['p2p']['busiest_worker_seconds'], report['p2p']['worker_seconds'], places=9)
 
     def test_offsets_into_the_source_and_into_the_slice_are_both_honoured(self):
         # the source bytes 1M..9M must end up at slice offset 2M..10M
