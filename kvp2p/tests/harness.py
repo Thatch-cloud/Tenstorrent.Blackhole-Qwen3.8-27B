@@ -161,7 +161,7 @@ class Rig:
     def __init__(self, *, slot_objects: int = 8, num_slots: int = 400, num_blocks: int = 600, extra: Optional[dict] = None,
                  max_batched: int = 4096, workers: int = 1, tmp: Optional[str] = None, start_worker: bool = True,
                  checks: bool = True, with_scheduler: bool = True, executor: Optional[str] = None, host_ok: bool = True,
-                 async_scheduling: bool = False, real_tier=None):
+                 async_scheduling: bool = False, real_tier=None, manager_class=None):
         register_layout(TINY)
         self.real_tier = real_tier              # WP3a: a tier_kit.RealTier makes the rig use the REAL runtime and manager instead of the fakes
         self.tmp = tmp or tempfile.mkdtemp(prefix='ttkvp2p-rig-')
@@ -170,7 +170,7 @@ class Rig:
         self.checks = checks
         self.steps = 0
         if real_tier is None:
-            self.saved_modules = install_fake_modules()
+            self.saved_modules = install_fake_modules(manager_class)
             FakeRuntime.reset(num_slots)
             FakeRuntime.host_ok_default = host_ok
         else:

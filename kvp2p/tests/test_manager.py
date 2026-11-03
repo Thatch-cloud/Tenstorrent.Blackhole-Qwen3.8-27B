@@ -436,6 +436,11 @@ class CompleteStore(ManagerCase):
         self.assertIs(signature.parameters['success'].default, True)
         self.assertIsNone(signature.parameters['digests'].default)
 
+    def test_the_connectors_boot_guard_accepts_this_manager(self):
+        """TTP2PNvmeSpec.get_manager hands the tier a RefusedManager when complete_store cannot take the connector's call; the real manager must pass."""
+        from ttkvp2p.spec import store_completion_problem
+        self.assertIsNone(store_completion_problem(self.build()))
+
     def test_a_successful_store_makes_the_keys_loadable_with_the_digests_of_their_positions(self):
         mgr = self.build()
         keys = [key_for(i) for i in range(5)]

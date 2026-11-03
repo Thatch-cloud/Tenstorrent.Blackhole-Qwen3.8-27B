@@ -477,11 +477,23 @@ class TTP2PWorker(OffloadingWorker):
     # ------------------------------------------------------------------------------------------------------------
 
     def _queue_result(self, job: _Job) -> None:
-        """Queue the one terminal report of a job."""
+        """Queue the one terminal report of a job.
+
+        ``job.reported`` is set only once the report is in the outbox, and the store result is left for the manager only after that:
+        if anything raises before the append, the job is still unreported (``_report_lost`` and ``_fail_all`` then queue it) and no
+        store result has been written twice. Nothing between the append and the flag can raise."""
         if job.reported:
             return
-        job.reported = True
         ok = job.state == DONE
+        if ok:
+            now = self._clock()
+            report = TTTransferResult(job.id, True, transfer_size=job.n * self.object_bytes, transfer_time=max(0.0, now - job.t_submit))
+        else:
+            report = TTTransferResult(job.id, False, reason=job.reason)
+        self._outbox.append(report)
+        job.reported = True
+        if job in self._order:
+            self._order.remove(job)
         if not job.is_load:
             try:
                 results = self.rt.store_results
@@ -495,14 +507,6 @@ class TTP2PWorker(OffloadingWorker):
                         self._count('store_result_pruned')           # never consumed: the scheduler role reads a missing result as a failed store
             except Exception:
                 logger.exception('ttkvp2p: cannot leave the store result of job %s for the manager', job.id)
-        if ok:
-            now = self._clock()
-            self._outbox.append(TTTransferResult(job.id, True, transfer_size=job.n * self.object_bytes,
-                                                 transfer_time=max(0.0, now - job.t_submit)))
-        else:
-            self._outbox.append(TTTransferResult(job.id, False, reason=job.reason))
-        if job in self._order:
-            self._order.remove(job)
 
     def _finish_ok(self, job: _Job) -> None:
         if job.state != ACTIVE:
@@ -554,7 +558,15 @@ class TTP2PWorker(OffloadingWorker):
 
     def _fail_all(self, reason: str) -> None:
         for job in list(self._order):
-            self._fail(job, reason, count=False)
+            if job.state == ACTIVE:
+                self._fail(job, reason, count=False)
+            elif not job.reported:
+                # Terminal but never reported: an error inside _queue_result or _fail came before the report was queued. It keeps its
+                # verdict (a finished job is still a finished job) and goes out now, so it cannot sit in the order for ever (I1).
+                try:
+                    self._queue_result(job)
+                except Exception:
+                    logger.exception('ttkvp2p: could not report job %s', job.id)
 
     def _count(self, name: str, n: int = 1) -> None:
         self.stats[name] += n

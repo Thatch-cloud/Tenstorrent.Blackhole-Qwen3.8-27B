@@ -9,6 +9,7 @@ Importing this module touches neither ttnn nor the extension (invariant I14).
 
 import dataclasses
 import importlib
+import inspect
 import logging
 import typing
 from collections.abc import Collection, Mapping
@@ -218,6 +219,39 @@ class NvmeLoadStoreSpec(LoadStoreSpec):
 
 
 # --------------------------------------------------------------------------------------------------------------------
+# The store-completion contract between the connector and the manager
+# --------------------------------------------------------------------------------------------------------------------
+
+COMPLETE_STORE_CONTRACT = 'complete_store(keys, req_context, success=True, digests=None)'
+
+
+def store_completion_problem(manager: Any) -> Optional[str]:
+    """Why ``manager.complete_store`` cannot take the call the connector's scheduler role makes, or None when it can.
+
+    The connector settles every store job itself (see connector.py) and calls ``complete_store(keys, req_context, success=..., digests=...)``:
+    the keys in the manager's own ``prepare_store`` order and, on success, an ``[n, chips]`` uint64 array in that order (None on failure).
+    The manager must declare ``digests`` by name (a ``**kwargs`` that happens to swallow it would let a manager ignore the digests, and
+    every restore of its entries would then be unverifiable), and the call must bind with both a True and a False ``success``.
+    Checked with ``inspect.signature`` when the scheduler role asks for its manager, so a mismatch turns the tier off at boot instead of
+    raising in the first successful store."""
+    method = getattr(manager, 'complete_store', None)
+    if not callable(method):
+        return 'it has no complete_store'
+    try:
+        signature = inspect.signature(method)
+    except (TypeError, ValueError) as error:
+        return 'complete_store has no readable signature (%s)' % (error,)
+    if 'digests' not in signature.parameters:          # by name: a **kwargs that merely swallows it does not count
+        return 'complete_store%s does not take a digests keyword (it must be %s)' % (signature, COMPLETE_STORE_CONTRACT)
+    for success in (True, False):
+        try:
+            signature.bind(['key'], None, success=success, digests=None)
+        except TypeError as error:
+            return 'complete_store%s cannot be called as %s: %s' % (signature, COMPLETE_STORE_CONTRACT, error)
+    return None
+
+
+# --------------------------------------------------------------------------------------------------------------------
 # A manager for a tier that is off: always misses, drops every store
 # --------------------------------------------------------------------------------------------------------------------
 
@@ -289,20 +323,30 @@ class TTP2PNvmeSpec(OffloadingSpec):
             manager_module = importlib.import_module('ttkvp2p.manager')
             runtime = runtime_module.KVP2PRuntime.acquire(self.p2p_config, 'scheduler')
             manager = manager_module.NvmeKVManager(self.p2p_config, runtime)
+            mismatch = store_completion_problem(manager)
         except Exception as error:     # a broken tier must not stop the engine: it stays a no-op that always misses
             logger.error('ttkvp2p: the scheduler role cannot attach to the runtime (%s: %s); the tier stays off',
                          type(error).__name__, error, exc_info=True)
-            if runtime is not None:
-                # The reference taken above must not leak: the runtime is reference counted, and a leaked 'scheduler' reference
-                # would keep it (and the drive claim) open for the life of the process.
-                try:
-                    runtime.release('scheduler')
-                except Exception:
-                    logger.exception('ttkvp2p: releasing the runtime after a failed manager build failed')
-            self.refusal = 'scheduler role cannot attach: %s' % (error,)
-            return RefusedManager(self.refusal)
+            return self._give_up_manager(runtime, 'scheduler role cannot attach: %s' % (error,))
+        if mismatch is not None:
+            # The connector hands every store's digests to complete_store. A manager that cannot take them would raise on the first
+            # successful store and latch the tier then: refuse it here instead, so the tier is off from boot and the log says why.
+            logger.error('ttkvp2p: the manager does not take the store completion this connector makes (%s); the tier stays off', mismatch)
+            return self._give_up_manager(runtime, 'the manager does not take the store completion: %s' % (mismatch,))
         self.runtime = runtime
         return manager
+
+    def _give_up_manager(self, runtime, reason: str) -> OffloadingManager:
+        """The scheduler role goes without a manager: give back the runtime reference taken for it and hand out the no-op manager."""
+        if runtime is not None:
+            # The reference taken above must not leak: the runtime is reference counted, and a leaked 'scheduler' reference
+            # would keep it (and the drive claim) open for the life of the process.
+            try:
+                runtime.release('scheduler')
+            except Exception:
+                logger.exception('ttkvp2p: releasing the runtime after a refused manager failed')
+        self.refusal = reason
+        return RefusedManager(self.refusal)
 
     # --- what the connector's scheduler role needs from the runtime (it settles each store job itself; see connector.py)
     def take_store_result(self, job_id: int):

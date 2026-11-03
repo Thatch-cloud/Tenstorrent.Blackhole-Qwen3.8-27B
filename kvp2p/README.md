@@ -116,6 +116,10 @@ each) before it allocates anything on the cards, then names each card's characte
 (`pcie_device`; tt-metal's logical `device_id` is not that index) and refuses a record that carries none. It checks that the highest staging
 slot of every configured bank (each bank has its own address in the record) stays below the top 16 MiB of the window.
 
+The index in `/dev/tenstorrent/<N>` comes from the staging record, which is a number the host may resolve differently from the PCI address
+the shard map names. The factory therefore does not rely on it: `CardLink.open` must confirm that the character device it opened is the card
+at the PCI address it was given (and that the record's index matches), and refuse otherwise, before any window is touched.
+
 **The runtime** (`worker.RuntimePort` checks these up front and refuses a runtime that lacks one, so a mismatch shows as a tier that
 stays UNAVAILABLE with a log line, never as a half-used runtime):
 
@@ -130,25 +134,41 @@ stays UNAVAILABLE with a log line, never as a half-used runtime):
 | optional `count`, `observe_restore`, `take_fault`, `release` | telemetry; the test-only fault commands; reference-counted release |
 
 **The manager** (`spec.get_manager` builds `ttkvp2p.manager.NvmeKVManager(cfg, runtime)`): its `lookup` answers MISS for a request whose
-`ReqTag.no_retry` is set (read with `req_context.get_state(ReqTag)`), and its `complete_load` reads the worker's `mark_bad` marks.
+`ReqTag.no_retry` is set (read with `req_context.get_state(ReqTag)`), and its `complete_load` reads the worker's `mark_bad` marks. It keeps its
+own LRU and eviction structure: nothing here depends on vLLM's internal LRU classes.
 
-**How a store job ends in the manager.** vLLM's own `update_connector_output` calls `manager.complete_store(job.keys, ctx)` for every
-completed store job: the key SET (unordered), no job id, no digests, and no way to say the store failed. That call cannot carry the
+**How a store job ends in the manager (amendment A1).** vLLM's own `update_connector_output` calls `manager.complete_store(job.keys, ctx)` for
+every completed store job: the key SET (unordered), no job id, no digests, and no way to say the store failed. That call cannot carry the
 outcome, so `TTP2PConnectorScheduler.update_connector_output` settles each store job itself, where the job id, the keys and the result
-meet, and suppresses vLLM's call for it:
+meet, and suppresses vLLM's call for it. The manager's side of the contract is one signature:
 
-- it takes the job's `StoreResult` from `store_results` (through `spec.take_store_result`), checks it against the job (the same keys,
-  the same drive slots and generations as the store spec the manager returned, one digest row per key), and calls
-  `complete_store(keys, ctx, success=True, digests=digests)` with the keys **in the order `prepare_store` returned them** and
-  `digests` an `[n, chips]` uint64 array in that same order. `digests` is the one keyword beyond the frozen signature
-  `complete_store(keys, ctx, success=True)`; the manager takes the digests from it and looks nothing up in `store_results`;
-- for a failed store, a missing result, or a result that does not match the job it calls the frozen signature,
-  `complete_store(keys, ctx, success=False)`: the entries are dropped and their drive slots return to the free list under I5;
+```python
+def complete_store(self, keys, req_context, success: bool = True, digests: "np.ndarray | None" = None) -> None
+```
+
+- `keys` is a list **in the order the manager's own `prepare_store` returned them** (never vLLM's unordered `job.keys`);
+- `digests` is an `[len(keys), chips]` uint64 array in that same order. It is required when `success=True` and `None` when `success=False`
+  (the connector passes the keyword on every call);
+- the connector takes the job's `StoreResult` from `store_results` (through `spec.take_store_result`) and checks it against the job before it
+  calls the manager with `success=True`: the same keys; the same drive slots and generations as the store spec the manager returned; and
+  digests that are an ndarray of dtype uint64 with exactly the shape `[keys, chips]` (chips from the layout). Any other result is a failed
+  store, like a failed job, a missing result (the worker keeps only the last 1,024 and a job it never ran has none) or an exception while
+  settling: `complete_store(keys, ctx, success=False, digests=None)`, the entries are dropped and their drive slots return to the free
+  list under I5. A refused result is a miss, never a strike;
+- the manager NEVER reads `store_results` and never pairs a digest with a key by slot or generation: digest row `i` belongs to `keys[i]`,
+  whatever slots the manager handed out (a manager may permute them);
 - an exception from `complete_store` latches the tier and gives the keys up with a second `success=False` call, so the engine never sees
   it and no key stays ALLOCATED (an ALLOCATED entry answers HIT_PENDING, and every lookup of its key would defer).
 
+`get_manager` checks the manager it built with `inspect.signature` (`spec.store_completion_problem`): `complete_store` must name a `digests`
+parameter and must bind `(keys, ctx, success=True|False, digests=None)`. A manager that does not (the stock vLLM signature, an older draft, a
+`**kwargs` that would swallow the digests) gets the `RefusedManager` instead: the runtime reference taken for it is given back, the log says
+why, and the tier is a no-op that never stores from boot, instead of raising in the first successful store and latching then.
+
 A job from before a `reset_cache` is skipped by vLLM; its result is taken and dropped. So the manager implements `complete_store` as
-"for each key, in order: on success attach digest row i and make the entry WRITTEN; on failure drop the entry", and nothing more.
+"for each key, in order: on success attach digest row i and make the entry WRITTEN; on failure drop the entry", and nothing more (the WP3a
+manager adds one check of its own: that the entry is still the one this job's `prepare_store` allocated, so a late report cannot touch a newer
+entry of the same key).
 
 **Gate for the manager (WP3a): I6 beyond what the connector can see.** The connector checks that the keys come back in the scheduler's own
 order and that a hashed source block matches its key. It cannot see a manager that permutes `slot_ids` against its OWN key-to-slot map:
@@ -156,7 +176,10 @@ the bytes of key `i` then land in a slot that the manager's entry for key `i` do
 object. The digest check fails it (a spurious BAD and a lost session) only because the digests are attached by key position; a manager that
 attached them by slot would make wrong KV verify. `NvmeKVManager.prepare_store` therefore asserts, before it returns, that slot `i` of
 the store spec is the slot it recorded for key `i` (a corrupted spec and each kind of swap trip it, and a permuting allocator is exercised
-through the real scheduler), and `complete_store` attaches the digests by key position and by nothing else.
+through the real scheduler), and `complete_store` attaches the digests by key position and by nothing else. The tests here run a manager with
+exactly the signature above (`A1Manager`, which raises on any call the amendment does not allow) and a slot-permuting one (`PermutingKVManager`:
+key `i` gets neither the i-th allocated slot nor a monotone one), and check that every key ends up with the digest of its own object and
+restores exactly.
 
 ## What the model runner calls, in this order
 
@@ -181,8 +204,8 @@ A failed load is in both `finished_recving` and `failed_recving` of the same out
 Every job is reported exactly once, whatever happens to it: a bug in the state machine latches the tier, and a job whose submit hit it is
 reported failed (`internal`) like any other.
 
-A store that cannot get a spill bank for `store_wait_s` (default 10 s) while none comes back is dropped (`no_slot`, not a strike): a later miss,
-never a stall. The stall clock (`stall_latch_s`) starts when work does: it does not count idle time before a job.
+A store that cannot get a spill bank for `store_wait_s` (default 10 s; an additive `kv_connector_extra_config` key, not in the frozen kwarg and
+not yet in INTERFACE.md) while none comes back is dropped (`no_slot`, not a strike): a later miss, never a stall. The stall clock (`stall_latch_s`) starts when work does: it does not count idle time before a job.
 
 ## Running the tests
 

@@ -560,6 +560,11 @@ class FakeNvmeKVManager(OffloadingManager):
         entry = self.index.pop(key)
         self.runtime.allocator.release(entry.slot)
 
+    def _arrange(self, slots: List[int], gens: List[int]):
+        """Which allocated slot goes with which key (key i gets slot i). The identity here; a subclass may permute, and a slot and its
+        generation always move together."""
+        return slots, gens
+
     # --- OffloadingManager
     def on_new_request(self, req_context) -> RequestOffloadingContext:
         return RequestOffloadingContext()
@@ -606,6 +611,7 @@ class FakeNvmeKVManager(OffloadingManager):
         if tag is not None:
             tag.admitted = True
         gens = [allocator.gen[s] for s in slots]
+        slots, gens = self._arrange(slots, gens)
         for key, slot, gen in zip(todo, slots, gens):
             self.index[key] = Entry(slot, gen)
         out_keys, out_slots, out_gens = list(todo), list(slots), list(gens)
@@ -668,13 +674,56 @@ class FakeNvmeKVManager(OffloadingManager):
         return sum(1 for e in self.index.values() if e.state == 'WRITTEN')
 
 
-def install_fake_modules() -> Dict[str, Any]:
+class PermutingKVManager(FakeNvmeKVManager):
+    """A manager whose slots do not come out in allocation order (an unsorted free list, a striped allocator): key i gets a slot that is
+    neither the i-th allocated nor monotone in i. The keys stay in the scheduler's order (so the I6 alignment check passes) and the
+    store spec names slot i for key i, but anything that pairs a digest with a key through the SLOT's rank would pair it with another
+    key's object. ``prepared`` logs (keys, slots) of every prepare_store that stored something."""
+
+    def __init__(self, cfg, runtime):
+        super().__init__(cfg, runtime)
+        self.prepared: List[tuple] = []
+
+    def _arrange(self, slots, gens):
+        order = list(range(len(slots)))[::-1]
+        shift = len(order) // 3
+        order = order[shift:] + order[:shift]
+        return [slots[i] for i in order], [gens[i] for i in order]
+
+    def prepare_store(self, keys, req_context):
+        output = super().prepare_store(keys, req_context)
+        if output is not None and output.keys_to_store:
+            self.prepared.append((list(output.keys_to_store), list(output.store_spec.slot_ids)))
+        return output
+
+
+class A1Manager(FakeNvmeKVManager):
+    """Takes store completion exactly as the interface's AMENDMENT A1 words it, and refuses (by raising, which latches the tier) any
+    call that does not match it: a list of keys, a bool, and digests that are an [n, chips] uint64 array on success and None on failure."""
+
+    def __init__(self, cfg, runtime):
+        super().__init__(cfg, runtime)
+        self.a1_calls: List[tuple] = []         # (keys, success, copy of digests)
+
+    def complete_store(self, keys, req_context, success: bool = True, digests: Optional[np.ndarray] = None) -> None:
+        assert isinstance(keys, list), 'keys arrive as a list in prepare_store order, not as a set (%s)' % type(keys).__name__
+        assert isinstance(success, bool), 'success is a bool'
+        if success:
+            assert isinstance(digests, np.ndarray) and digests.dtype == np.uint64, 'digests are a uint64 ndarray on success'
+            assert digests.shape == (len(keys), CHIPS), 'digests are [len(keys), chips]: %s' % (digests.shape,)
+        else:
+            assert digests is None, 'digests are None on failure'
+        self.a1_calls.append((tuple(keys), success, None if digests is None else digests.copy()))
+        super().complete_store(keys, req_context, success=success, digests=digests)
+
+
+def install_fake_modules(manager_class=None) -> Dict[str, Any]:
     """Put the stand-ins where ``TTP2PNvmeSpec`` looks for ``ttkvp2p.runtime`` and ``ttkvp2p.manager``. Returns what to restore."""
     saved = {name: sys.modules.get(name) for name in ('ttkvp2p.runtime', 'ttkvp2p.manager')}
     runtime_module = types.ModuleType('ttkvp2p.runtime')
     runtime_module.KVP2PRuntime = FakeRuntime
     manager_module = types.ModuleType('ttkvp2p.manager')
-    manager_module.NvmeKVManager = FakeNvmeKVManager
+    manager_module.NvmeKVManager = manager_class or FakeNvmeKVManager
     sys.modules['ttkvp2p.runtime'] = runtime_module
     sys.modules['ttkvp2p.manager'] = manager_module
     return saved
