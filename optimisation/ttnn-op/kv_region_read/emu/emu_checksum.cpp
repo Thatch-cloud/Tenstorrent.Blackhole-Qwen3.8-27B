@@ -33,12 +33,9 @@ int main(int argc, char** argv) {
     const uint32_t l1 = emu_run::l1_region();
     state.cb_base = l1 + 16;
     state.cb_bytes = qwen_p2p::checksum_cb_bytes();
-    state.read_bank = bank;
-    state.read_lo = staging_address + byte_offset;
-    state.read_hi = state.read_lo + uint64_t(ranges) * length;
+    state.read_regions = {emu::Region{int(bank), staging_address + byte_offset, staging_address + byte_offset + uint64_t(ranges) * length, 0, 0}};
     state.read_unit = qwen_p2p::kChecksumUnit;
-    state.write_lo = partials_address;
-    state.write_hi = bank_bytes;
+    state.write_regions = {emu::Region{-1, partials_address, bank_bytes, 0, 0}};
     state.write_page = qwen_p2p::kChecksumPartialBytes;
 
     const auto units = qwen_p2p::split_units(length / qwen_p2p::kChecksumUnit, cores);

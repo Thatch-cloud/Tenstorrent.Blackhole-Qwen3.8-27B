@@ -1,5 +1,12 @@
 # P2P KV restore, the device side: staging buffer, scatter op, checksum op
 
+> **Version 4 (branch `tp4/p2p-gemma`, the Gemma serving image on tt-metal 62443b62) supersedes the op signatures below.** The staging becomes a ring of 8 banks (the ops
+> name the bank), the copy gains its mirror (`qwen_blocks_to_staging`, the spill's gather), the checksum becomes an oracle beside an asynchronous block-row digest
+> (`qwen_blocks_digest_async`) with an `EventQuery` binding, and `qwen_p2p_warm` / `qwen_p2p_freeze` and the refusal during trace capture are added. The record of
+> that version is the header of `qwen_kv_read.cpp`, `p2p_staging_card.py` and `p2p_staging_mock.py`. This document still describes how the staging range is placed
+> and what it costs, which version 4 keeps. The version 3 Qwen host (`scripts/ci/qwen_p2p_restore.py`) is not a host of version 4: it reads the info as a list of per-device
+> dicts, version 4 answers one dict, and it fails closed at that first call (`P2PUnavailable`); a Qwen image keeps the version 3 extension.
+
 Branch `tp4/p2p-devop` (from `tp4/kv-nvme-1`). Scope: the device ops the host side needs to restore KV blocks from an NVMe drive that DMAs straight into card
 DRAM (peer to peer, no host bounce). The drive writes into a **staging range** in one DRAM bank; a device op then copies the staged bytes into the paged KV
 cache; a second op checksums the staged bytes so a mis-aimed or truncated DMA is a miss. This document is the record of how the staging range is placed (and what it

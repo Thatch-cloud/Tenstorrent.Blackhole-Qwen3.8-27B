@@ -1,7 +1,8 @@
-"""Host-side reference for the P2P restore's device ops (ttnn.qwen_p2p_staging_*, qwen_write_blocks_from_staging, qwen_staging_checksum;
-docs/tp4-p2p-restore.md): the checksum algorithm in numpy and in plain Python, the three shared test vectors with their expected values, Python
-mirrors of the pure arithmetic in qwen_p2p_plan.hpp, and the runners that compile and run the two device kernels on the CPU against the stand-in
-dataflow API (emu/). No device, no ttnn, no torch: numpy only (and a C++ compiler for the emulation).
+"""Host-side reference for the P2P device ops (ttnn.qwen_p2p_staging_*, qwen_write_blocks_from_staging, qwen_blocks_to_staging, qwen_blocks_digest_async,
+qwen_staging_checksum; docs/tp4-p2p-restore.md): the checksum algorithm in numpy and in plain Python, the three shared test vectors with their expected values, the
+block-row digest (the checksum over a block's shard, the concatenation of its rows in canonical tensor order), Python mirrors of the pure arithmetic in
+qwen_p2p_plan.hpp, and the runners that compile and run the four device kernels on the CPU against the stand-in dataflow API (emu/). No device, no ttnn, no torch:
+numpy only (and a C++ compiler for the emulation).
 
 The checksum (INTERFACE section 4): words x_k are the little-endian uint32 at byte offset 4k of the range, k counted from the START OF THE RANGE
 (the object start), w_k = (k * 2654435761 + 1) mod 2^32, S = sum_k w_k * x_k mod 2^64.
@@ -87,6 +88,36 @@ def checksum_ranges(data, length, count, function=None):
     return [function(data[index * length:(index + 1) * length]) for index in range(count)]
 
 
+def digest_shard(rows, function=None):
+    """The block-row digest of ONE block: the checksum of its shard, the concatenation of `rows` (its row in each tensor, in canonical tensor order); k counts from the
+    start of the shard and is NOT restarted between tensors."""
+    function = function or checksum_numpy
+    return function(b''.join(bytes(row) for row in rows))
+
+
+def digest_blocks(tensors, blocks, pages_per_block, function=None):
+    """What qwen_blocks_digest_async answers for one device: tensors = a list of uint8 arrays [pages, page_bytes] (the device's pages of each tensor, in page order);
+    -> [digest of blocks[i]] with the rows of every tensor concatenated in the list's order."""
+    out = []
+    for block in blocks:
+        rows = [np.ascontiguousarray(t[block * pages_per_block:(block + 1) * pages_per_block]).tobytes() for t in tensors]
+        out.append(digest_shard(rows, function))
+    return out
+
+
+def digest_words_offset(row_words, tensor_index):
+    """The k of the first word of tensor `tensor_index` inside a shard whose rows are `row_words` words each."""
+    return tensor_index * row_words
+
+
+def checksum_with_offset(data, k0):
+    """The partial sum of `data` whose first word is word k0 of a longer object (what a core that starts mid-object adds): sum_k w_(k0 + k) x_k mod 2^64."""
+    words = np.frombuffer(bytes(data), dtype='<u4').astype(np.uint64)
+    k = np.arange(words.size, dtype=np.uint64) + np.uint64(k0)
+    weights = (k * np.uint64(STEP) + np.uint64(1)) & np.uint64(MASK32)
+    return int((weights * words).sum(dtype=np.uint64))
+
+
 # -- Python mirrors of qwen_p2p_plan.hpp (the CPU test compiles the header and checks every function against these) ------------------------
 
 SCATTER_COLUMNS = 8
@@ -106,6 +137,18 @@ CHECKSUM_DEFAULT_CORES = 64
 CHECKSUM_MAX_CORES = 80
 CHECKSUM_MAX_RANGES = 512
 CHECKSUM_ARGS = 10
+P2P_MAX_BLOCKS_PER_CALL = 512
+DIGEST_COLUMNS = 10
+DIGEST_MAX_CORES = 80
+DIGEST_MAX_TENSORS = 16
+DIGEST_MAX_BLOCKS = 128
+DIGEST_MAX_BLOCKS_PER_CORE = 2
+DIGEST_CHUNK_PAGES = 8
+DIGEST_MAX_PAGE_BYTES = 8192
+DIGEST_PARTIAL_BYTES = 64
+DIGEST_RING_BUFFERS = 2
+DIGEST_FIXED_ARGS = 4
+DIGEST_ARGS = DIGEST_FIXED_ARGS + DIGEST_MAX_TENSORS + DIGEST_MAX_BLOCKS_PER_CORE
 
 
 def scatter_launches(n):
@@ -142,6 +185,14 @@ def checksum_cb_bytes():
     return 64 + 2 * CHECKSUM_CHUNK_BYTES + CHECKSUM_PARTIAL_BYTES
 
 
+def gather_cb_bytes(page_bytes):
+    return scatter_cb_bytes(page_bytes)
+
+
+def digest_cb_bytes(page_bytes):
+    return 64 + 2 * DIGEST_CHUNK_PAGES * page_bytes + DIGEST_PARTIAL_BYTES
+
+
 def scatter_core_args(destination_address, staging_address, bank, byte_offset, row_stride, blocks, launch_first, run):
     values = [0] * SCATTER_ARGS
     values[0], values[1], values[2] = destination_address, staging_address, bank
@@ -150,6 +201,23 @@ def scatter_core_args(destination_address, staging_address, bank, byte_offset, r
     values[5] = row_stride & MASK32
     for i in range(run[1]):
         values[SCATTER_FIXED_ARGS + i] = blocks[launch_first + run[0] + i]
+    return values
+
+
+def gather_core_args(source_address, staging_address, bank, byte_offset, row_stride, blocks, launch_first, run):
+    """The scatter's layout: row i of the call (blocks[i]) goes to staging[byte_offset + i * row_stride : + slice bytes]."""
+    return scatter_core_args(source_address, staging_address, bank, byte_offset, row_stride, blocks, launch_first, run)
+
+
+def digest_core_args(partials_address, tensor_addresses, blocks, run):
+    """The args of one digest core (DIGEST_ARGS words): partials address, tensor count, this core's block count, its first partials page, the tensor addresses
+    (unused ones zero), the block ids."""
+    values = [0] * DIGEST_ARGS
+    values[0], values[1], values[2], values[3] = partials_address, len(tensor_addresses), run[1], run[0]
+    for t, address in enumerate(tensor_addresses[:DIGEST_MAX_TENSORS]):
+        values[DIGEST_FIXED_ARGS + t] = address
+    for i in range(min(run[1], DIGEST_MAX_BLOCKS_PER_CORE)):
+        values[DIGEST_FIXED_ARGS + DIGEST_MAX_TENSORS + i] = blocks[run[0] + i]
     return values
 
 
@@ -202,15 +270,63 @@ def check_checksum(byte_offset, length, staging_bytes, cores, ranges=1):
     return None
 
 
-def check_staging(size_bytes, page_bytes, bank, num_banks, bank_bytes):
+def check_staging(size_bytes, page_bytes, num_banks, bank_bytes):
     if page_bytes == 0 or page_bytes % DRAM_ALIGNMENT:
         return 'the staging page size must be a multiple of 64'
     if size_bytes == 0 or size_bytes % page_bytes:
         return 'the staging size must be a positive multiple of the staging page size'
-    if num_banks == 0 or bank >= num_banks:
-        return "the staging bank is outside the device's DRAM banks"
+    if size_bytes % 4096:
+        return 'the staging size per bank must be a multiple of 4096'
+    if num_banks == 0:
+        return 'the device has no DRAM banks'
     if size_bytes > bank_bytes or size_bytes >= (1 << 32):
         return 'the staging size is larger than the allocatable bytes of one DRAM bank'
+    return None
+
+
+def check_bank(bank, num_banks):
+    return None if 0 <= bank < num_banks else "bank is outside the device's DRAM banks"
+
+
+def check_block_rows(byte_offset, slice_bytes, page_bytes, pages_per_block, blocks, staging_bytes, row_stride):
+    """The shared arguments of the gather and the scatter of version 4 (the C++ check_block_rows)."""
+    if blocks > P2P_MAX_BLOCKS_PER_CALL:
+        return 'at most 512 blocks per call (one launch)'
+    if pages_per_block == 0 or page_bytes == 0 or slice_bytes % page_bytes or slice_bytes // page_bytes != pages_per_block:
+        return "pages_per_block must be the tensor's block size divided by its page size"
+    return check_scatter(byte_offset, slice_bytes, page_bytes, blocks, staging_bytes, row_stride)
+
+
+check_gather = check_block_rows
+
+
+def check_block_ids(blocks, slices, require_distinct):
+    """-> (reason, index of the first offender) or (None, None)."""
+    for i, block in enumerate(blocks):
+        if block >= slices:
+            return 'a block id is outside the tensor', i
+    if require_distinct:
+        seen = set()
+        for i, block in enumerate(sorted(blocks)):
+            if block in seen:
+                return 'the block ids must be distinct (two writes to one block have no order)', list(blocks).index(block)
+            seen.add(block)
+    return None, None
+
+
+def check_digest_rows(tensors, blocks, pages_per_block, page_bytes, slices):
+    if tensors == 0 or tensors > DIGEST_MAX_TENSORS:
+        return 'tensors must be 1 to 16'
+    if blocks == 0 or blocks > DIGEST_MAX_BLOCKS:
+        return 'blocks must be 1 to 128'
+    if page_bytes == 0 or page_bytes % DRAM_ALIGNMENT:
+        return "the tensor's page size must be a multiple of 64 bytes (a whole DRAM-aligned page)"
+    if page_bytes > DIGEST_MAX_PAGE_BYTES:
+        return "the tensor's page size is above 8192 bytes (the digest's L1 scratch is two halves of 8 pages)"
+    if pages_per_block == 0:
+        return 'pages_per_block must be positive'
+    if slices == 0 or slices * pages_per_block >= (1 << 32):
+        return "the tensor's page ids do not fit 32 bits"
     return None
 
 
@@ -249,7 +365,7 @@ _BUILT = {}
 
 def build_emulation(kind, compile_args, directory, eager=False, kernel_file=None, strict=True):
     """Compiles emu/emu_<kind>.cpp (which includes the REAL kernel, or kernel_file: a broken copy for the teeth tests) with the given compile-time args ->
-    the executable's path. kind: scatter | checksum. eager: NOC transfers happen when issued, else at their barrier (see emu/api/dataflow/dataflow_api.h)."""
+    the executable's path. kind: scatter | gather | checksum | digest_rows. eager: NOC transfers happen when issued, else at their barrier (see emu/api/dataflow/dataflow_api.h)."""
     key = (kind, tuple(compile_args), directory, eager, kernel_file)
     if key in _BUILT:
         return _BUILT[key]
@@ -311,6 +427,67 @@ def run_scatter_emulation(directory, page_bytes, pages_per_block, bank, staging_
     with open(out_file, 'rb') as handle:
         out = np.frombuffer(handle.read(), dtype=np.uint8).reshape(dst_pages, page_bytes).copy()
     return out, done.stdout.strip()
+
+
+def run_gather_emulation(directory, page_bytes, pages_per_block, bank, staging_address, byte_offset, staging_in, tensor_pages, tensor_address,
+                         blocks, tensor, bank_bytes=None, eager=False, row_stride=None, exe=None):
+    """Runs qwen_p2p_gather.cpp for the blocks. tensor: uint8 [tensor_pages, page_bytes] (the source pages, in page order, interleaved over the 8 banks from
+    tensor_address). staging_in: the bytes of the staging range before (they sit at staging_address in `bank`), which the kernel must leave as they are outside its rows.
+    exe: a prebuilt emulation executable (a broken copy of the kernel, for the teeth tests). -> (staging_out as bytes, stdout line)."""
+    exe = exe or build_emulation('gather', [page_bytes, pages_per_block, SCATTER_CHUNK_PAGES, SCATTER_MAX_BLOCKS_PER_CORE, 0, 0, 0, 0], directory, eager)
+    aligned = -(-page_bytes // 64) * 64
+    if tensor_address is None:
+        tensor_address = _after(staging_address + len(staging_in))
+    elif tensor_address < staging_address + len(staging_in):
+        raise ValueError('the source tensor overlaps the staging range')
+    if bank_bytes is None:
+        bank_bytes = max(tensor_address + -(-tensor_pages // BANKS) * aligned, staging_address + len(staging_in)) + 4096
+    scenario = os.path.join(directory, 'gather.txt')
+    _write_scenario(scenario, [('page_bytes', page_bytes), ('pages_per_block', pages_per_block), ('bank', bank), ('staging_address', staging_address),
+                               ('byte_offset', byte_offset), ('tensor_address', tensor_address), ('tensor_pages', tensor_pages), ('bank_bytes', bank_bytes),
+                               ('blocks', list(blocks))] + ([] if row_stride is None else [('row_stride', row_stride)]))
+    tensor_file, in_file, out_file = (os.path.join(directory, n) for n in ('gather_tensor.bin', 'gather_staging_in.bin', 'gather_staging_out.bin'))
+    with open(tensor_file, 'wb') as handle:
+        handle.write(np.ascontiguousarray(tensor, dtype=np.uint8).tobytes())
+    with open(in_file, 'wb') as handle:
+        handle.write(bytes(staging_in))
+    done = subprocess.run([exe, scenario, tensor_file, in_file, out_file], capture_output=True, text=True)
+    if done.returncode:
+        raise RuntimeError('emulation exit %d: %s' % (done.returncode, (done.stdout + done.stderr).strip()[-2000:]))
+    with open(out_file, 'rb') as handle:
+        return handle.read(), done.stdout.strip()
+
+
+def run_digest_emulation(directory, page_bytes, pages_per_block, tensors, blocks, bank_bytes=None, eager=False, partials_address=None, gap=4096, exe=None):
+    """Runs qwen_p2p_digest_rows.cpp ONCE over `blocks` of the tensors. tensors: a list (at most 16) of uint8 arrays [pages, page_bytes] of equal size, in canonical
+    order; each is placed in the banks at its own address, `gap` bytes of room between them. exe: a prebuilt emulation executable (a broken copy of the kernel, for the
+    teeth tests). -> ([digest per block], stdout line)."""
+    exe = exe or build_emulation('digest_rows', [page_bytes, pages_per_block, DIGEST_CHUNK_PAGES, DIGEST_MAX_BLOCKS_PER_CORE, DIGEST_MAX_TENSORS, 0, 0, 0, 0], directory, eager)
+    aligned = -(-page_bytes // 64) * 64
+    pages = tensors[0].shape[0]
+    per_tensor = -(-pages // BANKS) * aligned
+    addresses, at = [], 4096
+    for _ in tensors:
+        addresses.append(at)
+        at = _after(at + per_tensor, gap)
+    if partials_address is None:
+        partials_address = at
+    if bank_bytes is None:
+        bank_bytes = partials_address + -(-len(blocks) // BANKS) * DIGEST_PARTIAL_BYTES + 4096
+    scenario = os.path.join(directory, 'digest.txt')
+    _write_scenario(scenario, [('page_bytes', page_bytes), ('pages_per_block', pages_per_block), ('tensors', len(tensors)), ('tensor_pages', pages),
+                               ('bank_bytes', bank_bytes), ('partials_address', partials_address), ('tensor_addresses', addresses), ('blocks', list(blocks))])
+    data_file = os.path.join(directory, 'digest_tensors.bin')
+    with open(data_file, 'wb') as handle:
+        for tensor in tensors:
+            handle.write(np.ascontiguousarray(tensor, dtype=np.uint8).tobytes())
+    done = subprocess.run([exe, scenario, data_file], capture_output=True, text=True)
+    if done.returncode:
+        raise RuntimeError('emulation exit %d: %s' % (done.returncode, (done.stdout + done.stderr).strip()[-2000:]))
+    for line in done.stdout.splitlines():
+        if line.startswith('DIGESTS'):
+            return [int(word) for word in line.split()[1:]], done.stdout.strip()
+    raise RuntimeError('no DIGESTS line: ' + done.stdout)
 
 
 def run_checksum_ranges_emulation(directory, staging_address, partials_address, bank, byte_offset, data, ranges, cores=CHECKSUM_DEFAULT_CORES, bank_bytes=None,

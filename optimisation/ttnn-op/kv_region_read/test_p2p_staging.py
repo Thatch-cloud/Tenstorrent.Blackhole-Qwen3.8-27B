@@ -1,17 +1,20 @@
-"""CPU tests of the P2P restore's device ops (ttnn.qwen_p2p_staging_alloc / _info, qwen_write_blocks_from_staging, qwen_staging_checksum;
-docs/tp4-p2p-restore.md), everything that can be checked without a card:
+"""CPU tests of the P2P device ops (ttnn.qwen_p2p_staging_alloc / _info, qwen_blocks_to_staging, qwen_write_blocks_from_staging, qwen_blocks_digest_async, qwen_p2p_warm /
+_freeze, qwen_staging_checksum; docs/tp4-p2p-restore.md), everything that can be checked without a card:
 
   * the checksum algorithm: numpy, plain Python and the three shared test vectors (INTERFACE section 4) agree;
-  * qwen_p2p_plan.hpp (the pure arithmetic of the extension) is compiled and every function is compared with its Python mirror;
-  * the arithmetic block of the checksum kernel is compiled as it stands in the kernel and reproduces the vectors;
-  * BOTH DEVICE KERNELS are compiled against a host stand-in of the dataflow API (emu/) and RUN, driven by the same argument builders the
-    extension uses: the scatter kernel on random block sets, page sizes, offsets (including the end of the ring), banks and launch splits; the
-    checksum kernel on the vectors, offsets and core counts. The stand-in performs NOC transfers late (at the barrier) and refuses a
-    sub-page access, an unaligned DRAM address, an access outside the allowed range and a kernel that ends with a transfer pending;
+  * the block-row digest: the checksum over a block's shard (its rows in the tensors, in canonical order), against numpy; linearity; k continuing across tensors;
+  * qwen_p2p_plan.hpp (the pure arithmetic of the extension) is compiled and every function is compared with its Python mirror (p2p_staging_ref.py), with the Gemma
+    geometry (69,632-byte rows of 64 pages of 1,088 bytes, 696,320-byte shards, 96 objects per staging slot) among the cases;
+  * the arithmetic block of the checksum kernel is compiled as it stands in the kernel and reproduces the vectors, and the digest kernel carries the same block;
+  * ALL FOUR DEVICE KERNELS (scatter, gather, checksum, digest) are compiled against a host stand-in of the dataflow API (emu/) and RUN, driven by the same argument builders
+    the extension uses: on random block sets, page sizes, offsets (including the end of the ring), banks and launch splits. The stand-in performs NOC transfers late (at the
+    barrier) and refuses a sub-page access, an unaligned DRAM address, an access outside the allowed pages and a kernel that ends with a transfer pending;
   * the emulation has teeth: deliberately broken copies of each kernel are caught;
-  * the extension source, the build script and the card test agree with the contract (names, version, argument names, no private strings).
+  * the reader of the serialized cluster descriptor (which tt-kmd device and which PCI address each chip has) is compiled as it stands in the extension and run on descriptors
+    in UMD's format: a permutation of chips and devices comes through as a permutation;
+  * the extension source, the build script and the card test agree with the contract (names, version, argument names and order, validation before enqueue, no private strings).
 
-Run from this directory:  python3 -B -m unittest discover -p 'test_p2p_staging.py'   (numpy and a C++ compiler; python 3.11 or later in CI)
+Run from this directory:  python3 -B -m unittest discover -p 'test_p2p_staging.py'   (numpy and a C++ compiler; python 3.10 or later)
 """
 
 import os
@@ -32,6 +35,8 @@ import p2p_staging_ref as ref  # noqa: E402
 PLAN = os.path.join(HERE, 'qwen_p2p_plan.hpp')
 SCATTER = os.path.join(HERE, 'qwen_p2p_scatter.cpp')
 CHECKSUM = os.path.join(HERE, 'qwen_p2p_checksum.cpp')
+GATHER = os.path.join(HERE, 'qwen_p2p_gather.cpp')
+DIGEST = os.path.join(HERE, 'qwen_p2p_digest_rows.cpp')
 EXTENSION = os.path.join(HERE, 'qwen_kv_read.cpp')
 BUILD = os.path.join(HERE, 'build_kv_read.sh')
 
@@ -185,6 +190,83 @@ CHECKSUM_ARG_CASES = [
 ]
 
 
+GEMMA_PAGE = 1088                      # one bfp8 tile of a Gemma KV block
+GEMMA_PAGES_PER_BLOCK = 64             # a block is 64 pages
+GEMMA_ROW = GEMMA_PAGE * GEMMA_PAGES_PER_BLOCK   # 69,632 bytes: one block's row of ONE tensor on one chip
+GEMMA_TENSORS = 10                     # K0, V0 .. K4, V4
+GEMMA_SHARD = GEMMA_TENSORS * GEMMA_ROW  # 696,320 bytes: one block (object) on one chip, 170 x 4096
+GEMMA_RING = 64 << 20                  # staging bytes per bank
+GEMMA_CANARY = 4096
+GEMMA_SLOT_OBJECTS = 96
+# check_gather(byte_offset, slice_bytes, page_bytes, pages_per_block, blocks, staging_bytes, row_stride): Gemma's geometry, the slot of 96 objects of bank 0.
+GATHER_CASES = [
+    (8192, GEMMA_ROW, GEMMA_PAGE, 64, 96, GEMMA_RING, GEMMA_SHARD),                    # 0: fine: the slot after the canary page
+    (8192, GEMMA_ROW, GEMMA_PAGE, 64, 0, GEMMA_RING, GEMMA_SHARD),                     # no blocks
+    (8192, GEMMA_ROW, GEMMA_PAGE, 63, 1, GEMMA_RING, GEMMA_SHARD),                     # pages_per_block one short of the tensor's block
+    (8192, GEMMA_ROW, GEMMA_PAGE, 65, 1, GEMMA_RING, GEMMA_SHARD),                     # one over
+    (0, GEMMA_ROW, GEMMA_PAGE, 0, 1, GEMMA_RING, GEMMA_SHARD),                         # pages_per_block 0
+    (0, GEMMA_ROW, GEMMA_PAGE, 64, 513, GEMMA_RING, GEMMA_ROW),                        # 5: more than one launch
+    (0, GEMMA_ROW, GEMMA_PAGE, 64, 512, GEMMA_RING, GEMMA_ROW),                        # 512 blocks, contiguous: fine
+    (GEMMA_RING - (95 * GEMMA_SHARD + GEMMA_ROW), GEMMA_ROW, GEMMA_PAGE, 64, 96, GEMMA_RING, GEMMA_SHARD),   # 7: ends on the last byte of the bank's range: fine
+    (GEMMA_RING - (95 * GEMMA_SHARD + GEMMA_ROW) + 64, GEMMA_ROW, GEMMA_PAGE, 64, 96, GEMMA_RING, GEMMA_SHARD),   # 8: 64 bytes later: past the end
+    (8192, GEMMA_ROW, GEMMA_PAGE, 64, 1, GEMMA_RING, GEMMA_ROW - 64),                  # a stride below the block
+    (8192, GEMMA_ROW, GEMMA_PAGE, 64, 2, GEMMA_RING, GEMMA_SHARD + 32),                # 10: a stride that is not a multiple of 64
+    (8200, GEMMA_ROW, GEMMA_PAGE, 64, 1, GEMMA_RING, GEMMA_SHARD),                     # byte_offset not a multiple of 64
+    (0, 64000, 1000, 64, 1, GEMMA_RING, 64000),                                        # 12: a page that is not a multiple of 64
+    (0, 131072, 16384, 8, 1, GEMMA_RING, 131072),                                      # a page above 8192
+    (0, GEMMA_ROW, GEMMA_PAGE, 64, 1, 0, GEMMA_ROW),                                   # 14: an empty staging range
+    (0, GEMMA_ROW, GEMMA_PAGE, 64, 2, GEMMA_RING, 1 << 63),                            # a stride so large that blocks * stride would wrap 64 bits
+    (0, GEMMA_ROW, GEMMA_PAGE, 64, 1, GEMMA_ROW, 1 << 40),                             # 16: one row needs no room for a stride: fine
+    (0, GEMMA_ROW + 64, GEMMA_PAGE, 64, 1, GEMMA_RING, GEMMA_ROW + 64),                # a block that is not whole pages
+    (0, GEMMA_ROW, GEMMA_PAGE, 64, 1 << 33, GEMMA_RING, GEMMA_ROW),                    # 18: more blocks than 32 bits can count
+]
+GATHER_OK = [0, 6, 7, 16]
+# check_digest_rows(tensors, blocks, pages_per_block, page_bytes, slices)
+DIGEST_CASES = [
+    (10, 96, 64, 1088, 19305),                             # 0: Gemma's slot of 96 objects, 10 tensors, the production pool
+    (0, 96, 64, 1088, 19305),                              # no tensors
+    (17, 96, 64, 1088, 19305),                             # 17 tensors
+    (16, 128, 64, 1088, 19305),                            # 3: the largest call
+    (1, 1, 64, 1088, 19305),                               # the smallest
+    (10, 0, 64, 1088, 19305),                              # no blocks
+    (10, 129, 64, 1088, 19305),                            # 6: 129 blocks
+    (10, 96, 64, 1000, 19305),                             # a page that is not a multiple of 64
+    (10, 96, 64, 16384, 19305),                            # a page above 8192
+    (10, 96, 0, 1088, 19305),                              # pages_per_block 0
+    (10, 96, 64, 1088, 0),                                 # 10: no slices
+    (10, 96, 64, 1088, 1 << 27),                           # page ids past 32 bits
+    (10, 96, 64, 1088, (1 << 26) - 1),                     # 12: the last pool whose page ids fit
+    (10, 96, 64, 1088, 1 << 26),                           # one more block than that
+    (10, 96, 64, 8192, 100),                               # 14: the largest page
+]
+DIGEST_OK = [0, 3, 4, 12, 14]
+# check_staging(size_bytes, page_bytes, num_banks, bank_bytes)
+STAGING_CASES = [
+    (1 << 20, 4096, 8, 1 << 30),                           # 0: fine
+    (1 << 20, 4096, 0, 1 << 30),                           # no banks
+    (1000, 4096, 8, 1 << 30),                              # not a multiple of the page
+    (1 << 20, 100, 8, 1 << 30),                            # a page that is not a multiple of 64
+    (0, 4096, 8, 1 << 30),                                 # empty
+    (2 << 30, 4096, 8, 1 << 30),                           # more than the bank can give
+    (1 << 32, 4096, 8, 1 << 40),                           # 32-bit offsets
+    (1 << 30, 4096, 8, 1 << 30),                           # 7: exactly what the bank can give: fine
+    (6400, 64, 8, 1 << 30),                                # a multiple of the page but not of 4096
+    (GEMMA_RING, 65536, 8, 4 << 30),                       # 9: Gemma's 64 MiB per bank
+]
+STAGING_OK = [0, 7, 9]
+# digest_core_args(partials 5000, tensor addresses 1000 + 64 t, block ids 7 i + 3, run): (tensors, blocks in the call, run first, run count)
+DIGEST_ARG_CASES = [
+    (10, 96, 0, 2),                                        # a core with two blocks
+    (10, 96, 95, 1),                                       # the last block
+    (10, 96, 96, 0),                                       # a core past the end
+    (16, 128, 126, 2),                                     # the largest call, the last core
+    (1, 1, 0, 1),
+    (3, 5, 4, 1),
+]
+# check_block_ids(blocks, 130, require_distinct): the blocks of each case
+BLOCK_ID_CASES = [[1, 2, 3], [1, 2, 2], [5, 130, 7], [], [0], [129, 3, 129], [131]]
+
+
 def cpp_table(name, rows):
     """A C++ table of uint64 rows -> the source of `static const unsigned long long name[][n] = {...}` (as std::vector rows for range-for)."""
     return 'static const std::vector<std::vector<unsigned long long>> %s = {%s};' % (name, ', '.join('{%s}' % ', '.join('%dull' % v for v in row) for row in rows))
@@ -205,6 +287,10 @@ class PlanMirrorTests(unittest.TestCase):
 #include "%s"
 using namespace qwen_p2p;
 static void pr(const char* s) { std::printf("%%s\\n", s ? s : "OK"); }
+%s
+%s
+%s
+%s
 %s
 %s
 %s
@@ -234,14 +320,6 @@ int main() {
   for (uint32_t p : {64u, 1088u, 4096u}) std::printf("C %%u %%u %%u\\n", p, scatter_cb_bytes(p), checksum_cb_bytes());
   for (const auto& c : scatter_cases) { std::printf("S "); pr(check_scatter(c[0], c[1], c[2], c[3], c[4], c[5])); }
   for (const auto& c : checksum_cases) { std::printf("K "); pr(check_checksum(c[0], c[1], c[2], (uint32_t)c[3], c[4])); }
-  std::printf("G "); pr(check_staging(1 << 20, 4096, 0, 8, 1ull << 30));
-  std::printf("G "); pr(check_staging(1 << 20, 4096, 8, 8, 1ull << 30));
-  std::printf("G "); pr(check_staging(1000, 4096, 0, 8, 1ull << 30));
-  std::printf("G "); pr(check_staging(1 << 20, 100, 0, 8, 1ull << 30));
-  std::printf("G "); pr(check_staging(0, 4096, 0, 8, 1ull << 30));
-  std::printf("G "); pr(check_staging(2ull << 30, 4096, 0, 8, 1ull << 30));
-  std::printf("G "); pr(check_staging(1ull << 32, 4096, 0, 8, 1ull << 40));
-  std::printf("G "); pr(check_staging(1ull << 30, 4096, 0, 8, 1ull << 30));
   std::vector<uint32_t> blocks; for (uint32_t i = 0; i < 40; ++i) blocks.push_back(1000 - 7 * i);
   for (auto a : scatter_arg_cases) {
     auto args = scatter_core_args(111, 222, 5, a[0], a[1], blocks, (uint32_t)a[2], {(uint32_t)a[3], (uint32_t)a[4]});
@@ -251,9 +329,35 @@ int main() {
     auto cargs = checksum_core_args(111, 222, 5, a[0], {a[1], a[2]}, (uint32_t)a[3], (uint32_t)a[4], a[5], (uint32_t)a[6]);
     std::printf("T"); for (auto v : cargs) std::printf(" %%u", v); std::printf("\\n");
   }
+  for (const auto& c : gather_cases) { std::printf("H "); pr(check_gather(c[0], c[1], c[2], c[3], c[4], c[5], c[6])); }
+  for (const auto& c : digest_cases) { std::printf("D "); pr(check_digest_rows(c[0], c[1], c[2], c[3], c[4])); }
+  for (const auto& c : staging_cases) { std::printf("G "); pr(check_staging(c[0], c[1], (uint32_t)c[2], c[3])); }
+  for (uint64_t bank : {0ull, 7ull, 8ull, 1000ull}) { std::printf("N "); pr(check_bank(bank, 8)); }
+  {
+    std::vector<std::vector<uint32_t>> ids = {{1, 2, 3}, {1, 2, 2}, {5, 130, 7}, {}, {0}, {129, 3, 129}, {131}};
+    for (const auto& v : ids) for (int distinct = 0; distinct < 2; ++distinct) {
+      size_t bad = 99; const char* r = check_block_ids(v, 130, distinct != 0, &bad);
+      std::printf("I %%s %%zu\\n", r ? r : "OK", r ? bad : (size_t)0);
+    }
+  }
+  for (uint32_t p : {64u, 1088u, 4096u, 8192u}) std::printf("E %%u %%u %%u\\n", p, gather_cb_bytes(p), digest_cb_bytes(p));
+  for (auto a : scatter_arg_cases) {
+    auto gargs = gather_core_args(111, 222, 5, a[0], a[1], blocks, (uint32_t)a[2], {(uint32_t)a[3], (uint32_t)a[4]});
+    std::printf("A2"); for (auto v : gargs) std::printf(" %%u", v); std::printf("\\n");
+  }
+  for (auto a : digest_arg_cases) {
+    std::vector<uint32_t> addresses; for (uint32_t t = 0; t < a[0]; ++t) addresses.push_back(1000 + 64 * t);
+    std::vector<uint32_t> ids; for (uint32_t i = 0; i < a[1]; ++i) ids.push_back(7 * i + 3);
+    auto dargs = digest_core_args(5000, addresses, ids, {(uint32_t)a[2], (uint32_t)a[3]});
+    std::printf("Z"); for (auto v : dargs) std::printf(" %%u", v); std::printf("\\n");
+  }
+  for (uint32_t n : {96u, 128u, 1u, 80u, 81u}) {
+    std::printf("Y"); for (auto r : split_blocks(n, kDigestMaxCores)) std::printf(" %%u,%%u", r.first, r.second); std::printf("\\n");
+  }
 }
 ''' % (PLAN.replace('\\', '/'), cpp_table('scatter_cases', SCATTER_CASES), cpp_table('checksum_cases', CHECKSUM_CASES),
-       cpp_table('scatter_arg_cases', SCATTER_ARG_CASES), cpp_table('checksum_arg_cases', CHECKSUM_ARG_CASES)))
+       cpp_table('scatter_arg_cases', SCATTER_ARG_CASES), cpp_table('checksum_arg_cases', CHECKSUM_ARG_CASES), cpp_table('gather_cases', GATHER_CASES),
+       cpp_table('digest_cases', DIGEST_CASES), cpp_table('digest_arg_cases', DIGEST_ARG_CASES), cpp_table('staging_cases', STAGING_CASES)))
         exe = os.path.join(cls.directory, 'dump')
         done = subprocess.run([ref.compiler(), '-std=c++17', '-Wall', '-Wextra', '-Werror', source, '-o', exe], capture_output=True, text=True)
         if done.returncode:
@@ -274,7 +378,11 @@ int main() {
                             ('kChecksumChunkBytes', ref.CHECKSUM_CHUNK_BYTES), ('kChecksumPartialBytes', ref.CHECKSUM_PARTIAL_BYTES),
                             ('kChecksumColumns', ref.CHECKSUM_COLUMNS), ('kChecksumDefaultCores', ref.CHECKSUM_DEFAULT_CORES),
                             ('kChecksumMaxCores', ref.CHECKSUM_MAX_CORES), ('kChecksumMaxRanges', ref.CHECKSUM_MAX_RANGES), ('kChecksumArgs', ref.CHECKSUM_ARGS),
-                            ('kDramAlignment', ref.DRAM_ALIGNMENT)):
+                            ('kDramAlignment', ref.DRAM_ALIGNMENT), ('kP2PMaxBlocksPerCall', ref.P2P_MAX_BLOCKS_PER_CALL), ('kDigestColumns', ref.DIGEST_COLUMNS),
+                            ('kDigestMaxCores', ref.DIGEST_MAX_CORES), ('kDigestMaxTensors', ref.DIGEST_MAX_TENSORS), ('kDigestMaxBlocks', ref.DIGEST_MAX_BLOCKS),
+                            ('kDigestMaxBlocksPerCore', ref.DIGEST_MAX_BLOCKS_PER_CORE), ('kDigestChunkPages', ref.DIGEST_CHUNK_PAGES),
+                            ('kDigestMaxPageBytes', ref.DIGEST_MAX_PAGE_BYTES), ('kDigestPartialBytes', ref.DIGEST_PARTIAL_BYTES),
+                            ('kDigestRingBuffers', ref.DIGEST_RING_BUFFERS), ('kDigestFixedArgs', ref.DIGEST_FIXED_ARGS), ('kDigestArgs', ref.DIGEST_ARGS)):
             match = re.search(r'constexpr uint32_t %s = (\d+);' % name, text)
             self.assertIsNotNone(match, name)
             self.assertEqual(int(match.group(1)), value, name)
@@ -333,11 +441,119 @@ int main() {
         self.assertEqual(want[10], 'count must be at least 1')
         for index in (9, 12, 13, 15, 17, 18):
             self.assertEqual(want[index], 'the byte range lies outside the staging range', index)
-        want = [ref.check_staging(1 << 20, 4096, 0, 8, 1 << 30), ref.check_staging(1 << 20, 4096, 8, 8, 1 << 30), ref.check_staging(1000, 4096, 0, 8, 1 << 30),
-                ref.check_staging(1 << 20, 100, 0, 8, 1 << 30), ref.check_staging(0, 4096, 0, 8, 1 << 30), ref.check_staging(2 << 30, 4096, 0, 8, 1 << 30),
-                ref.check_staging(1 << 32, 4096, 0, 8, 1 << 40), ref.check_staging(1 << 30, 4096, 0, 8, 1 << 30)]
+
+    def test_gather_checks_with_gemma_geometry(self):
+        want = [ref.check_gather(*case) for case in GATHER_CASES]
+        self.assertEqual([None if x == 'OK' else x for x in self.of('H')], want)
+        self.assertEqual([index for index, problem in enumerate(want) if problem is None], GATHER_OK)
+        self.assertEqual(want[1], 'no blocks')
+        for index in (2, 3, 4, 17):
+            self.assertIn('pages_per_block', want[index], index)
+        for index in (5, 18):
+            self.assertEqual(want[index], 'at most 512 blocks per call (one launch)', index)
+        self.assertIn('row_stride', want[9])
+        self.assertIn('row_stride', want[10])
+        self.assertIn('multiple of 64', want[11])
+        self.assertIn('page size must be a multiple of 64', want[12])
+        self.assertIn('above 8192', want[13])
+        for index in (8, 14, 15):
+            self.assertEqual(want[index], 'the byte range lies outside the staging range', index)
+        # the slot of the design: the canary page (4 KiB), then 96 objects of 696,320 bytes, fits one 64 MiB bank with room to spare
+        self.assertEqual(GEMMA_ROW, 69632)
+        self.assertEqual(GEMMA_SHARD, 696320)
+        self.assertEqual(GEMMA_SHARD % 4096, 0)
+        self.assertLessEqual(GEMMA_CANARY + GEMMA_SLOT_OBJECTS * GEMMA_SHARD, GEMMA_RING)
+        self.assertEqual(GEMMA_CANARY + GEMMA_SLOT_OBJECTS * GEMMA_SHARD, 66850816)
+        # every tensor's rows of the slot: the tensor t of object i sits at slot base + t * 69,632 + i * 696,320 and the last of them ends inside the slot
+        last = GEMMA_CANARY + (GEMMA_TENSORS - 1) * GEMMA_ROW + (GEMMA_SLOT_OBJECTS - 1) * GEMMA_SHARD + GEMMA_ROW
+        self.assertEqual(last, GEMMA_CANARY + GEMMA_SLOT_OBJECTS * GEMMA_SHARD)
+        for tensor in range(GEMMA_TENSORS):
+            self.assertIsNone(ref.check_gather(GEMMA_CANARY + tensor * GEMMA_ROW, GEMMA_ROW, GEMMA_PAGE, 64, GEMMA_SLOT_OBJECTS, GEMMA_RING, GEMMA_SHARD), tensor)
+
+    def test_the_edge_of_the_bank_is_exact_for_the_gather(self):
+        """The last byte of the bank's range is writable; one 64-byte unit further is not (an off-by-one in either direction fails here)."""
+        edge = GEMMA_RING - (95 * GEMMA_SHARD + GEMMA_ROW)
+        self.assertEqual(edge % 64, 0)
+        self.assertIsNone(ref.check_gather(edge, GEMMA_ROW, GEMMA_PAGE, 64, 96, GEMMA_RING, GEMMA_SHARD))
+        self.assertIsNotNone(ref.check_gather(edge + 64, GEMMA_ROW, GEMMA_PAGE, 64, 96, GEMMA_RING, GEMMA_SHARD))
+        self.assertIsNotNone(ref.check_gather(edge, GEMMA_ROW, GEMMA_PAGE, 64, 97, GEMMA_RING, GEMMA_SHARD))
+        self.assertIsNone(ref.check_gather(edge, GEMMA_ROW, GEMMA_PAGE, 64, 96, GEMMA_RING + 1, GEMMA_SHARD))
+
+    def test_digest_checks_with_gemma_geometry(self):
+        want = [ref.check_digest_rows(*case) for case in DIGEST_CASES]
+        self.assertEqual([None if x == 'OK' else x for x in self.of('D')], want)
+        self.assertEqual([index for index, problem in enumerate(want) if problem is None], DIGEST_OK)
+        self.assertEqual(want[1], 'tensors must be 1 to 16')
+        self.assertEqual(want[2], 'tensors must be 1 to 16')
+        self.assertEqual(want[5], 'blocks must be 1 to 128')
+        self.assertEqual(want[6], 'blocks must be 1 to 128')
+        self.assertIn('multiple of 64', want[7])
+        self.assertIn('above 8192', want[8])
+        self.assertIn('pages_per_block', want[9])
+        for index in (10, 11, 13):
+            self.assertIn('32 bits', want[index], index)
+
+    def test_staging_and_bank_checks(self):
+        want = [ref.check_staging(*case) for case in STAGING_CASES]
         self.assertEqual([None if x == 'OK' else x for x in self.of('G')], want)
-        self.assertEqual([x is None for x in want], [True, False, False, False, False, False, False, True])
+        self.assertEqual([index for index, problem in enumerate(want) if problem is None], STAGING_OK)
+        self.assertIn('multiple of 4096', want[8])
+        self.assertEqual(want[1], 'the device has no DRAM banks')
+        banks = [None if x == 'OK' else x for x in self.of('N')]
+        self.assertEqual(banks, [ref.check_bank(b, 8) for b in (0, 7, 8, 1000)])
+        self.assertEqual([b is None for b in banks], [True, True, False, False])
+
+    def test_block_id_checks(self):
+        lines = self.of('I')
+        self.assertEqual(len(lines), 2 * len(BLOCK_ID_CASES))
+        index = 0
+        for blocks in BLOCK_ID_CASES:
+            for distinct in (False, True):
+                reason, bad = ref.check_block_ids(blocks, 130, distinct)
+                words = lines[index].rsplit(' ', 1)
+                got_reason, got_bad = words[0], int(words[1])
+                self.assertEqual((None if got_reason == 'OK' else got_reason, got_bad if got_reason != 'OK' else None), (reason, bad if reason else None), (blocks, distinct))
+                index += 1
+        self.assertEqual(ref.check_block_ids([1, 2, 2], 130, False), (None, None), 'a gather and a digest only read: a repeated id is fine')
+        self.assertEqual(ref.check_block_ids([1, 2, 2], 130, True)[0][:17], 'the block ids mus', 'a scatter needs distinct ids')
+        self.assertEqual(ref.check_block_ids([5, 130, 7], 130, False), ('a block id is outside the tensor', 1), 'the first offender is named')
+        self.assertEqual(ref.check_block_ids([129, 3, 129], 130, True)[1], 0)
+
+    def test_gather_and_digest_arguments_and_buffers(self):
+        scatter_lines, gather_lines = self.of('A'), self.of('A2')
+        self.assertEqual(scatter_lines, gather_lines, 'the gather\'s runtime args are the scatter\'s, value for value')
+        blocks = [1000 - 7 * i for i in range(40)]
+        for line, (byte_offset, row_stride, launch_first, first, count) in zip(gather_lines, SCATTER_ARG_CASES):
+            args = ref.gather_core_args(111, 222, 5, byte_offset, row_stride, blocks, launch_first, (first, count))
+            self.assertEqual([int(x) for x in line.split()], args)
+            self.assertEqual(len(args), ref.SCATTER_ARGS, 'the gather has the scatter\'s constant argument count')
+        for line, (tensors, total, first, count) in zip(self.of('Z'), DIGEST_ARG_CASES):
+            addresses = [1000 + 64 * t for t in range(tensors)]
+            ids = [7 * i + 3 for i in range(total)]
+            args = ref.digest_core_args(5000, addresses, ids, (first, count))
+            self.assertEqual([int(x) for x in line.split()], args)
+            self.assertEqual(len(args), ref.DIGEST_ARGS)
+            self.assertEqual(args[:4], [5000, tensors, count, first])
+            self.assertEqual(args[4:4 + tensors], addresses)
+            self.assertTrue(all(v == 0 for v in args[4 + tensors:4 + ref.DIGEST_MAX_TENSORS]), 'unused tensor slots are zero')
+            self.assertEqual(args[20:20 + count], ids[first:first + count])
+            self.assertTrue(all(v == 0 for v in args[20 + count:]), 'unused block slots are zero')
+        for line, page in zip(self.of('E'), (64, 1088, 4096, 8192)):
+            words = [int(x) for x in line.split()]
+            self.assertEqual(words, [page, ref.gather_cb_bytes(page), ref.digest_cb_bytes(page)])
+        self.assertEqual(ref.gather_cb_bytes(1088), 34880, 'the gather\'s scratch is the design\'s 34,880 bytes')
+        self.assertEqual(ref.digest_cb_bytes(1088), 64 + 2 * 8 * 1088 + 64)
+
+    def test_the_digest_covers_every_block_of_a_call_with_at_most_two_per_core(self):
+        for line, n in zip(self.of('Y'), (96, 128, 1, 80, 81)):
+            runs = [tuple(int(x) for x in item.split(',')) for item in line.split()]
+            self.assertEqual(runs, ref.split_blocks(n, ref.DIGEST_MAX_CORES))
+            self.assertEqual(len(runs), ref.DIGEST_MAX_CORES)
+            self.assertEqual(sum(count for _, count in runs), n)
+            self.assertLessEqual(max(count for _, count in runs), ref.DIGEST_MAX_BLOCKS_PER_CORE)
+            self.assertTrue(all(a[0] + a[1] == b[0] for a, b in zip(runs, runs[1:])), 'runs are contiguous')
+        self.assertEqual(ref.DIGEST_MAX_CORES % ref.DIGEST_COLUMNS, 0)
+        self.assertEqual((ref.DIGEST_COLUMNS, ref.DIGEST_MAX_CORES // ref.DIGEST_COLUMNS), (10, 8), 'ten columns by eight rows fits the 10 x 9 grid the serving image pins as well as 13 x 10')
 
     def test_the_contiguous_default_is_todays_behaviour(self):
         """row_stride == slice_bytes (what None means) is accepted and refused exactly where the contiguous op was: the same reasons, the same boundaries."""
@@ -586,6 +802,21 @@ class ScatterKernelEmulationTests(unittest.TestCase):
         out_b, want_b, _, _ = self.scenario(rng, 1088, 16, 2, 4160, [3, 5, 1], 8, row_stride=17408)
         self.assertTrue(np.array_equal(out_a, out_b))
         self.assertTrue(np.array_equal(want_a, want_b))
+
+    def test_the_gemma_object_major_layout(self):
+        """Gemma's staged object: ten rows of 69,632 bytes (64 pages of 1,088) per block, 696,320 bytes apart. One tensor's rows are read with row_stride 696,320 from
+        slot base + tensor x 69,632; the other nine tensors' rows, in the gaps, are never read."""
+        for tensor in (0, 4, 9):
+            with self.subTest(tensor=tensor):
+                line, _ = self.check(GEMMA_PAGE, GEMMA_PAGES_PER_BLOCK, 3, GEMMA_CANARY + tensor * GEMMA_ROW, [9, 2, 30, 17, 4, 11, 20, 21, 22, 23, 1, 0], 40,
+                                     row_stride=GEMMA_SHARD, seed=tensor)
+                self.assertIn('reads=768 writes=768', line, 'only the rows are read')
+
+    def test_a_full_gemma_slot_of_96_objects(self):
+        rng = np.random.default_rng(91)
+        blocks = [int(b) for b in rng.permutation(100)[:GEMMA_SLOT_OBJECTS]]
+        line, _ = self.check(GEMMA_PAGE, GEMMA_PAGES_PER_BLOCK, 6, GEMMA_CANARY + 7 * GEMMA_ROW, blocks, 100, row_stride=GEMMA_SHARD, seed=92)
+        self.assertIn('reads=%d writes=%d' % (96 * 64, 96 * 64), line)
 
     def test_the_stand_in_refuses_a_misaligned_destination_page(self):
         """The emulation has a rule for the sub-page no-op: a page size that is not a multiple of 64 cannot be addressed whole."""
@@ -838,83 +1069,799 @@ class EmulationHasTeethTests(unittest.TestCase):
                 self.assertTrue(caught, 'the emulation accepted: ' + name)
 
 
+@unittest.skipUnless(have_compiler(), 'no C++ compiler')
+class GatherKernelEmulationTests(unittest.TestCase):
+    """qwen_p2p_gather.cpp, compiled and run on the CPU, against numpy. Transfers land at their barrier (late); the subclass below issues them at once.
+    The staging range holds NOISE before the call: every byte outside the rows (the gaps between two rows, the rest of the ring) must come back unchanged, and the
+    harness lets the kernel read only the pages of the blocks it was asked for and write only the pages of the rows."""
+
+    eager = False
+
+    def setUp(self):
+        self.directory = tempfile.mkdtemp(prefix='p2p_gather_')
+        self.addCleanup(shutil.rmtree, self.directory, True)
+
+    def gather(self, rng, page, ppb, bank, byte_offset, blocks, slices, staging_address=4096, ring=None, row_stride=None, tensor=None, staging_in=None):
+        slice_bytes = page * ppb
+        stride = slice_bytes if row_stride is None else row_stride
+        if ring is None:
+            ring = byte_offset + (len(blocks) - 1) * stride + slice_bytes
+        if tensor is None:
+            tensor = rng.integers(0, 256, (slices * ppb, page), dtype=np.uint8)
+        if staging_in is None:
+            staging_in = rng.integers(0, 256, ring, dtype=np.uint8)
+        out, line = ref.run_gather_emulation(self.directory, page, ppb, bank, staging_address, byte_offset, staging_in.tobytes(), slices * ppb, None, blocks, tensor,
+                                             eager=self.eager, row_stride=row_stride)
+        want = staging_in.copy()
+        for i, block in enumerate(blocks):
+            want[byte_offset + i * stride:byte_offset + i * stride + slice_bytes] = tensor[block * ppb:(block + 1) * ppb].reshape(-1)
+        return np.frombuffer(out, dtype=np.uint8), want, line, tensor
+
+    def check(self, *args, seed=1, **keywords):
+        rng = np.random.default_rng(seed)
+        out, want, line, _ = self.gather(rng, *args, **keywords)
+        self.assertTrue(np.array_equal(out, want), 'the staging differs from the expected image: ' + line)
+        self.assertIn('stray=0', line, 'nothing outside the rows was written')
+        return line
+
+    def test_one_gemma_row(self):
+        line = self.check(GEMMA_PAGE, GEMMA_PAGES_PER_BLOCK, 0, 0, [5], 8)
+        self.assertIn('reads=64 writes=64', line)
+
+    def test_a_run_of_consecutive_blocks_crosses_pages_and_chunks(self):
+        line = self.check(GEMMA_PAGE, GEMMA_PAGES_PER_BLOCK, 3, 4096, list(range(10, 30)), 40)
+        self.assertIn('reads=1280 writes=1280', line)
+
+    def test_scattered_and_shuffled_blocks(self):
+        rng = np.random.default_rng(5)
+        blocks = [int(b) for b in rng.permutation(60)[:37]]
+        self.check(GEMMA_PAGE, GEMMA_PAGES_PER_BLOCK, 7, 64, blocks, 60, seed=2)
+
+    def test_repeated_block_ids_are_fine(self):
+        """A gather only reads: the same block twice gives two equal rows (the scatter refuses repeats, this does not)."""
+        self.check(GEMMA_PAGE, GEMMA_PAGES_PER_BLOCK, 1, 0, [4, 4, 2, 4], 6)
+
+    def test_every_bank(self):
+        for bank in range(8):
+            with self.subTest(bank=bank):
+                self.check(GEMMA_PAGE, GEMMA_PAGES_PER_BLOCK, bank, 128, [1, 4, 5], 8, seed=bank)
+
+    def test_the_gemma_object_major_layout_one_tensor_row_at_a_time(self):
+        """The slot of the design: object i of the slot holds, for each tensor t, the block's row at slot base + i x 696,320 + t x 69,632. One call per tensor
+        (row_stride 696,320, byte_offset = slot base + t x 69,632); the bytes of the other tensors' rows, in the gaps, are never touched."""
+        rng = np.random.default_rng(31)
+        objects, slices = 12, 40
+        base = GEMMA_CANARY
+        blocks = [int(b) for b in rng.permutation(slices)[:objects]]
+        ring = base + objects * GEMMA_SHARD
+        staging = rng.integers(0, 256, ring, dtype=np.uint8)
+        tensors = [rng.integers(0, 256, (slices * GEMMA_PAGES_PER_BLOCK, GEMMA_PAGE), dtype=np.uint8) for _ in range(GEMMA_TENSORS)]
+        want = staging.copy()
+        for t in range(GEMMA_TENSORS):
+            out, want_t, line, _ = self.gather(rng, GEMMA_PAGE, GEMMA_PAGES_PER_BLOCK, 3, base + t * GEMMA_ROW, blocks, slices, ring=ring, row_stride=GEMMA_SHARD,
+                                               tensor=tensors[t], staging_in=staging)
+            self.assertTrue(np.array_equal(out, want_t), 'tensor %d: %s' % (t, line))
+            self.assertIn('stray=0', line)
+            self.assertIn('reads=%d writes=%d' % (objects * 64, objects * 64), line)
+            staging = out.copy()
+        for i, block in enumerate(blocks):
+            rows = [tensors[t][block * 64:(block + 1) * 64] for t in range(GEMMA_TENSORS)]
+            shard = bytes(staging[base + i * GEMMA_SHARD:base + (i + 1) * GEMMA_SHARD])
+            self.assertEqual(shard, b''.join(r.tobytes() for r in rows), 'object %d is [tensor 0 row | tensor 1 row | ...]' % i)
+            # the layout is the digest's shard: the checksum of the staged object IS the digest of the rows it came from
+            self.assertEqual(ref.checksum_numpy(shard), ref.digest_shard(rows))
+        self.assertTrue(np.array_equal(staging[:base], want[:base]), 'the canary page before the slot is untouched')
+
+    def test_a_full_slot_of_96_objects_of_one_tensor(self):
+        rng = np.random.default_rng(32)
+        slices = 100
+        blocks = [int(b) for b in rng.permutation(slices)[:GEMMA_SLOT_OBJECTS]]
+        ring = GEMMA_CANARY + GEMMA_SLOT_OBJECTS * GEMMA_SHARD
+        line = self.check(GEMMA_PAGE, GEMMA_PAGES_PER_BLOCK, 5, GEMMA_CANARY + 4 * GEMMA_ROW, blocks, slices, ring=ring, row_stride=GEMMA_SHARD, seed=33)
+        self.assertIn('reads=%d writes=%d' % (96 * 64, 96 * 64), line)
+
+    def test_byte_offset_at_the_end_of_the_bank_range(self):
+        page, ppb, n = GEMMA_PAGE, GEMMA_PAGES_PER_BLOCK, 3
+        ring = 4 << 20
+        offset = ring - ((n - 1) * GEMMA_SHARD + GEMMA_ROW)
+        self.assertEqual(offset % 64, 0)
+        self.check(page, ppb, 1, offset, [0, 7, 3], 8, ring=ring, row_stride=GEMMA_SHARD)
+
+    def test_byte_offsets_that_are_64_but_not_1088_aligned(self):
+        for offset in (64, 192, 4096 + 64, 4160 + 3 * 17408):
+            with self.subTest(offset=offset):
+                self.check(GEMMA_PAGE, GEMMA_PAGES_PER_BLOCK, 2, offset, [3, 2, 9], 12)
+
+    def test_other_page_sizes_and_block_shapes(self):
+        for page, ppb in ((64, 1), (576, 3), (2048, 32), (1088, 1), (1088, 48), (4096, 5), (8192, 2), (1088, 20), (1088, 33)):
+            with self.subTest(page=page, pages_per_block=ppb):
+                self.check(page, ppb, 6, 0, [4, 1, 7, 6], 10, seed=page + ppb)
+
+    def test_more_blocks_than_one_core_takes_up_to_a_full_launch(self):
+        """17 blocks over 16 cores, 100 over 16, 512 = 16 cores x 32 blocks (the most one call may carry)."""
+        for n in (17, 100, 512):
+            with self.subTest(blocks=n):
+                rng = np.random.default_rng(n)
+                blocks = [int(b) for b in rng.permutation(n + 30)[:n]]
+                line = self.check(64, 2, 5, 0, blocks, n + 30, seed=n)
+                self.assertIn('reads=%d writes=%d' % (2 * n, 2 * n), line)
+
+    def test_strided_rows_for_other_page_sizes_and_block_shapes(self):
+        for page, ppb in ((64, 1), (576, 3), (2048, 32), (1088, 1), (1088, 48), (4096, 5), (8192, 2), (1088, 20)):
+            with self.subTest(page=page, pages_per_block=ppb):
+                self.check(page, ppb, 6, 64, [4, 1, 7, 6], 10, row_stride=page * ppb + 192, seed=page)
+
+    def test_a_stride_equal_to_the_block_is_the_contiguous_layout(self):
+        rng = np.random.default_rng(21)
+        out_a, want_a, _, _ = self.gather(rng, 1088, 16, 2, 4160, [3, 5, 1], 8)
+        rng = np.random.default_rng(21)
+        out_b, want_b, _, _ = self.gather(rng, 1088, 16, 2, 4160, [3, 5, 1], 8, row_stride=17408)
+        self.assertTrue(np.array_equal(out_a, out_b) and np.array_equal(want_a, want_b))
+
+    def test_the_stand_in_refuses_a_misaligned_page(self):
+        rng = np.random.default_rng(3)
+        with self.assertRaises(RuntimeError) as caught:
+            self.gather(rng, 100, 2, 0, 0, [1], 4)
+        self.assertIn('EMU-VIOLATION', str(caught.exception))
+
+    def test_the_scatter_undoes_the_gather(self):
+        """gather (tensor A, blocks) -> staging -> scatter (into tensor B at other blocks): B's rows are A's, the rest of B untouched. Gemma geometry, 6 objects."""
+        rng = np.random.default_rng(41)
+        slices, n = 40, 6
+        src = [int(b) for b in rng.permutation(slices)[:n]]
+        dst = [int(b) for b in rng.permutation(slices)[:n]]
+        ring = GEMMA_CANARY + n * GEMMA_SHARD
+        tensor_a = rng.integers(0, 256, (slices * 64, GEMMA_PAGE), dtype=np.uint8)
+        tensor_b = rng.integers(0, 256, (slices * 64, GEMMA_PAGE), dtype=np.uint8)
+        staging = rng.integers(0, 256, ring, dtype=np.uint8)
+        out, _, line, _ = self.gather(rng, GEMMA_PAGE, 64, 4, GEMMA_CANARY + 2 * GEMMA_ROW, src, slices, ring=ring, row_stride=GEMMA_SHARD, tensor=tensor_a, staging_in=staging)
+        back, line = ref.run_scatter_emulation(self.directory, GEMMA_PAGE, 64, 4, 4096, GEMMA_CANARY + 2 * GEMMA_ROW, out.tobytes(), slices * 64, None, dst, tensor_b,
+                                               eager=self.eager, row_stride=GEMMA_SHARD)
+        want = tensor_b.copy()
+        for s, d in zip(src, dst):
+            want[d * 64:(d + 1) * 64] = tensor_a[s * 64:(s + 1) * 64]
+        self.assertTrue(np.array_equal(back, want), line)
+        self.assertIn('stray=0', line)
+
+
+class GatherKernelEmulationEagerTests(GatherKernelEmulationTests):
+    """The same scenarios with every transfer performed the moment it is issued (the other extreme of the NOC's timing)."""
+
+    eager = True
+
+
+@unittest.skipUnless(have_compiler(), 'no C++ compiler')
+class DigestKernelEmulationTests(unittest.TestCase):
+    """qwen_p2p_digest_rows.cpp, compiled and run on the CPU, against the numpy reference (the checksum over each block's shard). The harness lets the kernel read only
+    the pages of the blocks it was asked for, in every tensor, and write only the partial pages of those blocks."""
+
+    eager = False
+
+    def setUp(self):
+        self.directory = tempfile.mkdtemp(prefix='p2p_digest_')
+        self.addCleanup(shutil.rmtree, self.directory, True)
+
+    def tensors(self, rng, page, ppb, count, slices):
+        return [rng.integers(0, 256, (slices * ppb, page), dtype=np.uint8) for _ in range(count)]
+
+    def digest(self, tensors, page, ppb, blocks):
+        return ref.run_digest_emulation(self.directory, page, ppb, tensors, blocks, eager=self.eager)
+
+    def check(self, page, ppb, count, blocks, slices, seed=1, tensors=None):
+        rng = np.random.default_rng(seed)
+        tensors = self.tensors(rng, page, ppb, count, slices) if tensors is None else tensors
+        got, line = self.digest(tensors, page, ppb, blocks)
+        self.assertEqual(got, ref.digest_blocks(tensors, blocks, ppb), line)
+        self.assertIn('reads=%d writes=%d stray=0' % (count * len(blocks) * ppb, len(blocks)), line, 'every page of every row is read once, one partial page per block is written')
+        return got
+
+    def test_one_gemma_block_ten_tensors(self):
+        self.check(GEMMA_PAGE, GEMMA_PAGES_PER_BLOCK, GEMMA_TENSORS, [3], 8)
+
+    def test_a_gemma_slot_one_block_per_core_and_two_on_some(self):
+        """80 blocks (one per core), 81 (the first core takes two), 96 (the first 16 cores take two): the split of the plan header."""
+        for n in (80, 81, 96):
+            with self.subTest(blocks=n):
+                rng = np.random.default_rng(n)
+                blocks = [int(b) for b in rng.permutation(n + 4)[:n]]
+                self.check(GEMMA_PAGE, GEMMA_PAGES_PER_BLOCK, GEMMA_TENSORS, blocks, n + 4, seed=n)
+
+    def test_the_largest_call_128_blocks_16_tensors_of_small_rows(self):
+        rng = np.random.default_rng(7)
+        blocks = [int(b) for b in rng.permutation(130)[:128]]
+        self.check(1088, 4, 16, blocks, 130, seed=7)
+
+    def test_128_gemma_blocks_ten_tensors(self):
+        rng = np.random.default_rng(8)
+        blocks = [int(b) for b in rng.permutation(128)]
+        self.check(GEMMA_PAGE, GEMMA_PAGES_PER_BLOCK, GEMMA_TENSORS, blocks, 128, seed=8)
+
+    def test_any_number_of_tensors(self):
+        for count in (1, 2, 3, 16):
+            with self.subTest(tensors=count):
+                self.check(GEMMA_PAGE, GEMMA_PAGES_PER_BLOCK, count, [5, 2, 0, 7, 6], 8, seed=count)
+
+    def test_other_page_sizes_and_block_shapes(self):
+        """Rows that are not a whole number of the 8-page chunks (20 = 8 + 8 + 4, 9, 3, 1) and other pages."""
+        for page, ppb in ((64, 1), (576, 3), (1088, 20), (1088, 9), (2048, 32), (4096, 5), (8192, 2), (1088, 8), (1088, 16), (1088, 17)):
+            with self.subTest(page=page, pages_per_block=ppb):
+                self.check(page, ppb, 3, [4, 1, 7, 6, 0], 10, seed=page + ppb)
+
+    def test_a_block_repeated_in_a_call_is_digested_at_every_position(self):
+        got = self.check(GEMMA_PAGE, 8, 3, [4, 4, 2, 4], 6, seed=11)
+        self.assertEqual(got[0], got[1])
+        self.assertEqual(got[0], got[3])
+        self.assertNotEqual(got[0], got[2])
+
+    def test_a_digest_does_not_depend_on_the_other_blocks_of_the_call(self):
+        rng = np.random.default_rng(12)
+        tensors = self.tensors(rng, GEMMA_PAGE, 8, 3, 20)
+        alone, _ = self.digest(tensors, GEMMA_PAGE, 8, [9])
+        among, _ = self.digest(tensors, GEMMA_PAGE, 8, [1, 2, 3, 9, 4])
+        self.assertEqual(alone[0], among[3])
+
+    def test_all_zero_rows_digest_to_zero(self):
+        zeros = [np.zeros((8 * 4, GEMMA_PAGE), dtype=np.uint8) for _ in range(3)]
+        got, _ = self.digest(zeros, GEMMA_PAGE, 4, [0, 3])
+        self.assertEqual(got, [0, 0])
+
+    def test_the_tensor_order_is_part_of_the_digest(self):
+        rng = np.random.default_rng(13)
+        tensors = self.tensors(rng, GEMMA_PAGE, 8, 3, 6)
+        forward, _ = self.digest(tensors, GEMMA_PAGE, 8, [2, 5])
+        swapped, _ = self.digest([tensors[1], tensors[0], tensors[2]], GEMMA_PAGE, 8, [2, 5])
+        self.assertNotEqual(forward[0], swapped[0])
+        self.assertEqual(swapped, ref.digest_blocks([tensors[1], tensors[0], tensors[2]], [2, 5], 8))
+
+    def test_k_continues_from_one_tensor_to_the_next(self):
+        """The digest of T tensors is the sum of the checksum of tensor 0's row and the partial sums of the other rows, each starting at its own word of the shard:
+        sum_t checksum_with_offset(row_t, t x row_words). A kernel that restarted k at each tensor fails this."""
+        rng = np.random.default_rng(14)
+        ppb, count = 4, 3
+        tensors = self.tensors(rng, GEMMA_PAGE, ppb, count, 6)
+        got, _ = self.digest(tensors, GEMMA_PAGE, ppb, [1, 4])
+        row_words = ppb * GEMMA_PAGE // 4
+        for position, block in enumerate([1, 4]):
+            parts = [ref.checksum_with_offset(tensors[t][block * ppb:(block + 1) * ppb].tobytes(), ref.digest_words_offset(row_words, t)) for t in range(count)]
+            self.assertEqual(got[position], sum(parts) & ref.MASK64)
+        # and it is not the sum of independent per-tensor checksums
+        independent = sum(ref.checksum_numpy(tensors[t][1 * ppb:2 * ppb].tobytes()) for t in range(count)) & ref.MASK64
+        self.assertNotEqual(got[0], independent)
+
+    def test_the_digest_is_linear_in_the_data(self):
+        """S(a + b) = S(a) + S(b) mod 2^64 for words that add without wrapping: three runs of the kernel, A, B and A + B."""
+        rng = np.random.default_rng(15)
+        pages, page, ppb, count = 6 * 8, GEMMA_PAGE, 8, 2
+        words_a = [rng.integers(0, 1 << 31, (pages, page // 4), dtype=np.uint32) for _ in range(count)]
+        words_b = [rng.integers(0, 1 << 31, (pages, page // 4), dtype=np.uint32) for _ in range(count)]
+        as_bytes = lambda arrays: [a.view(np.uint8).reshape(pages, page) for a in arrays]
+        blocks = [0, 3, 5]
+        da, _ = self.digest(as_bytes(words_a), page, ppb, blocks)
+        db, _ = self.digest(as_bytes(words_b), page, ppb, blocks)
+        dab, line = self.digest(as_bytes([a + b for a, b in zip(words_a, words_b)]), page, ppb, blocks)
+        self.assertEqual(dab, [(x + y) & ref.MASK64 for x, y in zip(da, db)], line)
+        self.assertEqual(da, ref.digest_blocks(as_bytes(words_a), blocks, ppb))
+        # and scaling by 3 (no wrap)
+        d3, _ = self.digest(as_bytes([w // 3 * 3 for w in words_a]), page, ppb, blocks)
+        d1, _ = self.digest(as_bytes([w // 3 for w in words_a]), page, ppb, blocks)
+        self.assertEqual(d3, [(3 * x) & ref.MASK64 for x in d1])
+
+    def test_one_flipped_bit_changes_only_its_block_and_swapped_rows_change_both(self):
+        rng = np.random.default_rng(16)
+        tensors = self.tensors(rng, GEMMA_PAGE, 8, 3, 8)
+        blocks = [1, 2, 3, 4]
+        before, _ = self.digest(tensors, GEMMA_PAGE, 8, blocks)
+        flipped = [t.copy() for t in tensors]
+        flipped[2][3 * 8 + 5, 700] ^= 0x04                  # tensor 2, block 3, page 5, byte 700
+        after, _ = self.digest(flipped, GEMMA_PAGE, 8, blocks)
+        self.assertEqual([a != b for a, b in zip(before, after)], [False, False, True, False])
+        swapped = [t.copy() for t in tensors]
+        swapped[0][1 * 8:2 * 8], swapped[0][4 * 8:5 * 8] = tensors[0][4 * 8:5 * 8].copy(), tensors[0][1 * 8:2 * 8].copy()   # tensor 0: blocks 1 and 4 trade rows
+        moved, _ = self.digest(swapped, GEMMA_PAGE, 8, blocks)
+        self.assertEqual([a != b for a, b in zip(before, moved)], [True, False, False, True])
+
+    def test_the_digest_of_a_gathered_object_is_the_checksum_of_its_staged_bytes(self):
+        """The spill's invariant: the digest of the SOURCE rows (this kernel) equals the checksum of the object the gather laid out in staging (the oracle kernel)."""
+        rng = np.random.default_rng(17)
+        slices, objects, count = 16, 5, GEMMA_TENSORS
+        tensors = self.tensors(rng, GEMMA_PAGE, GEMMA_PAGES_PER_BLOCK, count, slices)
+        blocks = [int(b) for b in rng.permutation(slices)[:objects]]
+        ring = GEMMA_CANARY + objects * GEMMA_SHARD
+        staging = rng.integers(0, 256, ring, dtype=np.uint8).tobytes()
+        for t in range(count):
+            staging, line = ref.run_gather_emulation(self.directory, GEMMA_PAGE, 64, 1, 4096, GEMMA_CANARY + t * GEMMA_ROW, staging, slices * 64, None, blocks, tensors[t],
+                                                     eager=self.eager, row_stride=GEMMA_SHARD)
+        digests, _ = self.digest(tensors, GEMMA_PAGE, 64, blocks)
+        for i in range(objects):
+            obj = staging[GEMMA_CANARY + i * GEMMA_SHARD:GEMMA_CANARY + (i + 1) * GEMMA_SHARD]
+            self.assertEqual(ref.checksum_numpy(obj), digests[i], i)
+        # the oracle KERNEL (not just the numpy reference) agrees: one launch over the objects with count ranges
+        sums, _ = ref.run_checksum_ranges_emulation(self.directory, 4096, None, 1, GEMMA_CANARY, staging[GEMMA_CANARY:], objects, cores=64, eager=self.eager)
+        self.assertEqual(sums, digests)
+
+
+class DigestKernelEmulationEagerTests(DigestKernelEmulationTests):
+    eager = True
+
+
+@unittest.skipUnless(have_compiler(), 'no C++ compiler')
+class GatherDigestTeethTests(unittest.TestCase):
+    """The emulation of the gather and of the digest is only evidence if a broken kernel fails it. Each mutant below is a plausible slip; each must fail under at
+    least one of the two NOC schedules (late: transfers land at their barrier; eager: at once), and the unbroken kernels must pass under both."""
+
+    GATHER_ARGS = [1088, 16, 16, 32, 0, 0, 0, 0]
+    DIGEST_ARGS = [1088, 20, 8, 2, 16, 0, 0, 0, 0]      # rows of 20 pages: chunks of 8 + 8 + 4, so the last chunk of a row is a partial one
+
+    def setUp(self):
+        self.directory = tempfile.mkdtemp(prefix='p2p_teeth2_')
+        self.addCleanup(shutil.rmtree, self.directory, True)
+
+    def mutant(self, kind, source_path, compile_args, old, new, eager):
+        path = mutate(source_path, self.directory, old, new, 'mutant_%s_%d.cpp' % (kind, abs(hash((old, new)))))
+        return ref.build_emulation(kind, compile_args, self.directory, eager=eager, kernel_file=path, strict=False)
+
+    def gather_verdict(self, exe):
+        """25 blocks over 16 cores (nine cores take two), a stride with a gap, an offset that is 64 but not 1088 aligned, noise in the staging."""
+        rng = np.random.default_rng(9)
+        page, ppb, slices, stride, offset = 1088, 16, 40, 17408 + 192, 192
+        blocks = [int(b) for b in rng.permutation(slices)[:25]]
+        slice_bytes = page * ppb
+        tensor = rng.integers(0, 256, (slices * ppb, page), dtype=np.uint8)
+        staging_in = rng.integers(0, 256, offset + 24 * stride + slice_bytes + 256, dtype=np.uint8)
+        try:
+            out, line = ref.run_gather_emulation(self.directory, page, ppb, 2, 4096, offset, staging_in.tobytes(), slices * ppb, None, blocks, tensor, row_stride=stride, exe=exe)
+        except RuntimeError:
+            return 'violation'
+        want = staging_in.copy()
+        for i, block in enumerate(blocks):
+            want[offset + i * stride:offset + i * stride + slice_bytes] = tensor[block * ppb:(block + 1) * ppb].reshape(-1)
+        return 'ok' if np.array_equal(np.frombuffer(out, dtype=np.uint8), want) and 'stray=0' in line else 'wrong'
+
+    def digest_verdict(self, exe):
+        """100 blocks over 80 cores (twenty cores take two), 3 tensors, rows of 20 pages."""
+        rng = np.random.default_rng(10)
+        page, ppb, count, slices = 1088, 20, 3, 100
+        tensors = [rng.integers(0, 256, (slices * ppb, page), dtype=np.uint8) for _ in range(count)]
+        blocks = [int(b) for b in rng.permutation(slices)]
+        try:
+            got, line = ref.run_digest_emulation(self.directory, page, ppb, tensors, blocks, exe=exe)
+        except RuntimeError:
+            return 'violation'
+        return 'ok' if got == ref.digest_blocks(tensors, blocks, ppb) and 'stray=0' in line else 'wrong'
+
+    def verdicts(self, kind, source, args, old, new, runner):
+        return [runner(self.mutant(kind, source, args, old, new, eager)) for eager in (False, True)]
+
+    def test_the_unbroken_kernels_pass_under_both_schedules(self):
+        self.assertEqual(self.verdicts('gather', GATHER, self.GATHER_ARGS, 'half ^= 1u;', 'half ^= 1u;', self.gather_verdict), ['ok', 'ok'])
+        self.assertEqual(self.verdicts('digest_rows', DIGEST, self.DIGEST_ARGS, 'const uint32_t half = i & 1u;', 'const uint32_t half = i & 1u;', self.digest_verdict), ['ok', 'ok'])
+
+    def test_gather_mutants_are_caught(self):
+        mutants = {
+            'reads into the half the pending writes still use': ('const uint32_t other = scratch + (half ^ 1u) * chunk_pages * page_bytes;',
+                                                                  'const uint32_t other = scratch + half * chunk_pages * page_bytes;'),
+            'the write barrier is dropped': ('        noc_async_read_barrier();\n        noc_async_write_barrier();\n        if (next >= total) {',
+                                             '        noc_async_read_barrier();\n        if (next >= total) {'),
+            'the read barrier is dropped': ('        noc_async_read_barrier();\n        noc_async_write_barrier();\n        if (next >= total) {',
+                                            '        noc_async_write_barrier();\n        if (next >= total) {'),
+            'the first chunk reads a source page off by one': ('noc_async_read(source.get_noc_addr(block * pages_per_block + k % pages_per_block)',
+                                                               'noc_async_read(source.get_noc_addr(block * pages_per_block + k % pages_per_block + 1)'),
+            'the next chunk reads a source page off by one': ('noc_async_read(source.get_noc_addr(block * pages_per_block + page % pages_per_block), other',
+                                                              'noc_async_read(source.get_noc_addr(block * pages_per_block + page % pages_per_block + 1), other'),
+            'the first chunk reads the row of the previous block': ('noc_async_read(source.get_noc_addr(block * pages_per_block + k % pages_per_block)',
+                                                                    'noc_async_read(source.get_noc_addr((block ? block - 1 : 0) * pages_per_block + k % pages_per_block)'),
+            'the staging offset ignores the core start': ('qwen_p2p_destination(destination_offset, row_stride, page, pages_per_block, page_bytes)',
+                                                          'qwen_p2p_destination(0, row_stride, page, pages_per_block, page_bytes)'),
+            'a half page is written': ('pages_per_block, page_bytes)),\n                page_bytes);', 'pages_per_block, page_bytes)),\n                page_bytes / 2);'),
+            'the stride is ignored (rows are written back to back)': ('(page / pages_per_block) * row_stride', '(page / pages_per_block) * pages_per_block * page_bytes'),
+            'the stride is applied to every page, not every block': ('(page / pages_per_block) * row_stride', 'page * row_stride'),
+            'the stride is one alignment unit short': ('(page / pages_per_block) * row_stride', '(page / pages_per_block) * (row_stride - 64)'),
+            'the page inside the row is dropped (every page of a block lands on the first)': ('+ (page % pages_per_block) * page_bytes;', '+ 0 * page_bytes;'),
+            'the stride is read from the wrong argument': ('const uint32_t row_stride = get_arg_val<uint32_t>(5);', 'const uint32_t row_stride = get_arg_val<uint32_t>(3);'),
+            'the block table is indexed by the page, not the block': ('const uint32_t block = get_arg_val<uint32_t>(block_ids + k / pages_per_block);',
+                                                                      'const uint32_t block = get_arg_val<uint32_t>(block_ids + k % 32);'),
+            'the block table starts one word early (the stride word is read as a block id)': ('constexpr uint32_t block_ids = 6;', 'constexpr uint32_t block_ids = 5;'),
+            'the next chunk reads from the wrong source page': ('const uint32_t page = next + k;', 'const uint32_t page = next + k + 1;'),
+            'the rows go to the wrong bank': ('staging.get_noc_addr(bank, qwen_p2p_destination', 'staging.get_noc_addr((bank + 1) % 8, qwen_p2p_destination'),
+            'the source and staging addresses are swapped': ('const uint32_t source_address = get_arg_val<uint32_t>(0);\n    const uint32_t staging_address = get_arg_val<uint32_t>(1);',
+                                                             'const uint32_t source_address = get_arg_val<uint32_t>(1);\n    const uint32_t staging_address = get_arg_val<uint32_t>(0);'),
+        }
+        for name, (old, new) in mutants.items():
+            with self.subTest(mutant=name):
+                verdicts = self.verdicts('gather', GATHER, self.GATHER_ARGS, old, new, self.gather_verdict)
+                self.assertNotEqual(set(verdicts), {'ok'}, 'the emulation accepted: ' + name)
+
+    def test_digest_mutants_are_caught(self):
+        mutants = {
+            'k restarts at each tensor (the weight)': ('            sum = qwen_p2p_accumulate(\n', '            if (i % chunks_per_row == 0) { weight = 1; }\n            sum = qwen_p2p_accumulate(\n'),
+            'the sum restarts at each tensor': ('            sum = qwen_p2p_accumulate(\n', '            if (i % chunks_per_row == 0) { sum = 0; }\n            sum = qwen_p2p_accumulate(\n'),
+            'the weight restarts at each chunk': ('            sum = qwen_p2p_accumulate(\n', '            weight = 1;\n            sum = qwen_p2p_accumulate(\n'),
+            'the step constant is wrong': ('constexpr uint32_t kQwenP2PStep = 2654435761u;', 'constexpr uint32_t kQwenP2PStep = 2654435769u;'),
+            'the first weight is 0, not 1': ('uint32_t weight = 1;', 'uint32_t weight = 0;'),
+            'the last tensor is dropped': ('const uint32_t chunks = tensors * chunks_per_row;', 'const uint32_t chunks = (tensors - 1) * chunks_per_row;'),
+            'the partial goes one page too far': ('partials.get_noc_addr(first_slot + b)', 'partials.get_noc_addr(first_slot + b + 1)'),
+            'the first partial page of the core is ignored': ('partials.get_noc_addr(first_slot + b)', 'partials.get_noc_addr(b)'),
+            'the high word is not stored': ('out[1] = static_cast<uint32_t>(sum >> 32);', 'out[1] = 0;'),
+            'the high word is shifted by 31': ('out[1] = static_cast<uint32_t>(sum >> 32);', 'out[1] = static_cast<uint32_t>(sum >> 31);'),
+            'the low word is not stored': ('out[0] = static_cast<uint32_t>(sum);', 'out[0] = 0;'),
+            'the tensor address index is off by one': ('get_arg_val<uint32_t>(tensor_addresses + next / chunks_per_row)', 'get_arg_val<uint32_t>(tensor_addresses + next / chunks_per_row + 1)'),
+            'the first chunk reads tensor 1': ('TensorAccessor(tensor_args, get_arg_val<uint32_t>(tensor_addresses), page_bytes), block, 0,',
+                                               'TensorAccessor(tensor_args, get_arg_val<uint32_t>(tensor_addresses + 1), page_bytes), block, 0,'),
+            'every block uses the first block id of the core': ('const uint32_t block = get_arg_val<uint32_t>(block_ids + b);', 'const uint32_t block = get_arg_val<uint32_t>(block_ids);'),
+            'a chunk is not awaited': ('const uint32_t half = i & 1u;\n            noc_async_read_barrier();', 'const uint32_t half = i & 1u;'),
+            'the next chunk is read into the half being summed': ('scratch + (half ^ 1u) * half_bytes);', 'scratch + half * half_bytes);'),
+            'the sum reads the other half': ('reinterpret_cast<volatile tt_l1_ptr uint32_t*>(scratch + half * half_bytes)', 'reinterpret_cast<volatile tt_l1_ptr uint32_t*>(scratch + (half ^ 1u) * half_bytes)'),
+            'the last word of a chunk is dropped': ('(pages * page_bytes) >> 2, weight, sum);', '((pages * page_bytes) >> 2) - 1, weight, sum);'),
+            'the word count is a byte count': ('(pages * page_bytes) >> 2, weight, sum);', '(pages * page_bytes), weight, sum);'),
+            'a partial chunk is read as a full one': ('const uint32_t count = pages_per_block - first_page < chunk_pages ? pages_per_block - first_page : chunk_pages;',
+                                                      'const uint32_t count = chunk_pages;'),
+            'the partial page is not awaited before it is reused': ('        noc_async_write_barrier();  // the page is reused by the next block\n', ''),
+            'the weight and the sum carry over from one block to the next': ('uint32_t weight = 1;  // w_0: the weight of word 0 of the shard\n        uint64_t sum = 0;',
+                                                                              'static uint32_t weight_keep = 1;\n        static uint64_t sum_keep = 0;\n        uint32_t& weight = weight_keep;\n        uint64_t& sum = sum_keep;'),
+        }
+        for name, (old, new) in mutants.items():
+            with self.subTest(mutant=name):
+                verdicts = self.verdicts('digest_rows', DIGEST, self.DIGEST_ARGS, old, new, self.digest_verdict)
+                self.assertNotEqual(set(verdicts), {'ok'}, 'the emulation accepted: ' + name)
+
+    def test_the_two_digest_arithmetic_blocks_are_the_checksums(self):
+        """The digest kernel carries the checksum kernel's arithmetic between the markers, character for character: what the oracle computes, the digest computes."""
+        def block(path):
+            text = read(path)
+            return text[text.index('// BEGIN-CHECKSUM-ARITHMETIC'):text.index('// END-CHECKSUM-ARITHMETIC')]
+        self.assertEqual(block(DIGEST), block(CHECKSUM))
+        self.assertIn('constexpr uint32_t kQwenP2PStep = 2654435761u;', block(DIGEST))
+
+
+def between(text, begin, end):
+    return text[text.index(begin) + len(begin):text.index(end)]
+
+
+@unittest.skipUnless(have_compiler(), 'no C++ compiler')
+class ClusterDescriptorParserTests(unittest.TestCase):
+    """The reader of the serialized cluster descriptor (which tt-kmd device and which PCI address each chip has: qwen_p2p_staging_info's pcie_device and pci_bus_id), compiled as it
+    stands in qwen_kv_read.cpp (between its markers) and run on descriptors in the format UMD writes. A logical chip id is NOT the tt-kmd device number, so this reader is the
+    only thing between the shard map and a permuted one."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.directory = tempfile.mkdtemp(prefix='p2p_parser_')
+        text = read(EXTENSION)
+        source = os.path.join(cls.directory, 'parse.cpp')
+        with open(source, 'w') as handle:
+            handle.write('''#include <algorithm>
+#include <cctype>
+#include <cstdint>
+#include <fstream>
+#include <iostream>
+#include <istream>
+#include <map>
+#include <string>
+namespace qwen_p2p_host {
+%s
+%s
+}
+int main(int, char** argv) {
+    std::ifstream file(argv[1]);
+    auto map = qwen_p2p_host::parse_chip_pci_map(file);
+    std::cout << "OK " << map.ok << "\\n";
+    for (const auto& [chip, number] : map.device_number) std::cout << "D " << chip << " " << number << "\\n";
+    for (const auto& [chip, bdf] : map.bdf) std::cout << "B " << chip << " " << bdf << "\\n";
+}
+''' % (between(text, '// BEGIN-CHIP-PCI-STRUCT', '// END-CHIP-PCI-STRUCT'), between(text, '// BEGIN-CHIP-PCI-PARSER', '// END-CHIP-PCI-PARSER')))
+        cls.exe = os.path.join(cls.directory, 'parse')
+        done = subprocess.run([ref.compiler(), '-std=c++17', '-Wall', '-Wextra', '-Werror', source, '-o', cls.exe], capture_output=True, text=True)
+        if done.returncode:
+            raise RuntimeError(done.stderr)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.directory, ignore_errors=True)
+
+    def parse(self, text):
+        path = os.path.join(self.directory, 'descriptor.yaml')
+        with open(path, 'w') as handle:
+            handle.write(text)
+        lines = subprocess.run([self.exe, path], capture_output=True, text=True, check=True).stdout.splitlines()
+        numbers = {int(line.split()[1]): int(line.split()[2]) for line in lines if line.startswith('D ')}
+        addresses = {int(line.split()[1]): line.split()[2] for line in lines if line.startswith('B ')}
+        return lines[0], numbers, addresses
+
+    @staticmethod
+    def address(domain, bus, device=0, function=0):
+        return '%04x:%02x:%02x.%x' % (domain, bus, device, function)
+
+    def descriptor(self, mapping, addresses=None, quote=False, upper=False):
+        """What UMD's ClusterDescriptor::serialize writes (block style), with the sections around the two that matter."""
+        lines = ['arch:', '  0: Blackhole', '  1: Blackhole', 'chips:', '  0: [0, 0, 0, 0]', '  1: [1, 0, 0, 0]', 'chip_unique_ids:', '  0: 111', '  1: 222',
+                 'ethernet_connections:', '  - - chip: 0', '      chan: 2', '    - chip: 1', '      chan: 3', 'chips_with_mmio:']
+        lines += ['  - %d: %d' % (chip, number) for chip, number in sorted(mapping.items())]
+        lines += ['io_device_type: PCIe', 'harvesting:', '  0:', '    noc_translation: true', '    harvest_mask: 192', '  1:', '    noc_translation: true', '    harvest_mask: 192',
+                  'chip_to_bus_id:', '  0: "0x01"', '  1: "0x02"', 'boards:', '  - - board_id: 7', '    - board_type: p150a', '    - chips:', '        - 0', '        - 1',
+                  'asic_locations:', '  0: 1', '  1: 2', 'chip_pci_bdfs:']
+        for chip, bdf in sorted((addresses or {}).items()):
+            bdf = bdf.upper() if upper else bdf
+            lines.append('  %d: %s' % (chip, '"%s"' % bdf if quote else bdf))
+        lines += ['chip_pcie_lane_counts:', '  0: 16', '  1: ~']
+        return '\n'.join(lines) + '\n'
+
+    def test_the_tt_kmd_device_numbers_are_the_descriptors_not_the_chip_ids(self):
+        mapping = {0: 1, 1: 2, 2: 3, 3: 0}                                          # the shape of the 4-card mock cluster: chip 0 is /dev/tenstorrent/1
+        ok, numbers, addresses = self.parse(self.descriptor(mapping))
+        self.assertEqual((ok, numbers, addresses), ('OK 1', mapping, {}))
+        self.assertNotEqual(numbers, {chip: chip for chip in mapping}, 'a permutation is carried as a permutation')
+
+    def test_the_pci_addresses_are_read_lower_case_quoted_or_not(self):
+        wanted = {0: self.address(0, 0x41), 1: self.address(0, 0x01, 2, 1), 5: self.address(0x10, 0xab)}
+        for quote in (False, True):
+            for upper in (False, True):
+                with self.subTest(quote=quote, upper=upper):
+                    ok, numbers, addresses = self.parse(self.descriptor({0: 0, 1: 1, 5: 5}, wanted, quote=quote, upper=upper))
+                    self.assertEqual((ok, numbers, addresses), ('OK 1', {0: 0, 1: 1, 5: 5}, wanted))
+
+    def test_other_sections_that_look_alike_are_not_read(self):
+        """`harvesting` has `0:` lines under it, `chip_to_bus_id` a quoted number: neither is a device number or an address."""
+        ok, numbers, addresses = self.parse(self.descriptor({2: 7}))
+        self.assertEqual((ok, numbers, addresses), ('OK 1', {2: 7}, {}))
+
+    def test_an_empty_or_odd_descriptor_gives_an_empty_map_never_a_guess(self):
+        for text in ('', 'chips_with_mmio: []\nchip_pci_bdfs: {}\n', 'chips_with_mmio:\n  - x: 1\n  - 3: y\n  - 4\n  - 5: 6 7\n', '# comment only\n\n'):
+            with self.subTest(text=text):
+                ok, numbers, addresses = self.parse(text)
+                self.assertEqual((ok, numbers, addresses), ('OK 1', {}, {}), text)
+
+    def test_the_source_reads_the_descriptor_through_the_public_api_and_cleans_up(self):
+        text = read(EXTENSION)
+        self.assertIn('#include <tt-metalium/cluster.hpp>', text)
+        reader = self.function_after(text, 'ChipPciMap read_chip_pci_map() {')
+        self.assertIn('tt::tt_metal::SerializeClusterDescriptor()', reader)
+        self.assertIn('std::filesystem::remove(path, ignored)', reader)
+        self.assertIn('"umd_"', reader, 'only the temporary directory that call created is removed, and only if it is empty')
+
+    @staticmethod
+    def function_after(text, header):
+        start = text.index(header)
+        return text[start:text.index('\n}\n', start)]
+
+
 class SourceAgreementTests(unittest.TestCase):
+    OPS = ('qwen_p2p_staging_alloc', 'qwen_p2p_staging_info', 'qwen_blocks_to_staging', 'qwen_write_blocks_from_staging', 'qwen_blocks_digest_async', 'qwen_p2p_record_event',
+           'qwen_p2p_warm', 'qwen_p2p_freeze', 'qwen_staging_checksum', 'qwen_p2p_staging_write', 'qwen_p2p_staging_read')
+
+    def parameters(self, op):
+        text = read(EXTENSION)
+        match = re.search(r'm\.def\(\s*"%s",' % op, text)
+        self.assertIsNotNone(match, op)
+        end = min(position for position in (text.find('m.def(', match.end()), text.find('m.attr(', match.end())) if position >= 0)
+        return re.findall(r'nb::arg\("(\w+)"\)(?: = ([^,]+),)?', text[match.end():end])
+
+    def names(self, op):
+        return [name for name, _ in self.parameters(op)]
+
+    def function_body(self, text, header, until):
+        start = text.index(header)
+        return text[start:text.index(until, start)]
+
     def test_the_extension_registers_the_contract_names_and_arguments(self):
         text = read(EXTENSION)
-        for name in ('qwen_p2p_staging_alloc', 'qwen_p2p_staging_info', 'qwen_write_blocks_from_staging', 'qwen_staging_checksum', 'qwen_p2p_staging_write',
-                     'qwen_p2p_staging_read'):
+        for name in self.OPS:
             self.assertEqual(len(re.findall(r'm\.def\(\s*"%s"' % name, text)), 1, name)
             self.assertIn('"%s"' % name, text.split('for (const char* name : {')[1], name + ' is also exported on ttnn')
-        # INTERFACE.md: ttnn.qwen_p2p_staging_alloc(mesh_device, size_bytes); qwen_write_blocks_from_staging(device_tensor, staging, byte_offset, blocks);
-        # qwen_staging_checksum(staging, byte_offset, length)
-        self.assertRegex(text, r'nb::arg\("mesh_device"\),\s*nb::arg\("size_bytes"\) = uint64_t\(128\) << 20')
-        self.assertRegex(text, r'nb::arg\("device_tensor"\),\s*nb::arg\("staging"\),\s*nb::arg\("byte_offset"\),\s*nb::arg\("blocks"\)')
-        self.assertRegex(text, r'nb::arg\("staging"\),\s*nb::arg\("byte_offset"\),\s*nb::arg\("length"\)')
-        self.assertIn('m.attr("QWEN_KV_READ_VERSION") = "3";', text)
+        self.assertIn('m.attr("QWEN_KV_READ_VERSION") = "4";', text)
         self.assertIn('#include "qwen_p2p_plan.hpp"', text)
 
-    def test_the_two_new_keywords_are_registered_last_with_defaults_so_every_positional_call_stays_valid(self):
-        """qwen_write_blocks_from_staging(device_tensor, staging, byte_offset, blocks, bank=None, row_stride=None) and
-        qwen_staging_checksum(staging, byte_offset, length, bank=None, cores=64, count=None): the host (StagingApi) finds the forms from these names."""
+    def test_the_signatures_are_the_frozen_interface(self):
+        """INTERFACE.md 3.3: the order of the parameters is the contract (the worker passes them positionally)."""
+        self.assertEqual(self.names('qwen_p2p_staging_alloc')[:3], ['mesh', 'bytes_per_bank', 'bottom_up'])
+        self.assertEqual(self.names('qwen_blocks_to_staging'), ['tensor', 'staging', 'bank', 'byte_offset', 'blocks', 'row_stride', 'pages_per_block', 'cq_id'])
+        self.assertEqual(self.names('qwen_write_blocks_from_staging'), ['tensor', 'staging', 'bank', 'byte_offset', 'blocks', 'row_stride', 'pages_per_block', 'cq_id'])
+        self.assertEqual(self.names('qwen_blocks_digest_async'), ['tensors', 'blocks', 'pages_per_block', 'cq_id'])
+        self.assertEqual(self.names('qwen_p2p_record_event'), ['mesh', 'cq_id'])
+        self.assertEqual(self.names('qwen_p2p_warm')[:3], ['staging', 'tensors', 'null_block'])
+        self.assertEqual(self.names('qwen_p2p_freeze'), ['staging'])
+        self.assertEqual(self.names('qwen_p2p_staging_info'), ['staging'])
+        # the oracles keep the v3 signatures
+        self.assertEqual(self.names('qwen_staging_checksum'), ['staging', 'byte_offset', 'length', 'bank', 'cores', 'count'])
+        defaults = dict(self.parameters('qwen_blocks_to_staging'))
+        self.assertEqual(defaults['cq_id'], '0')
+        self.assertEqual(dict(self.parameters('qwen_p2p_staging_alloc'))['bottom_up'], 'false')
+
+    def test_every_queue_is_named_and_nothing_uses_the_removed_device_list(self):
         text = read(EXTENSION)
-        self.assertRegex(text, r'nb::arg\("blocks"\),\s*nb::arg\("bank"\) = nb::none\(\),\s*nb::arg\("row_stride"\) = nb::none\(\),\s*"')
-        self.assertRegex(text, r'nb::arg\("length"\),\s*nb::arg\("bank"\) = nb::none\(\),\s*nb::arg\("cores"\) = qwen_p2p::kChecksumDefaultCores,\s*'
-                               r'nb::arg\("count"\) = nb::none\(\),\s*"')
-        # the lambdas take them in the same order, as optionals (None = today's behaviour)
-        self.assertIn('std::optional<uint32_t> bank,\n           std::optional<uint64_t> row_stride)', text)
-        self.assertIn('uint32_t cores,\n           std::optional<uint32_t> count)', text)
-        self.assertIn('count.value_or(1)', text)
-        self.assertIn('row_stride_opt.value_or(slice_bytes)', text)
-        # the docstring states both names (a nanobind function states its signature there: StagingApi falls back to it)
-        for name in ('row_stride', 'count'):
-            self.assertEqual(len(re.findall(r'nb::arg\("%s"\)' % name, text)), 1, name)
+        self.assertNotIn('mesh_command_queue()', text, 'an explicit command queue everywhere: the default is the calling thread\'s, not CQ0')
+        self.assertNotIn('get_devices()', text, 'MeshDevice::get_devices() is removed after 2026-11-19: use MeshCoordinateRange + the view')
+        self.assertIn('get_view().get_devices(MeshCoordinateRange(', text)
+        self.assertIn('CreateProgram(mesh)', text, 'the program is bound to the mesh\'s own MetalEnv')
+        self.assertNotIn('CreateProgram()', text)
+        self.assertNotIn('MeshDeviceConfig', text, 'never CQ1: the extension opens no device and no second queue')
+        self.assertNotIn('open_mesh_device', text)
+
+    def test_every_op_validates_before_it_enqueues_anything(self):
+        text = read(EXTENSION)
+        rows = self.function_body(text, 'void rows_op(', '// qwen_blocks_digest_async. No GIL needed.')
+        before = rows[:rows.index('enqueue_program(')]
+        for call in ('view_tensor(', 'check_queue_usable(', 'check_bank(', 'check_block_rows(', 'check_block_ids(', 'program_for('):
+            self.assertIn(call, before, call)
+        digest = self.function_body(text, 'DigestHandle digest_blocks(', '// qwen_p2p_record_event:')
+        before = digest[:digest.index('enqueue_program(')]
+        for call in ('view_tensor(', 'check_queue_usable(', 'check_digest_rows(', 'check_block_ids(', 'program_for(', 'set_args('):
+            self.assertIn(call, before, call)
+        self.assertEqual(digest.count('enqueue_program('), 1)
+        self.assertEqual(rows.count('enqueue_program('), 1, 'one launch per call: the only way to leave half an op in the queue is that enqueue throwing')
+
+    def test_the_two_exception_classes_say_whether_anything_was_enqueued(self):
+        text = read(EXTENSION)
+        self.assertIn('nb::exception<qwen_p2p_host::P2PRefused>(m, "QwenP2PRefused", PyExc_ValueError);', text)
+        self.assertIn('nb::exception<qwen_p2p_host::P2PEnqueueError>(m, "QwenP2PEnqueueError", PyExc_RuntimeError);', text)
+        enqueue = self.function_body(text, 'void enqueue_program(', '// What an op needs to know about one KV tensor')
+        self.assertIn('catch (const std::exception& error)', enqueue)
+        self.assertIn('throw P2PEnqueueError(', enqueue)
+        self.assertNotIn('P2PRefused', enqueue, 'a throw from the enqueue is never reported as a refusal')
+        self.assertIn('QwenP2PRefused', text.split('for (const char* name : {')[1])
+        self.assertIn('QwenP2PEnqueueError', text.split('for (const char* name : {')[1])
+        digest = self.function_body(text, 'DigestHandle digest_blocks(', '// qwen_p2p_record_event:')
+        self.assertIn('the sequence is half-enqueued', digest, 'a throw after the digest program was enqueued says so')
+
+    def test_a_trace_capture_in_progress_is_refused_by_every_op(self):
+        text = read(EXTENSION)
+        body = self.function_body(text, 'void check_queue_usable(', 'std::vector<MeshCoordinate> mesh_coordinates(')
+        self.assertIn('trace_id().has_value()', self.function_body(text, 'bool trace_active(', 'void check_queue_usable('))
+        self.assertIn('refused while a trace is being captured', body)
+        self.assertIn('if (cq_id != 0) {', body, 'only CQ0: any other queue is refused (never CQ1)')
+        self.assertIn('trace_active(mesh, 0)', body, 'the capture check is on CQ0')
+        for header, until in (('void rows_op(', '// qwen_blocks_digest_async. No GIL needed.'), ('DigestHandle digest_blocks(', '// qwen_p2p_record_event:'),
+                              ('P2PEvent record_event(', '// Blocks until every command'), ('void warm(', '// qwen_p2p_freeze:'),
+                              ('staging_checksum(\n', '// Diagnostics (card tests only)'), ('void staging_transfer(', 'struct BankPoint')):
+            self.assertIn('check_queue_usable(', self.function_body(text, header, until), header)
+        self.assertIn('qwen_p2p_host::check_queue_usable(mesh, 0, op);', text, 'the allocation too')
+
+    def test_the_digest_reads_back_without_blocking_and_nothing_spins_a_core(self):
+        text = read(EXTENSION)
+        digest = self.function_body(text, 'DigestHandle digest_blocks(', '// qwen_p2p_record_event:')
+        self.assertIn('queue.enqueue_read_shards(transfers, partials, /*blocking=*/false);', digest)
+        self.assertIn('enqueue_record_event_to_host()', digest)
+        self.assertNotIn('/*blocking=*/true', digest)
+        self.assertNotIn('EventSynchronize', text, 'event_synchronize busy-spins a core (distributed.cpp): the host polls EventQuery')
+        self.assertNotIn('event_synchronize', text)
+        self.assertIn('tt::tt_metal::distributed::EventQuery(', text)
+        self.assertIn('qwen_p2p::kDigestRingBuffers', text, 'two partials buffers take turns')
+        self.assertIn('state.inflight.push_back(pending);', digest, 'the host buffer outlives its handle until the event completes')
+
+    def test_release_waits_for_the_queue_within_a_bound_and_leaks_rather_than_free_what_is_in_use(self):
+        text = read(EXTENSION)
+        release = self.function_body(text, 'void release() {', 'bool released() const')
+        self.assertIn('enqueue_record_event_to_host()', release)
+        self.assertIn('std::chrono::seconds(10)', release, 'a hung device must not hang the shutdown')
+        self.assertIn('leaked_buffers', release)
+        self.assertIn('leaked_pending', release)
+        self.assertIn('(void)entry.second.release();', release, 'a program whose queue did not drain is leaked, never destroyed under a running dispatch')
+
+    def test_warm_runs_every_program_to_completion_and_freeze_checks_it(self):
+        text = read(EXTENSION)
+        warm = self.function_body(text, 'void warm(', '// qwen_p2p_freeze:')
+        for stage in ('kGatherOp', 'digest_blocks(', 'kScatterOp'):
+            self.assertIn(stage, warm, stage)
+        self.assertLess(warm.index('kGatherOp'), warm.index('digest_blocks('))
+        self.assertLess(warm.index('digest_blocks('), warm.index('kScatterOp'), 'gather -> digest -> scatter-back')
+        self.assertGreaterEqual(warm.count('finish_queue('), 3, 'a blocking finish after each stage')
+        self.assertIn('program->completed = true', warm)
+        freeze = self.function_body(text, 'void freeze(', '// ttnn.qwen_staging_checksum (ORACLE')
+        self.assertIn('!entry.second->completed', freeze)
+        self.assertIn('state.frozen = true', freeze)
+        program_for = self.function_body(text, 'CachedProgram& program_for(', '// Enqueues the program non-blocking')
+        self.assertIn('if (state.frozen)', program_for)
+        self.assertIn('refuse(op,', program_for)
 
     def test_the_checksum_makes_several_launches_for_more_ranges_than_the_partials_hold(self):
         text = read(EXTENSION)
-        body = text[text.index('std::vector<std::vector<uint64_t>> staging_checksum('):text.index('// Diagnostics: bytes of the staging range')]
+        body = self.function_body(text, 'staging_checksum(\n', '// Diagnostics (card tests only)')
         self.assertIn('qwen_p2p::checksum_launches(count)', body)
         self.assertIn('enqueue_read_shards(transfers, partials, /*blocking=*/true)', body, 'each launch is read back before the next reuses the partials buffer')
         self.assertIn('(uint64_t(range) * cores + core) * qwen_p2p::kChecksumPartialBytes', body, 'the partial of range r, core c is partials page r * cores + c')
         self.assertIn('uint64_t(qwen_p2p::kChecksumMaxRanges) * qwen_p2p::kChecksumMaxCores * qwen_p2p::kChecksumPartialBytes', text,
                       'the partials buffer holds one page per core of the largest launch')
-        self.assertIn('qwen_p2p::scatter_core_args(', text)
-        self.assertIn('destination_address, staging_address, bank, byte_offset, row_stride, blocks, launch_first, runs[core]', text)
 
-    def test_the_default_staging_is_two_times_64_mib(self):
-        self.assertIn('uint64_t(128) << 20', read(EXTENSION))
+    def test_the_default_staging_page_is_64_kib(self):
+        self.assertIn('nb::arg("page_bytes") = uint64_t(64) << 10', read(EXTENSION))
+
+    def test_warm_checks_every_tensor_before_it_enqueues_anything(self):
+        """A refusal from warm must mean that nothing was enqueued (the exception contract): tensor 5 is checked before the gather of tensor 0."""
+        text = read(EXTENSION)
+        warm = self.function_body(text, 'void warm(', '// qwen_p2p_freeze:')
+        self.assertIn('check_warm_sequence(', warm)
+        self.assertLess(warm.index('check_warm_sequence('), warm.index('rows_op('), 'the whole sequence is checked before the first gather')
+        self.assertLess(warm.index('check_warm_sequence('), warm.index('finish_queue('))
+        check = self.function_body(text, 'void check_warm_sequence(', '// qwen_p2p_warm: gather -> digest')
+        for call in ('view_tensor(', 'check_block_rows(', 'check_block_ids(', 'check_digest_rows(', 'check_grid(', 'kernel_path(', 'TensorAccessorArgs('):
+            self.assertIn(call, check, call)
+        for enqueue in ('enqueue_program(', 'EnqueueMeshWorkload', 'enqueue_read_shards', 'enqueue_write_shards', 'rows_op(', 'digest_blocks(', 'program_for('):
+            self.assertNotIn(enqueue, check, 'the check enqueues and builds nothing: ' + enqueue)
+        self.assertIn('qwen_p2p::kScatterCores', check)
+        self.assertIn('qwen_p2p::kDigestMaxCores', check)
+
+    def test_the_default_warm_scratch_follows_the_bank_that_was_asked_for(self):
+        warm = self.function_body(read(EXTENSION), 'void warm(', '// qwen_p2p_freeze:')
+        self.assertIn('state.bank_offsets[bank]', warm)
+        self.assertNotIn('bank_offsets[0]', warm)
+
+    def test_what_is_leaked_on_purpose_is_never_destroyed(self):
+        """A function-local static vector is destroyed at process exit, after tt-metal has torn down: it would free exactly what was leaked to stay."""
+        text = read(EXTENSION)
+        self.assertIn('static Leaked* const instance = new Leaked();', text)
+        self.assertNotIn('static std::vector<std::shared_ptr', text)
+        release = self.function_body(text, 'void release() {', 'bool released() const')
+        self.assertIn('qwen_p2p_host::leaked().pending', release)
+        self.assertIn('qwen_p2p_host::leaked().buffers', release)
+        digest = self.function_body(text, 'DigestHandle digest_blocks(', '// qwen_p2p_record_event:')
+        self.assertIn('leaked().pending.push_back(pending)', digest)
+
+    def test_release_lets_the_other_threads_run_while_it_waits(self):
+        text = read(EXTENSION)
+        binding = text[text.index('.def("release", &P2PStaging::release'):]
+        binding = binding[:binding.index(');')]
+        self.assertIn('nb::call_guard<nb::gil_scoped_release>()', binding, 'release() waits up to 10 s: not with the GIL held')
+
+    def test_no_allocation_behind_a_frozen_staging_not_even_after_it_is_released(self):
+        text = read(EXTENSION)
+        self.assertIn('frozen_meshes()', self.function_body(text, 'void freeze(', '// ttnn.qwen_staging_checksum (ORACLE'), 'freeze remembers the mesh')
+        constructor = text[text.index('P2PStaging(MeshDevice& mesh'):text.index('~P2PStaging()')]
+        self.assertIn('frozen_meshes()', constructor)
+        self.assertIn('a staging buffer of this mesh was frozen', constructor)
+        self.assertLess(constructor.index('check_queue_usable(mesh, 0, op)'), constructor.index('frozen_meshes()'))
+        self.assertLess(constructor.index('frozen_meshes()'), constructor.index('MeshBuffer::create('), 'refused before anything is allocated')
+        oracle = self.function_body(text, 'staging_checksum(\n', '// Diagnostics (card tests only)')
+        self.assertIn('state.frozen || state.warmed', oracle, 'the oracle\'s lazily allocated partials: only before warm')
+
+    def test_the_info_names_the_card_from_the_cluster_descriptor_not_from_the_logical_chip_id(self):
+        text = read(EXTENSION)
+        info = self.function_body(text, 'nb::dict staging_info(', '}  // namespace qwen_p2p_host\n\nNB_MODULE')
+        self.assertIn('read_chip_pci_map()', info)
+        self.assertIn('pci_map.device_number.find(*mmio_chip)', info)
+        self.assertIn('entry["pcie_device"] = kmd_device.has_value()', info)
+        self.assertNotIn('entry["pcie_device"] = have_pcie', info, 'pcie_device is no longer the logical chip id')
+        for field in ('pci_bus_id_source', 'pci_bus_id_sysfs', 'pci_bus_id_agrees', 'mmio_chip_id', 'programs_cached'):
+            self.assertIn('"%s"' % field, info, field)
 
     def test_runtime_args_are_rewritten_from_the_live_buffers_on_every_call(self):
         text = read(EXTENSION)
-        body = text[text.index('void write_blocks_from_staging('):text.index('// ttnn.qwen_staging_checksum')]
-        self.assertIn('const uint32_t destination_address = reference->address();', body)
-        self.assertIn('set_args(', body)
-        self.assertNotIn('static', body.replace('static_cast', ''), 'no remembered address')
+        for header, until in (('void rows_op(', '// qwen_blocks_digest_async. No GIL needed.'), ('DigestHandle digest_blocks(', '// qwen_p2p_record_event:')):
+            body = self.function_body(text, header, until)
+            self.assertIn('set_args(', body)
+            self.assertNotIn('static ', body.replace('static_cast', '').replace('static std::vector<std::shared_ptr<DigestPending>> leaked;', ''), 'no remembered address: ' + header)
+        rows = self.function_body(text, 'void rows_op(', '// qwen_blocks_digest_async. No GIL needed.')
+        self.assertIn('view.address', rows)
+        self.assertIn('static_cast<uint32_t>(state.address)', rows)
 
     def test_the_kernels_are_whole_page_only_and_nothing_else_touches_dram(self):
-        for path in (SCATTER, CHECKSUM):
+        for path in (SCATTER, GATHER, CHECKSUM, DIGEST):
             text = read(path)
             self.assertNotIn('noc_async_read_tile', text)
-            for call in re.findall(r'noc_async_(?:read|write)\(', text):
-                self.assertTrue(call)
-        scatter = read(SCATTER)
-        calls = re.findall(r'noc_async_(read|write)\((.*?)\);', scatter, re.S)
-        self.assertEqual(sorted(kind for kind, _ in calls), ['read', 'read', 'write'])
+        for path in (SCATTER, GATHER):
+            calls = re.findall(r'noc_async_(read|write)\((.*?)\);', read(path), re.S)
+            self.assertEqual(sorted(kind for kind, _ in calls), ['read', 'read', 'write'], path)
+            for kind, arguments in calls:
+                self.assertTrue(arguments.rstrip().endswith('page_bytes'), 'every transfer moves exactly one page: ' + arguments)
+        digest = read(DIGEST)
+        calls = re.findall(r'noc_async_(read|write)\((.*?)\);', digest, re.S)
+        self.assertEqual(sorted(kind for kind, _ in calls), ['read', 'write'])
         for kind, arguments in calls:
-            self.assertTrue(arguments.rstrip().endswith('page_bytes'), 'every scatter transfer moves exactly one page: ' + arguments)
+            self.assertTrue(arguments.rstrip().endswith('page_bytes' if kind == 'read' else 'partial_bytes'), arguments)
 
     def test_the_build_script_ships_the_kernels_and_the_header(self):
         text = read(BUILD)
-        for name in ('qwen_p2p_scatter.cpp', 'qwen_p2p_checksum.cpp', 'qwen_p2p_plan.hpp', 'rv_kernel_check.sh'):
+        for name in ('qwen_p2p_scatter.cpp', 'qwen_p2p_gather.cpp', 'qwen_p2p_checksum.cpp', 'qwen_p2p_digest_rows.cpp', 'qwen_p2p_plan.hpp', 'rv_kernel_check.sh'):
             self.assertIn(name, text, name)
-        # the RISC-V front-end check runs on both kernels, with compile-time args of the right count (4 + accessor args, 2 + accessor args)
-        self.assertIn('rv_kernel_check.sh /tmp/kvr scatter', text)
-        self.assertIn('rv_kernel_check.sh /tmp/kvr checksum', text)
-        for op in ('qwen_p2p_staging_alloc', 'qwen_write_blocks_from_staging', 'qwen_staging_checksum', 'qwen_p2p_staging_info'):
+        # the RISC-V front-end check runs on all four kernels, with compile-time args of the right count
+        for kernel in ('scatter', 'gather', 'checksum', 'digest_rows'):
+            self.assertIn('rv_kernel_check.sh /tmp/kvr %s' % kernel, text, kernel)
+        for op in self.OPS:
             self.assertIn(op, text, op)
+        self.assertIn('QWEN_KV_READ_VERSION == "4"', text)
 
     def test_the_riscv_check_uses_the_jit_flags_that_matter(self):
         text = read(os.path.join(HERE, 'rv_kernel_check.sh'))
-        for flag in ('-Wall -Werror', '-ftt-no-dyninit', '-mcpu=tt-bh', '-std=c++17', '-DCOMPILE_FOR_BRISC', '-DKERNEL_BUILD', 'riscv-tt-elf-g++'):
+        for flag in ('-Wall -Werror', '-ftt-no-dyninit', '-mcpu=tt-bh', '-std=c++17', '-DCOMPILE_FOR_BRISC', '-DKERNEL_BUILD', 'riscv-tt-elf-g++', '-flto=1 -flto-partition=one',
+                     '--param=min-pagesize=0', '-Os', 'TT_METAL_ROOT', 'SFPI_ROOT'):
             self.assertIn(flag, text, flag)
         self.assertTrue(os.access(os.path.join(HERE, 'rv_kernel_check.sh'), os.X_OK))
         if shutil.which('bash'):
@@ -922,17 +1869,24 @@ class SourceAgreementTests(unittest.TestCase):
             self.assertEqual(subprocess.run(['bash', '-n', BUILD]).returncode, 0)
 
     def test_no_private_string_in_the_new_files(self):
-        """The repository is public: no hostnames, addresses, serials, registries or tokens in what this change adds."""
-        forbidden = re.compile(r'(\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b|thatch\.local|zot\.|/home/[a-z]|\bspark-|blackhole-[0-9A-F]{8,}|ghp_|ssh-rsa|BEGIN [A-Z ]*PRIVATE)')
-        names = ['qwen_p2p_scatter.cpp', 'qwen_p2p_checksum.cpp', 'qwen_p2p_plan.hpp', 'rv_kernel_check.sh', 'p2p_staging_ref.py', 'p2p_staging_card.py', 'test_p2p_staging_card.py',
+        """The repository is public: no hostnames, addresses, serials, registries, bus addresses (with or without the PCI domain) or tokens in what this
+        change adds."""
+        forbidden = re.compile(r'(\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b|thatch\.local|zot\.|/home/[a-z]|\bspark-|blackhole-[0-9A-F]{8,}|ghp_|ssh-rsa|BEGIN [A-Z ]*PRIVATE'
+                               r'|\b[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]\b|\b[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]\b|/dev/disk/by-id|nvme-[A-Za-z0-9_]+_[A-Z0-9]{8,})')
+        names = ['qwen_p2p_scatter.cpp', 'qwen_p2p_gather.cpp', 'qwen_p2p_checksum.cpp', 'qwen_p2p_digest_rows.cpp', 'qwen_p2p_plan.hpp', 'qwen_kv_read.cpp', 'rv_kernel_check.sh', 'build_kv_read.sh',
+                 'p2p_staging_ref.py', 'p2p_staging_card.py', 'p2p_staging_mock.py', 'test_p2p_staging_card.py',
                  os.path.join('emu', 'api', 'dataflow', 'dataflow_api.h'), os.path.join('emu', 'emu_common.hpp'), os.path.join('emu', 'emu_scatter.cpp'),
-                 os.path.join('emu', 'emu_checksum.cpp'), os.path.join('..', '..', '..', 'docs', 'tp4-p2p-restore.md')]
+                 os.path.join('emu', 'emu_gather.cpp'), os.path.join('emu', 'emu_checksum.cpp'), os.path.join('emu', 'emu_digest_rows.cpp'),
+                 os.path.join('..', '..', '..', 'docs', 'tp4-p2p-restore.md')]
         for name in names:
-            for number, line in enumerate(read(os.path.join(HERE, name)).splitlines(), 1):
+            path = os.path.join(HERE, name)
+            if not os.path.exists(path):
+                continue
+            for number, line in enumerate(read(path).splitlines(), 1):
                 self.assertIsNone(forbidden.search(line), '%s:%d: %s' % (name, number, line))
         # this file holds the pattern itself: check every other line of it
         for number, line in enumerate(read(__file__).splitlines(), 1):
-            if 'forbidden = re.compile' not in line:
+            if 'forbidden = re.compile' not in line and not line.lstrip().startswith("r'|"):
                 self.assertIsNone(forbidden.search(line), 'test_p2p_staging.py:%d: %s' % (number, line))
 
 

@@ -1,122 +1,159 @@
 #!/usr/bin/env bash
-# Build ~/opgraft-KVR on the rig HOST: qwen_kv_read.so, the standalone nanobind extension that adds ttnn.qwen_read_blocks (and, from version 2, the raw
-# qwen_read_blocks_raw / qwen_write_blocks_raw / qwen_block_bytes of the host KV tier; from version 3 the device side of the peer-to-peer restore:
-# qwen_p2p_staging_alloc / _info / _write / _read, qwen_write_blocks_from_staging, qwen_staging_checksum, docs/tp4-p2p-restore.md). Version 3 also
-# SHIPS the two device kernels (qwen_p2p_scatter.cpp, qwen_p2p_checksum.cpp) beside the .so, which JIT-compiles them at its first dispatch, and compiles
-# qwen_p2p_plan.hpp into itself: the build directory is the unit of delivery (the image copies the whole directory), so build version 3 into its OWN
-# directory (bash build_kv_read.sh ~/opgraft-KVR3), then `python3 scripts/ci/pin_kvread.py --dir ~/opgraft-KVR3 --write`. The two P2P ops carry row_stride (copy) and count (checksum); the
-# import check below refuses a build whose op signatures (the first line of each docstring, where the host's StagingApi looks) lack them.
-# (the prefix audit's region read, docs/prefix-audit-cost.md) WITHOUT replacing any pinned image binary. It is compiled in the
-# ttbuild container against the tt-metal tree the served binaries came from (9f9cd4fd), with the flags ninja uses for the
-# ttnn unity sources, and linked against ttbuild's _ttnncpp.so / libtt_metal.so / nanobind static library; at run time it
-# resolves against the IMAGE's own libraries (the soname of each is already loaded by `import ttnn`). It opens no device and
-# starts no device container. Because nothing is replaced, graft-so-drops-image-patches cannot apply: the checks below show
-# the image's three pinned binaries are byte-identical afterwards and that the module's own QWEN_ strings are the only new ones.
+# Build qwen_kv_read.so (version 4: the region reads of versions 1-3 and the P2P KV offload's device ops, see qwen_kv_read.cpp) for a serving image built on tt-metal
+# 62443b62, in a THROWAWAY container of that image. The container has no device, no network, a CPU and a memory limit, and writes nothing on the machine that runs it:
+# the sources go in on its stdin and the result comes back on its stdout. The module replaces no binary of the image (graft-so-drops-image-patches cannot apply); it links
+# the image's own _ttnncpp.so / libtt_metal.so / libtt_stl.so / libtt-umd / libtracy and the nanobind static library, with the flags of the ttnn unity build in the image's
+# build.ninja (minus link-time optimisation and -Werror, plus the tt-metal root on the include path for mesh_tensor_impl.hpp), compiled by the image's clang++-20.
 #
-#   QUAL: bash optimisation/ttnn-op/kv_region_read/build_kv_read.sh [out dir]      (default ~/opgraft-KVR)
+#   KVR_IMAGE=<the serving image> bash optimisation/ttnn-op/kv_region_read/build_kv_read.sh [out dir]        (default ./opgraft-KVR4)
+#
+# The build is checked before it is kept (in the same container, no device):
+#   1. ldd -r: no unresolved symbol that is not Python's;
+#   2. the RISC-V front end (rv_kernel_check.sh, the image's sfpi, tt-metal's JIT flags) on all four device kernels;
+#   3. python -c "import ttnn, qwen_kv_read": the version, every op and exception on ttnn, the kernels beside the module;
+#   4. p2p_staging_mock.py on tt-metal's MOCK Blackhole cluster: the real JIT compiles the kernels, and the refusal matrix, the digest handles, warm and freeze run against
+#      the real tt-metal (KVR_MOCK=0 skips it).
+# It writes <out>: qwen_kv_read.so, qwen_kv_read.o, compile-flags.txt, the sources it was built from (qwen_kv_read.cpp, qwen_p2p_plan.hpp, the four kernels, rv_kernel_check.sh,
+# p2p_staging_mock.py, this script), image-binaries.txt (the sha256 of the image libraries it linked), MANIFEST.sha256 and build.log. Built in <out>.partial and moved into
+# place only after every check passed.
 #
 # Env:
-#   KVR_IMAGES        space-separated images the module must import into with no unresolved symbol (default: the
-#                     production image zot.thatch.local:5000/thatch-serving-tt:latest); each is also asked for the sha256 of the
-#                     three pinned binaries, which must equal the recorded ones
-#   KVR_DRY_RUN=1     print every docker command and run none of them
-#   KVR_KEEP_WORK=1   leave /tmp/kvr in ttbuild
-# Writes <out> (an existing <out>/prod-audit is carried over): qwen_kv_read.so, qwen_kv_read.o, compile-flags.txt, qwen_kv_read.cpp, build_kv_read.sh, MANIFEST.sha256,
-# qwen-strings-*.txt, build.log. Built in <out>.partial and moved into place only after every check passed.
+#   KVR_IMAGE          REQUIRED. The serving image to build in and to check against. Nothing is replaced in it.
+#   KVR_REMOTE         A command prefix that gives a shell on the machine that has docker, for example "ssh -o BatchMode=yes user@host". Unset: docker runs here.
+#   KVR_CPUS           CPUs of the container (default 6)
+#   KVR_MEMORY         memory limit of the container (default 8g)
+#   KVR_MIN_AVAILABLE_GIB   the build refuses to start unless MemAvailable on the docker machine is at least this (default 20: a rig that also serves must not be starved)
+#   KVR_TT_METAL_ROOT  the tt-metal tree in the image (default: the image's own TT_METAL_HOME)
+#   KVR_SFPI_ROOT      the sfpi toolchain in the image (default /opt/tenstorrent/sfpi)
+#   KVR_MOCK           1 (default) runs p2p_staging_mock.py; 0 skips it
+#   KVR_DRY_RUN=1      print the docker command and run nothing
 set -euo pipefail
 export LC_ALL=C
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-out=${1:-$HOME/opgraft-KVR}
-images=${KVR_IMAGES:-zot.thatch.local:5000/thatch-serving-tt:latest}
-TTMETAL_HEAD=9f9cd4fd590f4b606bd0981a4fe0b6403eb38ec9
-# The image's pinned binaries (K64j's _ttnncpp.so, the P8 libtt_metal.so, K64j's _ttnn.so) and where they sit. The images built since the
-# prefill SDPA graft carry K64j-OQ's _ttnncpp.so instead (2b81e28f..., K64j plus the oneq prefill edits: build-c2-serving-image.sh, c2_image_provenance.py);
-# the version 2 module already runs on it, so either is accepted.
-TTNNCPP_SHA=152951c1c0de5c9dfad2d62c295393a43b2ecf353965c55c709da7e539b975b7
-TTNNCPP_OQ_SHA=2b81e28f017ccf0ab50028fbae5eb31dd61cfd8a3159233a1ed785712d024a57
-LIBTTMETAL_SHA=3f5a3d585b46b2bef7d7d2c6c34b88d7f4efb679ec051fb4da615f6ec9ccc9ce
-TTNN_SHA=914d09462e27e8f5c9d7df03218c51d159bd25f03b87ebc95103dcd06f01a640
-run() { if [ "${KVR_DRY_RUN:-0}" = 1 ]; then echo "### run: $*"; else "$@"; fi; }
+out=${1:-./opgraft-KVR4}
+image=${KVR_IMAGE:?KVR_IMAGE must name the serving image to build in (a tt-metal 62443b62 image)}
+remote=${KVR_REMOTE:-}
+cpus=${KVR_CPUS:-6}
+memory=${KVR_MEMORY:-8g}
+min_gib=${KVR_MIN_AVAILABLE_GIB:-20}
+metal=${KVR_TT_METAL_ROOT:-}
+sfpi=${KVR_SFPI_ROOT:-/opt/tenstorrent/sfpi}
+mock=${KVR_MOCK:-1}
 
-# The source files of the build: the module, its pure-arithmetic header, and the two device kernels it JIT-compiles at run time.
-SOURCES="qwen_kv_read.cpp qwen_p2p_plan.hpp qwen_p2p_scatter.cpp qwen_p2p_checksum.cpp rv_kernel_check.sh"
+# The source files of the build: the module, its pure-arithmetic header, the four device kernels it JIT-compiles at run time, and the checks.
+KERNELS="qwen_p2p_scatter.cpp qwen_p2p_gather.cpp qwen_p2p_checksum.cpp qwen_p2p_digest_rows.cpp"
+SOURCES="qwen_kv_read.cpp qwen_p2p_plan.hpp $KERNELS rv_kernel_check.sh p2p_staging_mock.py"
 for f in $SOURCES; do test -s "$here/$f" || { echo "no $f beside this script" >&2; exit 2; }; done
-if [ "$(docker inspect -f '{{.State.Running}}' ttbuild 2>/dev/null || echo missing)" != true ]; then
-  echo "ttbuild is not running: starting it (a container start, no device)"
-  run docker start ttbuild
-  [ "${KVR_DRY_RUN:-0}" = 1 ] || sleep 3
+
+# The script that runs INSIDE the container (it travels in the same tar as the sources). fd 3 is the real stdout (the result tar); stdout and stderr are the log.
+stage=$(mktemp -d)
+trap 'rm -rf "$stage"' EXIT
+cat > "$stage/inner.sh" <<'INNER'
+exec 3>&1 1>&2
+set -eu
+metal=${1:-${TT_METAL_HOME:-}}; sfpi=$2; mock=$3
+test -n "$metal" || { echo "no tt-metal root: the image sets no TT_METAL_HOME and KVR_TT_METAL_ROOT is empty" >&2; exit 2; }
+cd /tmp/kvr
+test -d "$metal/build_Release" || { echo "no $metal/build_Release in this image" >&2; exit 2; }
+test -x "$sfpi/compiler/bin/riscv-tt-elf-g++" || { echo "no RISC-V compiler in $sfpi" >&2; exit 2; }
+B=$metal/build_Release
+# the tree must be the one the module is written for (the 62443b62 host API: a program is created for a mesh, UMD headers live under tt-umd/)
+grep -q "CreateProgram(distributed::MeshDevice& mesh_device)" "$metal/tt_metal/api/tt-metalium/host_api.hpp" || { echo "this tt-metal is not the 62443b62 generation (no CreateProgram(MeshDevice&))" >&2; exit 2; }
+test -f "$metal/tt_metal/api/tt-metalium/mesh_event.hpp" || { echo "this tt-metal has no mesh_event.hpp" >&2; exit 2; }
+echo "== libraries linked"
+(cd "$B" && sha256sum ttnn/_ttnncpp.so lib/libtt_metal.so lib/libtt_stl.so lib/libtt-umd.so.0.* lib/libtracy.so.0.* ttnn/libnanobind-static-abi3.a "$metal/ttnn/ttnn/_ttnn.so") | tee /tmp/kvr/image-binaries.txt
+cd "$B"
+# 1. compile + link (the flags are ninja's own for the ttnn unity sources, minus LTO and -Werror)
+FLAGS=$(ninja -t commands ttnn/_ttnn.so | grep -m1 "unity_0_cxx.cxx.o -c" | sed -e 's/^[^ ]* //' -e 's/ -MD .*//' -e 's/-flto=thin//' -e 's/ -Werror//' -e 's/-Dttnn_EXPORTS//')
+test -n "$FLAGS" || { echo "no unity compile command in build.ninja" >&2; exit 2; }
+echo "$FLAGS" > /tmp/kvr/compile-flags.txt
+echo "== compile"
+eval nice -n 10 /usr/bin/clang++-20 "$FLAGS" -fvisibility=hidden -I"$metal" -I/tmp/kvr -c /tmp/kvr/qwen_kv_read.cpp -o /tmp/kvr/qwen_kv_read.o
+echo "== link"
+umd=$(ls "$B"/lib/libtt-umd.so.0.* | head -1)
+tracy=$(ls "$B"/lib/libtracy.so.0.* | head -1)
+/usr/bin/clang++-20 -fPIC -O3 -shared -fuse-ld=lld -Wl,--gc-sections -Wl,-soname,qwen_kv_read.so -o /tmp/kvr/qwen_kv_read.so /tmp/kvr/qwen_kv_read.o \
+  -Wl,-rpath,"$B/tt_metal:$B/ttnn:$B/lib:$B/tt_metal/third_party/umd/lib:$B/tt_stl:" \
+  "$B/ttnn/_ttnncpp.so" "$B/ttnn/libnanobind-static-abi3.a" "$B/lib/libtt_metal.so" "$B/lib/libtt_stl.so" "$umd" "$tracy" -ldl
+readelf -d /tmp/kvr/qwen_kv_read.so | grep -E "NEEDED|SONAME"
+# 2. ldd -r: every symbol that is not Python's resolves against the image's own libraries
+echo "== ldd -r"
+unresolved=$(ldd -r /tmp/kvr/qwen_kv_read.so 2>&1 | grep "undefined symbol" | grep -v "Py\|_Py" || true)
+test -z "$unresolved" || { echo "UNRESOLVED:"; echo "$unresolved"; exit 3; }
+echo "unresolved non-Python symbols: 0"
+# 3. the device kernels, with the real RISC-V toolchain and the JIT's flags (a front-end check, no device)
+echo "== RISC-V kernel front-end checks"
+export TT_METAL_ROOT=$metal SFPI_ROOT=$sfpi
+bash /tmp/kvr/rv_kernel_check.sh /tmp/kvr scatter "1088,64,16,32,2,1088,2,65536"
+bash /tmp/kvr/rv_kernel_check.sh /tmp/kvr gather "1088,64,16,32,2,1088,2,65536"
+bash /tmp/kvr/rv_kernel_check.sh /tmp/kvr checksum "32768,64,2,65536,2,64"
+bash /tmp/kvr/rv_kernel_check.sh /tmp/kvr digest_rows "1088,64,8,2,16,2,1088,2,64"
+# 4. the module imports and carries the contract
+echo "== import"
+PYTHONPATH=/tmp/kvr:${PYTHONPATH:-} python3 -c '
+import os, ttnn, qwen_kv_read
+assert qwen_kv_read.QWEN_KV_READ_VERSION == "4", qwen_kv_read.QWEN_KV_READ_VERSION
+ops = ("qwen_read_blocks", "qwen_block_bytes", "qwen_read_blocks_raw", "qwen_write_blocks_raw", "qwen_p2p_staging_alloc", "qwen_p2p_staging_info", "qwen_blocks_to_staging",
+       "qwen_write_blocks_from_staging", "qwen_blocks_digest_async", "qwen_p2p_record_event", "qwen_p2p_warm", "qwen_p2p_freeze", "qwen_staging_checksum",
+       "qwen_p2p_staging_write", "qwen_p2p_staging_read")
+assert all(callable(getattr(ttnn, n)) for n in ops), "an op is missing on ttnn"
+assert issubclass(ttnn.QwenP2PRefused, ValueError) and issubclass(ttnn.QwenP2PEnqueueError, RuntimeError)
+d = os.path.dirname(qwen_kv_read.__file__)
+assert all(os.path.getsize(os.path.join(d, k)) > 0 for k in ("qwen_p2p_scatter.cpp", "qwen_p2p_gather.cpp", "qwen_p2p_checksum.cpp", "qwen_p2p_digest_rows.cpp")), "a kernel is missing beside the module"
+sig = lambda n: (getattr(ttnn, n).__doc__ or "").splitlines()[0]
+assert "pages_per_block: int" in sig("qwen_blocks_to_staging") and "cq_id: int = 0" in sig("qwen_write_blocks_from_staging"), "the gather / scatter signature is not the frozen interface"
+assert "tensors:" in sig("qwen_blocks_digest_async") and "DigestHandle" in sig("qwen_blocks_digest_async"), "the digest signature is not the frozen interface"
+print("IMPORT-OK", qwen_kv_read.QWEN_KV_READ_VERSION)
+'
+strings /tmp/kvr/qwen_kv_read.so | grep -oE 'QWEN_[A-Z0-9_]+' | sort -u > /tmp/kvr/qwen-strings-module.txt
+echo "QWEN_ strings in the module: $(tr '\n' ' ' < /tmp/kvr/qwen-strings-module.txt)"
+# 5. the mock Blackhole cluster: the real JIT, the refusal matrix, the digest handles, warm / freeze (no device in this container)
+if [ "$mock" = 1 ]; then
+  echo "== mock device"
+  cd /tmp/kvr
+  desc=$metal/tt_metal/third_party/umd/tests/cluster_descriptor_examples/blackhole_4xP150.yaml
+  test -f "$desc" || { echo "no mock cluster descriptor $desc" >&2; exit 2; }
+  PYTHONPATH=/tmp/kvr:${PYTHONPATH:-} timeout 900 python3 /tmp/kvr/p2p_staging_mock.py --cluster-desc "$desc" 2>&1 | grep -v '^20[0-9][0-9]-' | tee /tmp/kvr/mock.log
+  grep -q "^MOCK-OK" /tmp/kvr/mock.log || { echo "the mock-device check failed" >&2; exit 4; }
 fi
-head=$(docker exec ttbuild git -C /opt/tt-metal rev-parse HEAD 2>/dev/null || echo unknown)
-[ "${KVR_DRY_RUN:-0}" = 1 ] || test "$head" = "$TTMETAL_HEAD" || { echo "ttbuild's tt-metal is $head, not $TTMETAL_HEAD" >&2; exit 2; }
-# The rig's floor is 150 GiB free on the root disk (it is also the production control plane); the build itself writes a few MB.
-avail=$(( $(df --output=avail -B1G / | tail -1 | tr -dc 0-9) ))
-test "$avail" -ge 150 || { echo "rig root disk has ${avail} GiB free (floor 150)" >&2; exit 2; }
+sha256sum /tmp/kvr/qwen_kv_read.so
+cd /tmp/kvr && tar cf - qwen_kv_read.so qwen_kv_read.o compile-flags.txt image-binaries.txt qwen-strings-module.txt >&3
+INNER
+
+# The command that runs the container. Nothing is mounted: the sources and the script above arrive on stdin, in one tar.
+unpack='mkdir -p /tmp/kvr && cd /tmp/kvr && tar xf - && exec bash /tmp/kvr/inner.sh "$@"'
+docker_cmd="docker run -i --rm --network none --cpus $cpus --memory $memory --entrypoint bash $(printf '%q' "$image") -c $(printf '%q' "$unpack") bash $(printf '%q' "$metal") $(printf '%q' "$sfpi") $mock"
+guard="a=\$(awk '/MemAvailable/{print \$2}' /proc/meminfo); [ \"\$a\" -ge $((min_gib * 1048576)) ] || { echo \"MemAvailable \$a kB is under $min_gib GiB: not starting the build\" >&2; exit 9; }"
+run_command="$guard; exec $docker_cmd"
+
+if [ "${KVR_DRY_RUN:-0}" = 1 ]; then
+  echo "### the container command (run on ${remote:-this machine}):"
+  echo "$run_command"
+  echo "dry run: nothing built"
+  exit 0
+fi
 
 work=$out.partial
 rm -rf "$work"; mkdir -p "$work"
-exec > >(tee "$work/build.log") 2>&1
-echo "build_kv_read: tt-metal $head, disk ${avail} GiB free, out $out"
-
-# 1. compile + link in ttbuild (the flags are ninja's own for the ttnn unity sources, minus LTO and -Werror)
-run docker exec ttbuild rm -rf /tmp/kvr
-run docker exec ttbuild mkdir -p /tmp/kvr
-for f in $SOURCES; do run docker cp "$here/$f" "ttbuild:/tmp/kvr/$f"; done
-cat > "$work/inner.sh" <<'EOF'
-set -eu   # no pipefail: grep -m1 closes ninja's pipe
-cd /opt/tt-metal/build_Release
-FLAGS=$(ninja -t commands ttnn/_ttnn.so | grep -m1 "unity_0_cxx.cxx.o -c" | sed -e 's/^[^ ]* //' -e 's/ -MD .*//' -e 's/-flto=thin//' -e 's/ -Werror//' -e 's/-Dttnn_EXPORTS//')
-test -n "$FLAGS"
-echo "$FLAGS" > /tmp/kvr/flags.txt
-NB=/opt/tt-metal/.cpmcache/nanobind/7965351fcedc97e6ade403d51a150a266d188dc6
-eval /usr/bin/clang++-20 $FLAGS -fvisibility=hidden -I$NB/ext/robin_map/include -c /tmp/kvr/qwen_kv_read.cpp -o /tmp/kvr/qwen_kv_read.o
-/usr/bin/clang++-20 -fPIC -O3 -shared -fuse-ld=lld -Wl,--gc-sections -Wl,-soname,qwen_kv_read.so -o /tmp/kvr/qwen_kv_read.so /tmp/kvr/qwen_kv_read.o \
-  -Wl,-rpath,/opt/tt-metal/build_Release/tt_metal:/opt/tt-metal/build_Release/ttnn:/opt/tt-metal/build_Release/tt_metal/third_party/umd/lib:/opt/tt-metal/build_Release/tt_stl:/opt/tt-metal/build_Release/lib: \
-  ttnn/_ttnncpp.so ttnn/libnanobind-static-abi3.a tt_metal/libtt_metal.so tt_stl/libtt_stl.so tt_metal/third_party/umd/lib/libtt-umd.so.0.77.0 lib/libtracy.so.0.13.3 -ldl
-readelf -d /tmp/kvr/qwen_kv_read.so | grep -E "NEEDED|SONAME"
-EOF
-run docker cp "$work/inner.sh" ttbuild:/tmp/kvr/inner.sh
-run docker exec ttbuild bash /tmp/kvr/inner.sh
-# 1b. the two device kernels are JIT-compiled only at the first dispatch on a card: compile them now with the real RISC-V toolchain and the JIT's flags (a front-end check,
-# no device), so a toolchain error stops this build instead of the first restore
-run docker exec ttbuild bash /tmp/kvr/rv_kernel_check.sh /tmp/kvr scatter "1088,16,16,32,2,1088,2,65536"
-run docker exec ttbuild bash /tmp/kvr/rv_kernel_check.sh /tmp/kvr checksum "32768,64,2,65536,2,64"
-for f in qwen_kv_read.so qwen_kv_read.o; do run docker cp ttbuild:/tmp/kvr/$f "$work/$f"; done
-run docker cp ttbuild:/tmp/kvr/flags.txt "$work/compile-flags.txt"
-for f in $SOURCES "$(basename "${BASH_SOURCE[0]}")"; do cp "$here/$f" "$work/"; done
-[ "${KVR_KEEP_WORK:-0}" = 1 ] || run docker exec ttbuild rm -rf /tmp/kvr
-if [ "${KVR_DRY_RUN:-0}" = 1 ]; then echo "dry run: nothing built"; rm -rf "$work"; exit 0; fi
+echo "build_kv_read: image $image, container limits $cpus CPUs / $memory, out $out" | tee "$work/build.log"
+sources_tar=$stage/sources.tar
+tar cf "$sources_tar" -C "$here" $SOURCES -C "$stage" inner.sh
+# The container's log goes straight into build.log (and is shown when the container is done: a build is seconds, and a log written through a pipe could still be
+# in flight when the directory is moved); its stdout is the tar of the result.
+ok=0
+if [ -n "$remote" ]; then
+  # shellcheck disable=SC2086
+  if $remote "$run_command" < "$sources_tar" 2>> "$work/build.log" | tar xf - -C "$work"; then ok=1; fi
+else
+  if bash -c "$run_command" < "$sources_tar" 2>> "$work/build.log" | tar xf - -C "$work"; then ok=1; fi
+fi
+cat "$work/build.log" >&2
+[ "$ok" = 1 ] || { echo "build_kv_read: the container (or the transfer of its result) failed: a check did not pass (the log is above, and in $work/build.log)" >&2; exit 1; }
+for f in qwen_kv_read.so qwen_kv_read.o compile-flags.txt image-binaries.txt; do test -s "$work/$f" || { echo "build_kv_read: the container returned no $f: a check failed (see $work/build.log)" >&2; exit 1; }; done
+for f in $SOURCES; do cp "$here/$f" "$work/"; done
+cp "$here/$(basename "${BASH_SOURCE[0]}")" "$work/"
 sha=$(sha256sum < "$work/qwen_kv_read.so" | cut -c1-64)
-echo "KVR_SHA256=$sha"
-strings "$work/qwen_kv_read.so" | grep -oE 'QWEN_[A-Z0-9_]+|\[QWEN-[A-Z0-9-]+\]' | sort -u > "$work/qwen-strings-module.txt"
-
-# 2. per image: the pinned binaries are untouched (we replace nothing), the module imports and every symbol resolves
-fail=0
-for image in $images; do
-  tagname=$(printf '%s' "$image" | tr '/:@' '___')
-  docker run --rm --network none --entrypoint sh "$image" -c '
-    sha256sum /opt/tt-metal/build_Release/lib/_ttnncpp.so /opt/tt-metal/build_Release/ttnn/_ttnncpp.so /opt/tt-metal/build_Release/lib/libtt_metal.so /opt/tt-metal/ttnn/ttnn/_ttnn.so
-    strings /opt/tt-metal/build_Release/lib/_ttnncpp.so | grep -oE "QWEN_[A-Z0-9_]+|\[QWEN-[A-Z0-9-]+\]" | sort -u | sed "s/^/STRING /"' > "$work/image-$tagname.txt"
-  grep '^STRING ' "$work/image-$tagname.txt" | cut -c8- > "$work/qwen-strings-$tagname.txt"
-  ttnncpp=$TTNNCPP_SHA
-  grep -q "^$TTNNCPP_OQ_SHA  /opt/tt-metal/build_Release/lib/_ttnncpp.so\$" "$work/image-$tagname.txt" && ttnncpp=$TTNNCPP_OQ_SHA && echo "$image: _ttnncpp.so is K64j-OQ"
-  for pair in "$ttnncpp /opt/tt-metal/build_Release/lib/_ttnncpp.so" "$ttnncpp /opt/tt-metal/build_Release/ttnn/_ttnncpp.so" \
-              "$LIBTTMETAL_SHA /opt/tt-metal/build_Release/lib/libtt_metal.so" "$TTNN_SHA /opt/tt-metal/ttnn/ttnn/_ttnn.so"; do
-    grep -q "^${pair%% *}  ${pair#* }\$" "$work/image-$tagname.txt" || { echo "FAIL $image: ${pair#* } is not ${pair%% *}" >&2; fail=1; }
-  done
-  # the module adds no QWEN_ string the image's _ttnncpp.so lacks that a flag could mean; it replaces nothing, so the image set is untouched
-  echo "QWEN_ strings: image _ttnncpp.so $(wc -l < "$work/qwen-strings-$tagname.txt"), module $(wc -l < "$work/qwen-strings-module.txt") ($(tr '\n' ' ' < "$work/qwen-strings-module.txt"))"
-  unresolved=$(docker run --rm --network none --entrypoint bash -v "$work:/kvr:ro" "$image" -c \
-    'ldd -r /kvr/qwen_kv_read.so 2>&1 | grep "undefined symbol" | grep -v "Py\|_Py" || true' | wc -l)
-  echo "$image: unresolved non-Python symbols: $unresolved"
-  test "$unresolved" = 0 || fail=1
-  docker run --rm --network none --entrypoint python3 -v "$work:/kvr:ro" -e PYTHONPATH=/kvr "$image" -c \
-    'import ttnn, qwen_kv_read; assert qwen_kv_read.QWEN_KV_READ_VERSION == "3"; assert all(callable(getattr(ttnn, n)) for n in ("qwen_read_blocks", "qwen_block_bytes", "qwen_read_blocks_raw", "qwen_write_blocks_raw", "qwen_p2p_staging_alloc", "qwen_p2p_staging_info", "qwen_write_blocks_from_staging", "qwen_staging_checksum", "qwen_p2p_staging_write", "qwen_p2p_staging_read")); o = __import__("os").path; d = o.dirname(qwen_kv_read.__file__); assert all(o.getsize(o.join(d, k)) > 0 for k in ("qwen_p2p_scatter.cpp", "qwen_p2p_checksum.cpp")); sig = lambda n: (getattr(ttnn, n).__doc__ or "").splitlines()[0]; assert "row_stride:" in sig("qwen_write_blocks_from_staging") and "count:" in sig("qwen_staging_checksum"), "row_stride / count are not in the ops signatures: the host would run in compat mode"; print("IMPORT-OK", qwen_kv_read.QWEN_KV_READ_VERSION, "row_stride+count")' 2>&1 | grep -E "IMPORT-OK|Error|error" | tail -3 \
-    | tee "$work/import-$tagname.txt"
-  grep -q IMPORT-OK "$work/import-$tagname.txt" || { echo "FAIL $image: the module does not import" >&2; fail=1; }
-done
-test "$fail" = 0 || { echo "build_kv_read: a check failed; $work left for reading" >&2; exit 1; }
-# prod-audit/ (stage_prod_audit.py: the production model.py with the narrowed audit) survives a rebuild of the module; its pin is the checkout's, not this build's
-[ -d "$out/prod-audit" ] && cp -a "$out/prod-audit" "$work/prod-audit"
+echo "KVR_SHA256=$sha" | tee -a "$work/build.log"
 (cd "$work" && find . -type f ! -name MANIFEST.sha256 ! -name build.log | LC_ALL=C sort | xargs sha256sum > MANIFEST.sha256)
 rm -rf "$out"; mv "$work" "$out"
 echo "build_kv_read: OK $out qwen_kv_read.so $sha"

@@ -7,7 +7,7 @@ The extension (optimisation/ttnn-op/kv_region_read/build_kv_read.sh) is pinned b
 the overlay test, so an image never bakes bytes nobody built and checked. Version 2 (the raw block read and write of the host KV tier) is a new build with a new hash;
 this moves all four in one command instead of four hand edits at the start of a card window. It refuses a build that is not this checkout's source (the directory's copy
 of qwen_kv_read.cpp must be byte-identical to the checkout's), that has no MANIFEST.sha256 (the build writes it only after every check passed) or whose binary does not
-carry the four op names (version 1 has no raw ops); when the checkout's source is version 3 also the six P2P op names and a byte-identical copy of the three P2P files (plan header, two kernels). Only the four files that ENFORCE the pin are rewritten (PIN_SITES); the files that merely quote the old hash - the version 1 qualification pack and the audit-cost
+carry the four op names (version 1 has no raw ops); when the checkout's source has the P2P ops also their names (six in version 3, eleven in version 4) and a byte-identical copy of the P2P files (the plan header and the kernels: three in version 3, five in version 4). Only the four files that ENFORCE the pin are rewritten (PIN_SITES); the files that merely quote the old hash - the version 1 qualification pack and the audit-cost
 note, which describe the version 1 build - are listed and left alone, so they stay true.
 """
 
@@ -25,9 +25,11 @@ SHA256 = re.compile(r'[0-9a-f]{64}')
 OP_NAMES = (b'qwen_read_blocks', b'qwen_read_blocks_raw', b'qwen_write_blocks_raw', b'qwen_block_bytes')
 # Version 3 (docs/tp4-p2p-restore.md): the P2P restore's device ops, and the files the module reads or compiles at run time, which must sit beside the .so.
 # They are required only when the checkout's own qwen_kv_read.cpp is version 3, so a checkout that predates it can still move a version 2 pin.
+# Version 4 (the Gemma P2P KV offload: the header of qwen_kv_read.cpp and the note at the top of docs/tp4-p2p-restore.md) adds the spill's gather, the block-row digest with its event,
+# and warm / freeze, and two more kernels.
 P2P_OP_NAMES = (b'qwen_p2p_staging_alloc', b'qwen_p2p_staging_info', b'qwen_p2p_staging_write', b'qwen_p2p_staging_read', b'qwen_write_blocks_from_staging',
-                b'qwen_staging_checksum')
-P2P_FILES = ('qwen_p2p_plan.hpp', 'qwen_p2p_scatter.cpp', 'qwen_p2p_checksum.cpp')
+                b'qwen_staging_checksum', b'qwen_blocks_to_staging', b'qwen_blocks_digest_async', b'qwen_p2p_record_event', b'qwen_p2p_warm', b'qwen_p2p_freeze')
+P2P_FILES = ('qwen_p2p_plan.hpp', 'qwen_p2p_scatter.cpp', 'qwen_p2p_checksum.cpp', 'qwen_p2p_gather.cpp', 'qwen_p2p_digest_rows.cpp')
 EXTENSION = 'qwen_kv_read.so'
 SOURCE = 'qwen_kv_read.cpp'
 MANIFEST = 'MANIFEST.sha256'
@@ -65,7 +67,7 @@ def build_problems(directory, cpp=CPP):
     if source.is_file() and P2P_OP_NAMES[0] in source.read_bytes():
         absent = [name.decode('ascii') for name in P2P_OP_NAMES if name not in data]
         if absent:
-            problems.append('%s does not carry %s: it is not version 3 of the extension' % (binary, ', '.join(absent)))
+            problems.append('%s does not carry %s: it is not version 3 or later of the extension (the P2P ops)' % (binary, ', '.join(absent)))
         for name in P2P_FILES:
             shipped, wanted = directory / name, source.parent / name
             if not shipped.is_file():

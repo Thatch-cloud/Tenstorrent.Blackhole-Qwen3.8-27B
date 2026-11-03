@@ -46,13 +46,10 @@ int main(int argc, char** argv) {
     const uint32_t l1 = emu_run::l1_region();
     state.cb_base = l1 + 16;
     state.cb_bytes = qwen_p2p::scatter_cb_bytes(page);
-    state.read_bank = bank;
-    state.read_lo = staging_address + byte_offset;
-    state.read_hi = state.read_lo + uint64_t(blocks.size() - 1) * row_stride + slice_bytes;
-    state.read_row_stride = row_stride;
-    state.read_row_bytes = slice_bytes;
-    state.write_lo = dst_address;
-    state.write_hi = bank_bytes;
+    // reads: only the rows of the staging range (the bytes between two rows are not the kernel's to read); writes: the destination pages, in any bank
+    state.read_regions = {emu::Region{int(bank), staging_address + byte_offset, staging_address + byte_offset + uint64_t(blocks.size() - 1) * row_stride + slice_bytes,
+                                      row_stride, slice_bytes}};
+    state.write_regions = {emu::Region{-1, dst_address, bank_bytes, 0, 0}};
     state.write_page = page;
 
     for (const auto& [launch_first, launch_count] : qwen_p2p::scatter_launches(static_cast<uint32_t>(blocks.size()))) {

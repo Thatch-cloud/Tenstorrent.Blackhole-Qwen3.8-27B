@@ -1,5 +1,6 @@
-// A host stand-in for the device dataflow API, just enough for qwen_p2p_scatter.cpp and qwen_p2p_checksum.cpp to be compiled by an ordinary C++
-// compiler and RUN on the CPU by test_p2p_staging.py (emu_scatter.cpp, emu_checksum.cpp). It is a test double, not tt-metal: it models
+// A host stand-in for the device dataflow API, just enough for qwen_p2p_scatter.cpp, qwen_p2p_gather.cpp, qwen_p2p_checksum.cpp and qwen_p2p_digest_rows.cpp to be compiled by
+// an ordinary C++ compiler and RUN on the CPU by test_p2p_staging.py (emu_scatter.cpp, emu_gather.cpp, emu_checksum.cpp, emu_digest_rows.cpp). It is a test double, not
+// tt-metal: it models
 //   * DRAM as 8 banks of host memory and a NOC address as (bank << 48 | byte address in the bank);
 //   * an interleaved TensorAccessor (page id -> bank id % 8, address base + (id / 8) * page rounded up to 64, plus the offset);
 //   * L1 as one host region at a 32-bit address (so a uint32 L1 address IS a pointer), with the kernel's circular buffer inside it;
@@ -9,9 +10,10 @@
 //     refills a buffer it is still reading, or changes a buffer after issuing the write that sends it, computes a wrong answer). A correct
 //     kernel is right under both;
 //   * the rules that bite on this stack: every DRAM access starts 64-byte aligned, L1 destinations of reads are 64-byte aligned, an access
-//     is a WHOLE page (the sub-page DRAM no-op), nothing is read or written outside the ranges the harness allows, all L1 traffic stays
-//     inside the circular buffer, runtime args are read only inside the argument count, and a kernel ends with no transfer pending. A read range may be ROWS
-//     (a stride and a row length): reads must stay inside the rows, the bytes between two rows are not the kernel's to read.
+//     is a WHOLE page (the sub-page DRAM no-op), nothing is read or written outside the regions the harness allows, all L1 traffic stays
+//     inside the circular buffer, runtime args are read only inside the argument count, and a kernel ends with no transfer pending. A region may be ROWS
+//     (a stride and a row length): accesses must stay inside the rows, the bytes between two rows are not the kernel's to touch. A harness may also name the EXACT
+//     set of (bank, address) pairs a kernel may read or write (the pages of the blocks it was asked for): any other page is a violation.
 // Any violation prints "EMU-VIOLATION: ..." and exits 3.
 #pragma once
 
@@ -19,6 +21,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <unordered_set>
 #include <vector>
 
 // The device headers define this as an address-space attribute of the RISC-V compiler; on the host it is nothing.
@@ -34,19 +37,25 @@ struct Pending {
     uint32_t size;
 };
 
+// A range the harness allows: bank -1 is every bank; [lo, hi) are byte addresses in the bank; row_stride != 0 makes it ROWS (row_bytes at every row_stride from lo).
+struct Region {
+    int bank = -1;
+    uint64_t lo = 0, hi = 0;
+    uint64_t row_stride = 0, row_bytes = 0;
+};
+
 struct State {
     std::vector<std::vector<uint8_t>> banks;
     std::vector<Pending> reads, writes;
     uint32_t cb_base = 0, cb_bytes = 0;
     std::vector<uint32_t> args;
-    // The ranges the harness allows: reads (bank, [lo, hi)) and writes ([lo, hi) in every bank), and the page size writes must use (0: any).
-    uint32_t read_bank = 0;
-    uint64_t read_lo = 0, read_hi = 0;
-    uint64_t write_lo = 0, write_hi = 0;
+    // The regions the harness allows (an access must lie wholly inside one), the page size writes must use (0: any), the unit reads must be a multiple of (0: any).
+    std::vector<Region> read_regions, write_regions;
     uint32_t write_page = 0;
-    uint32_t read_unit = 0;  // reads must be a multiple of this many bytes
-    // Rows of the read range (0: the range is solid): bytes [lo + i * read_row_stride, lo + i * read_row_stride + read_row_bytes) are allowed, the gaps between rows are not.
-    uint64_t read_row_stride = 0, read_row_bytes = 0;
+    uint32_t read_unit = 0;
+    // When not empty: the only NOC addresses (bank << 48 | address) a read / write may start at, each of exactly exact_*_size bytes.
+    std::unordered_set<uint64_t> exact_reads, exact_writes;
+    uint32_t exact_read_size = 0, exact_write_size = 0;
     uint64_t reads_issued = 0, writes_issued = 0;
 };
 inline State state;
@@ -58,6 +67,20 @@ inline State state;
 }
 
 inline bool in_cb(uint64_t l1, uint64_t size) { return l1 >= state.cb_base && l1 + size <= uint64_t(state.cb_base) + state.cb_bytes; }
+
+inline bool region_allows(const Region& region, uint32_t bank, uint64_t address, uint64_t size) {
+    if (region.bank >= 0 && uint32_t(region.bank) != bank) return false;
+    if (address < region.lo || address + size > region.hi) return false;
+    if (region.row_stride != 0 && (address - region.lo) % region.row_stride + size > region.row_bytes) return false;
+    return true;
+}
+
+inline bool regions_allow(const std::vector<Region>& regions, uint32_t bank, uint64_t address, uint64_t size) {
+    for (const Region& region : regions) {
+        if (region_allows(region, bank, address, size)) return true;
+    }
+    return false;
+}
 
 inline void perform_read(const Pending& read) {
     const uint32_t bank = static_cast<uint32_t>(read.noc_address >> 48);
@@ -132,12 +155,10 @@ inline void noc_async_read(uint64_t source, uint32_t destination_l1, uint32_t si
     if (address % 64 != 0) violation("read from a DRAM address that is not 64-byte aligned", address);
     if (destination_l1 % 64 != 0) violation("read into an L1 address that is not 64-byte aligned", destination_l1);
     if (!in_cb(destination_l1, size)) violation("read lands outside the circular buffer", destination_l1, size);
-    if (bank != state.read_bank || address < state.read_lo || address + size > state.read_hi) {
-        violation("read outside the allowed staging range", bank, address);
-    }
+    if (!regions_allow(state.read_regions, bank, address, size)) violation("read outside the allowed range", bank, address);
     if (state.read_unit != 0 && size % state.read_unit != 0) violation("read is not a whole unit", size, state.read_unit);
-    if (state.read_row_stride != 0 && (address - state.read_lo) % state.read_row_stride + size > state.read_row_bytes) {
-        violation("read reaches into the gap between two rows", bank, address);
+    if (!state.exact_reads.empty() && (size != state.exact_read_size || state.exact_reads.count(source) == 0)) {
+        violation("read of a page the call did not ask for", bank, address);
     }
     if (kEager) {
         perform_read({source, destination_l1, size});
@@ -156,8 +177,11 @@ inline void noc_async_write(uint32_t source_l1, uint64_t destination, uint32_t s
     if (address % 64 != 0) violation("write to a DRAM address that is not 64-byte aligned", address);
     if (source_l1 % 16 != 0) violation("write from an L1 address that is not 16-byte aligned", source_l1);
     if (!in_cb(source_l1, size)) violation("write reads from outside the circular buffer", source_l1, size);
-    if (address < state.write_lo || address + size > state.write_hi) violation("write outside the allowed range", bank, address);
+    if (!regions_allow(state.write_regions, bank, address, size)) violation("write outside the allowed range", bank, address);
     if (state.write_page != 0 && size != state.write_page) violation("a write that is not one whole page", size, state.write_page);
+    if (!state.exact_writes.empty() && (size != state.exact_write_size || state.exact_writes.count(destination) == 0)) {
+        violation("write of a page the call did not ask for", bank, address);
+    }
     if (kEager) {
         perform_write({destination, source_l1, size});
     } else {
