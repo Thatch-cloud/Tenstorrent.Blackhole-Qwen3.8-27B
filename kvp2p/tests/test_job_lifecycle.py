@@ -945,6 +945,83 @@ class InternalErrors(RigCase):
         connector.get_transfer_results(set())
         self.assertIsNone(connector.build_connector_worker_meta())
 
+    def test_a_report_that_could_not_be_queued_leaves_the_job_unreported_and_the_latch_reports_it_once(self):
+        """Review minor 3. ``reported`` used to be set before the report reached the outbox: an error in between lost the job for good
+        (``_report_lost`` and the latch both saw ``reported`` and did nothing). It is set after, so the job is still owed its report."""
+        import collections
+        from unittest import mock
+
+        from ttkvp2p import worker as worker_module
+
+        class FlakyOutbox(collections.deque):
+            armed = False
+
+            def append(self, item):
+                if self.armed:
+                    self.armed = False
+                    raise RuntimeError('the outbox is gone')
+                super().append(item)
+
+        real_result = worker_module.TTTransferResult
+        state = {'armed': False}
+
+        def flaky_result(*args, **kwargs):
+            if state['armed']:
+                state['armed'] = False
+                raise RuntimeError('the report cannot be built')
+            return real_result(*args, **kwargs)
+
+        cases = {
+            'the append raises': lambda rig, outbox: setattr(outbox, 'armed', True),
+            'the report cannot be built': lambda rig, outbox: state.__setitem__('armed', True),
+        }
+        for name, arm in cases.items():
+            with self.subTest(name), mock.patch.object(worker_module, 'TTTransferResult', flaky_result):
+                rig, kit = self.internal_rig()
+                rig.expected_internal_errors = 1
+                outbox = FlakyOutbox()
+                rig.worker._outbox = outbox
+                kit.fill_blocks([1, 2], 'unqueued ' + name)
+                kit.store(1, [1, 2])
+                arm(rig, outbox)
+                kit.pump_until_reported(1)
+                for _ in range(5):
+                    kit.pump_once()
+                self.assertEqual(kit.reports, {1: 1}, 'reported exactly once')
+                self.assertTrue(kit.results[1].success, 'a job that finished keeps its verdict')
+                self.assertEqual(rig.worker.stats['internal_error'], 1)
+                self.assertEqual(rig.runtime.state, 'LATCHED')
+                self.assertEqual(rig.worker.active_job_ids, [])
+                self.assertEqual(list(rig.worker._reported_stores), [1], 'one store result, not two')
+                self.assertTrue(rig.runtime.store_results[1].success)
+
+    def test_a_failed_job_whose_report_never_got_queued_is_reported_by_the_next_latch(self):
+        """A failure inside ``_fail`` (here: retiring a piece) comes before the report; the job is FAILED but still owed it."""
+        rig, kit = self.internal_rig()
+        rig.expected_internal_errors = 1
+        kit.fill_blocks([1, 2], 'owed')
+        rig.io.gate.clear()                                              # the write cannot finish: the job stays active
+        kit.store(1, [1, 2])
+        kit.pump(lambda: rig.io.calls, what='the write issued')
+        real, calls = rig.worker._retire_piece, []
+
+        def retire_once(piece):
+            calls.append(piece)
+            if len(calls) == 1:
+                raise RuntimeError('a bug while retiring the piece')
+            return real(piece)
+
+        rig.worker._retire_piece = retire_once
+        rig.runtime.latch('control off')                                 # the kill switch with a store in flight
+        kit.pump_until_reported(1)
+        rig.io.gate.set()
+        for _ in range(5):
+            kit.pump_once()
+        self.assertEqual(kit.reports, {1: 1})
+        self.assertFalse(kit.results[1].success)
+        self.assertEqual(rig.worker.active_job_ids, [])
+        self.assertEqual(rig.worker.stats['internal_error'], 1)
+
     def test_an_unexpected_exception_in_a_service_pass_latches_the_tier_and_fails_the_jobs(self):
         rig = self.rig(with_scheduler=False)
         rig.expected_internal_errors = 1

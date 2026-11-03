@@ -13,8 +13,10 @@ fences, flush, preemption, LRU touch), ``SupportsHMA``, and the worker's submiss
     the right key (invariant I6);
   * the scheduler role settles every completed store job itself: vLLM calls ``manager.complete_store(keys, ctx)`` with no job id,
     no digests and no way to say the store failed, so ``update_connector_output`` takes the job's ``StoreResult`` from the runtime
-    and hands the manager ``complete_store(keys in the manager's order, ctx, success=..., digests=...)`` instead. A missing or
-    inconsistent result is a failed store.
+    and hands the manager ``complete_store(keys in the manager's order, ctx, success=..., digests=...)`` instead (``digests`` is
+    None on a failure). The manager never reads the runtime's results and never pairs a digest with a key by slot. A missing or
+    inconsistent result is a failed store. ``TTP2PNvmeSpec.get_manager`` refuses a manager whose ``complete_store`` cannot take
+    this call, so a mismatch is a tier that is off from boot, not a latch at the first store.
 
 Importing this module imports neither ttnn nor the extension (invariant I14).
 """
@@ -24,6 +26,8 @@ import dataclasses
 import hashlib
 import logging
 from typing import Any, Dict, List, Optional, Set, Tuple
+
+import numpy as np
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1, KVConnectorRole
@@ -98,8 +102,9 @@ class _RecordingManager:
       the job need them: the scheduler keeps a set).
     * ``complete_store``: vLLM's call carries only the job's key SET, always as a success. The scheduler role stages the real outcome of
       each completed store job in ``staged`` (keyed by the identity of that key set) just before the stock loop runs, and this proxy
-      then makes the one call the manager is meant to get: keys in the manager's order, ``success``, and the digests. A call for a
-      job nobody staged cannot be trusted (there are no digests to hand over), so it reaches the manager as a failed store.
+      then makes the one call the manager is meant to get: keys in the manager's order, ``success``, and the digests (an
+      ``[n, chips]`` uint64 array in that order on success, None on failure). A call for a job nobody staged cannot be trusted (there
+      are no digests to hand over), so it reaches the manager as a failed store.
     """
 
     def __init__(self, manager, record, on_error):
@@ -124,11 +129,10 @@ class _RecordingManager:
         self._call(ordered_keys, req_context, ok, digests)
 
     def _call(self, keys, req_context: ReqContext, success: bool, digests) -> None:
+        """The store-completion contract: ``complete_store(keys, req_context, success=..., digests=...)``, the same keywords every time
+        (``digests`` is None unless the store succeeded)."""
         try:
-            if success:
-                self._manager.complete_store(keys, req_context, success=True, digests=digests)
-            else:
-                self._manager.complete_store(keys, req_context, success=False)      # the frozen signature, nothing added
+            self._manager.complete_store(keys, req_context, success=success, digests=digests if success else None)
             return
         except Exception:
             logger.exception('ttkvp2p: manager.complete_store raised for %d keys (success=%s)', len(keys), success)
@@ -136,7 +140,7 @@ class _RecordingManager:
         if success:
             # The keys must not stay ALLOCATED for good (every lookup of them would defer): give them up as a failed store.
             try:
-                self._manager.complete_store(keys, req_context, success=False)
+                self._manager.complete_store(list(keys), req_context, success=False, digests=None)
             except Exception:
                 logger.exception('ttkvp2p: manager.complete_store(success=False) raised too')
 
@@ -303,15 +307,26 @@ class TTP2PConnectorScheduler(OffloadingConnectorScheduler):
             return keys, False, None
         return keys, True, result.digests
 
-    @staticmethod
-    def _result_problem(result, store_spec, keys: List[bytes], job_status) -> Optional[str]:
+    def _result_problem(self, result, store_spec, keys: List[bytes], job_status) -> Optional[str]:
+        """Why a successful ``StoreResult`` cannot be handed to the manager for this job, or None. Every digest the manager keeps is what a
+        later restore is checked against, so a result that is not exactly what the contract promises is a failed store: the keys are dropped
+        (a miss, no strike), never kept with digests nobody can vouch for."""
         if len(keys) != len(job_status.keys) or set(keys) != set(job_status.keys):
             return 'the keys the manager accepted are not the keys of the job'
-        digests = getattr(result, 'digests', None)
-        if digests is None or getattr(digests, 'ndim', 0) != 2 or digests.shape[0] != len(keys):
-            return 'digests %s for %d keys' % (getattr(digests, 'shape', None), len(keys))
         if tuple(result.slot_ids) != tuple(store_spec.slot_ids) or tuple(result.generations) != tuple(store_spec.generations):
             return 'the result names other drive slots than the job\'s store spec'
+        if len(result.slot_ids) != len(keys):
+            return '%d drive slots for %d keys' % (len(result.slot_ids), len(keys))
+        digests = getattr(result, 'digests', None)
+        if not isinstance(digests, np.ndarray):
+            return 'digests are %s, not an ndarray' % (type(digests).__name__,)
+        if digests.dtype != np.uint64:
+            return 'digests are %s, not uint64' % (digests.dtype,)
+        chips = getattr(getattr(self._spec, 'layout_geometry', None), 'chips', None)
+        if chips is None:
+            return 'the chip count of the layout is unknown'
+        if digests.shape != (len(keys), chips):
+            return 'digests are %s for %d keys of a %d-chip layout' % (digests.shape, len(keys), chips)
         return None
 
 

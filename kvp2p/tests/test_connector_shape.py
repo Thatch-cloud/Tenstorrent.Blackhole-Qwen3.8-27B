@@ -8,7 +8,7 @@ import unittest
 from types import SimpleNamespace
 
 import fakes
-from fakes import FakeRuntime
+from fakes import A1Manager, FakeNvmeKVManager, FakeRuntime
 from harness import RigCase, tokens
 
 PROMPT = 2300
@@ -29,6 +29,68 @@ PRODUCTION_KWARG = {
     'require_salt': False, 'persist_multimodal': False, 'control_dir': '/var/lib/kvp2p/ctl',
     'state_file': '/var/lib/kvp2p/state.json', 'kv_epoch': 1,
 }
+
+
+def manager_with(complete_store):
+    """A manager class that is the fake in every way but the complete_store it declares."""
+    return type('ManagerWith', (FakeNvmeKVManager,), {'complete_store': complete_store})
+
+
+# complete_store declarations the connector cannot call as complete_store(keys, req_context, success=..., digests=...) (amendment A1)
+REFUSED_SIGNATURES = {
+    'the signature frozen before A1': lambda self, keys, req_context, success=True: None,
+    'an earlier WP3a draft (result=)': lambda self, keys, req_context, success=True, result=None: None,
+    'the stock signature, inherited': fakes.OffloadingManager.complete_store,
+    'kwargs that swallow digests': lambda self, keys, req_context, success=True, **kwargs: None,
+    'no success parameter': lambda self, keys, req_context, digests=None: None,
+    'an extra required argument': lambda self, keys, req_context, success, digests, job_id: None,
+    'positional-only digests': lambda self, keys, req_context, success=True, digests=None, /: None,
+    'not callable': None,
+}
+
+# declarations it can call
+ACCEPTED_SIGNATURES = {
+    'A1 word for word': lambda self, keys, req_context, success=True, digests=None: None,
+    'keyword-only digests': lambda self, keys, req_context, success=True, *, digests=None: None,
+    'digests without a default': lambda self, keys, req_context, success, digests: None,
+    'both keyword-only': lambda self, keys, req_context, *, success=True, digests=None: None,
+    'an extra optional argument': lambda self, keys, req_context, success=True, digests=None, note=None: None,
+}
+
+
+class StoreCompletionGuardTests(unittest.TestCase):
+    """``store_completion_problem``: the inspect.signature check ``get_manager`` makes before it hands a manager out."""
+
+    def test_the_declarations_the_connector_can_call_are_accepted(self):
+        from ttkvp2p.spec import store_completion_problem
+
+        for name, declared in ACCEPTED_SIGNATURES.items():
+            with self.subTest(name):
+                self.assertIsNone(store_completion_problem(object.__new__(manager_with(declared))))
+        self.assertIsNone(store_completion_problem(object.__new__(A1Manager)))
+
+    def test_the_declarations_it_cannot_call_are_refused_with_a_reason(self):
+        from ttkvp2p.spec import store_completion_problem
+
+        for name, declared in REFUSED_SIGNATURES.items():
+            with self.subTest(name):
+                problem = store_completion_problem(object.__new__(manager_with(declared)))
+                self.assertIsNotNone(problem)
+                self.assertIn('complete_store', problem)
+
+    def test_an_object_without_complete_store_and_a_signature_that_cannot_be_read_are_refused(self):
+        from ttkvp2p.spec import store_completion_problem
+
+        class Opaque:
+            def __call__(self, *args, **kwargs):
+                return None
+
+            @property
+            def __signature__(self):
+                raise ValueError('no signature found')
+
+        self.assertIn('no complete_store', store_completion_problem(object()))
+        self.assertIn('no readable signature', store_completion_problem(SimpleNamespace(complete_store=Opaque())))
 
 
 class ImportTests(unittest.TestCase):
@@ -304,6 +366,42 @@ class RefusedTierTests(RigCase):
         manager = RefusedManager('off')
         self.assertIsNone(manager.complete_store(['k'], None, success=True, digests=None))
         self.assertIsNone(manager.complete_store(['k'], None, success=False))
+
+    def test_a_manager_that_cannot_take_the_digests_is_refused_at_boot_and_the_engine_serves_without_the_tier(self):
+        """AMENDMENT A1: the tier reports itself off when the scheduler role asks for its manager, not by latching at the first store."""
+        from ttkvp2p.spec import RefusedManager
+
+        for name, declared in REFUSED_SIGNATURES.items():
+            with self.subTest(name):
+                with self.assertLogs('ttkvp2p.spec', level='ERROR') as logged:
+                    rig = self.rig(manager_class=manager_with(declared))
+                manager = rig.connector_scheduler.manager._manager
+                self.assertIsInstance(manager, RefusedManager)
+                self.assertIn('complete_store', manager.reason)
+                self.assertIn('complete_store', ' '.join(logged.output))
+                self.assertEqual(FakeRuntime.acquire_log, [('/dev/test-kv', 'worker'), ('/dev/test-kv', 'scheduler')])
+                self.assertEqual(rig.runtime.released, ['scheduler'], 'the reference taken for the refused manager was given back')
+                self.assertEqual(rig.runtime.roles, ['worker'])
+                self.assertFalse(rig.runtime.closed, 'the worker role is still attached')
+                prompt = tokens(PROMPT, 'refused ' + name)
+                rig.add('r1', prompt)
+                rig.drain()
+                rig.reset_device_cache()
+                rig.add('r2', prompt)
+                rig.drain()
+                self.assertEqual(rig.loads, [])
+                self.assertEqual(rig.runtime.state, 'AVAILABLE', 'nothing latched: the refusal is a tier that never stores, not a failure')
+                self.assertFalse(rig.worker.stats['submit_store'])
+
+    def test_a_manager_with_the_a1_signature_is_handed_out_and_the_runtime_stays_attached(self):
+        from ttkvp2p.spec import RefusedManager
+
+        rig = self.rig(manager_class=A1Manager)
+        self.assertIsInstance(rig.connector_scheduler.manager._manager, A1Manager)
+        self.assertNotIsInstance(rig.connector_scheduler.manager._manager, RefusedManager)
+        self.assertEqual(rig.runtime.released, [])
+        self.assertEqual(sorted(rig.runtime.roles), ['scheduler', 'worker'])
+        self.assertIs(rig.connector_scheduler._spec.runtime, rig.runtime)
 
     def test_an_unknown_layout_refuses_the_tier(self):
         from ttkvp2p.spec import RefusedManager

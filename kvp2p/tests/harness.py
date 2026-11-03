@@ -161,14 +161,14 @@ class Rig:
     def __init__(self, *, slot_objects: int = 8, num_slots: int = 400, num_blocks: int = 600, extra: Optional[dict] = None,
                  max_batched: int = 4096, workers: int = 1, tmp: Optional[str] = None, start_worker: bool = True,
                  checks: bool = True, with_scheduler: bool = True, executor: Optional[str] = None, host_ok: bool = True,
-                 async_scheduling: bool = False):
+                 async_scheduling: bool = False, manager_class=None):
         register_layout(TINY)
         self.tmp = tmp or tempfile.mkdtemp(prefix='ttkvp2p-rig-')
         self.slot_objects = slot_objects
         self.num_blocks = num_blocks
         self.checks = checks
         self.steps = 0
-        self.saved_modules = install_fake_modules()
+        self.saved_modules = install_fake_modules(manager_class)
         FakeRuntime.reset(num_slots)
         FakeRuntime.host_ok_default = host_ok
         self.card = FakeCard(num_blocks=num_blocks, slot_objs=slot_objects)
