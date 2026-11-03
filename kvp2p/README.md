@@ -72,7 +72,13 @@ The worker reaches the card, the drive and the process-wide runtime only through
 `qwen_write_blocks_from_staging`, `qwen_blocks_digest_async` and `qwen_p2p_record_event` (called with keyword arguments, always
 `cq_id=0`), a staging handle with its `qwen_p2p_staging_info` dict, and a P2PIO with `read_piece(drive_off, bank, n_obj)` and
 `write_subrun(drive_off, bank, n_obj)`. When the objects of a staging slot do not start at the slot's first object (slots on the
-drive are not adjacent), the worker passes `first_obj=<k>` as a keyword; a P2PIO must accept it (default 0).
+drive are not adjacent), the worker passes `first_obj=<k>` as a keyword; a P2PIO must accept it (default 0). This keyword is not in
+the frozen interface: it needs WP2b's acceptance and a note in INTERFACE.md before integration.
+
+The production factory (`worker.default_backend_factory`) checks the p2pmem allocate file of every card (by PCI address, exactly one
+each) before it allocates anything on the cards, then names each card's character device by the tt-kmd index in the staging record
+(`pcie_device`; tt-metal's logical `device_id` is not that index) and refuses a record that carries none. It checks that the highest staging
+slot of every configured bank (each bank has its own address in the record) stays below the top 16 MiB of the window.
 
 **The runtime** (`worker.RuntimePort` checks these up front and refuses a runtime that lacks one, so a mismatch shows as a tier that
 stays UNAVAILABLE with a log line, never as a half-used runtime):
@@ -81,15 +87,40 @@ stays UNAVAILABLE with a log line, never as a half-used runtime):
 |---|---|
 | `state`, `latch(reason)`, `set_available()` | health; the worker latches on strikes, a stall, a device-op throw; it flips AVAILABLE as the last start-up step |
 | `host_ok` (and optional `host_reason`) | the host checks passed: only then does any device work start |
-| `store_results[job_id]` | the worker leaves a `worker.StoreResult` (`success`, `slot_ids`, `generations`, `digests` of the SOURCE rows) for the manager's `complete_store` |
+| `store_results[job_id]` | a mutable mapping. The worker leaves a `worker.StoreResult` (`success`, `slot_ids`, `generations`, `digests` of the SOURCE rows) in it when a store job ends, done or failed. The connector's scheduler role **consumes** it (`pop`) and settles the job; the manager never reads it. The worker keeps at most the last 1,024 reported results, so a result that was never consumed can disappear: a missing result is a FAILED store |
 | `allocator.io_begin(slots, generations) -> bool`, `allocator.io_end(slots)` | the in-flight count per drive slot (a slot is reusable only when no bio is in flight); `io_begin` refuses, and counts nothing, when a generation moved on |
 | `mark_bad(slot, generation)` | keys go BAD only on proof: a digest mismatch after one re-read, or EIO / EILSEQ on a read |
 | `slot_offset(slot)` | the byte offset of a slot on the drive |
 | optional `count`, `observe_restore`, `take_fault`, `release` | telemetry; the test-only fault commands; reference-counted release |
 
 **The manager** (`spec.get_manager` builds `ttkvp2p.manager.NvmeKVManager(cfg, runtime)`): its `lookup` answers MISS for a request whose
-`ReqTag.no_retry` is set (read with `req_context.get_state(ReqTag)`), and its `complete_store` / `complete_load` read the worker's
-`store_results` and `mark_bad` marks.
+`ReqTag.no_retry` is set (read with `req_context.get_state(ReqTag)`), and its `complete_load` reads the worker's `mark_bad` marks.
+
+**How a store job ends in the manager.** vLLM's own `update_connector_output` calls `manager.complete_store(job.keys, ctx)` for every
+completed store job: the key SET (unordered), no job id, no digests, and no way to say the store failed. That call cannot carry the
+outcome, so `TTP2PConnectorScheduler.update_connector_output` settles each store job itself, where the job id, the keys and the result
+meet, and suppresses vLLM's call for it:
+
+- it takes the job's `StoreResult` from `store_results` (through `spec.take_store_result`), checks it against the job (the same keys,
+  the same drive slots and generations as the store spec the manager returned, one digest row per key), and calls
+  `complete_store(keys, ctx, success=True, digests=digests)` with the keys **in the order `prepare_store` returned them** and
+  `digests` an `[n, chips]` uint64 array in that same order. `digests` is the one keyword beyond the frozen signature
+  `complete_store(keys, ctx, success=True)`; the manager takes the digests from it and looks nothing up in `store_results`;
+- for a failed store, a missing result, or a result that does not match the job it calls the frozen signature,
+  `complete_store(keys, ctx, success=False)`: the entries are dropped and their drive slots return to the free list under I5;
+- an exception from `complete_store` latches the tier and gives the keys up with a second `success=False` call, so the engine never sees
+  it and no key stays ALLOCATED (an ALLOCATED entry answers HIT_PENDING, and every lookup of its key would defer).
+
+A job from before a `reset_cache` is skipped by vLLM; its result is taken and dropped. So the manager implements `complete_store` as
+"for each key, in order: on success attach digest row i and make the entry WRITTEN; on failure drop the entry", and nothing more.
+
+**Gate for the manager (WP3a): I6 beyond what the connector can see.** The connector checks that the keys come back in the scheduler's own
+order and that a hashed source block matches its key. It cannot see a manager that permutes `slot_ids` against its OWN key-to-slot map:
+the bytes of key `i` then land in a slot that the manager's entry for key `i` does not name, so a restore of that key reads another key's
+object. The digest check fails it (a spurious BAD and a lost session) only because the digests are attached by key position; a manager that
+attached them by slot would make wrong KV verify. `NvmeKVManager.prepare_store` must therefore assert, before it returns, that slot `i` of
+the store spec is the slot it recorded for key `i` (with a test that a permuting allocator trips it); `complete_store` may re-check
+each entry's slot and generation against the store spec it handed out.
 
 ## What the model runner calls, in this order
 
@@ -111,6 +142,11 @@ connector.shutdown()                               the executor's connector firs
 ```
 
 A failed load is in both `finished_recving` and `failed_recving` of the same output, exactly once; the request then recomputes.
+Every job is reported exactly once, whatever happens to it: a bug in the state machine latches the tier, and a job whose submit hit it is
+reported failed (`internal`) like any other.
+
+A store that cannot get a spill bank for `store_wait_s` (default 10 s) while none comes back is dropped (`no_slot`, not a strike): a later miss,
+never a stall. The stall clock (`stall_latch_s`) starts when work does: it does not count idle time before a job.
 
 ## Running the tests
 
