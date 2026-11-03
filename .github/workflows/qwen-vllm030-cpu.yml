@@ -11,6 +11,10 @@ run-name: vLLM 0.30 CPU ${{ inputs.ref || github.head_ref || github.ref_name }}
 # What runs is scripts/ci/vllm030_suites.json, executed by scripts/ci/vllm030_suites.py through scripts/ci/required_tests.py. A
 # suite directory that is missing fails the job unless the manifest's absent_ok table names this branch and the suite.
 # Dispatch: gh workflow run qwen-vllm030-cpu.yml --ref <branch>   (optionally -f ref=<branch|tag|sha> to test another ref)
+#
+# Two trees are checked out. The tree under test (the workspace, at inputs.ref when one is given) holds the suites. The CI scaffolding
+# (ci/: the runner, its manifest, its own tests) is always the commit this workflow runs from (github.sha), so `-f ref=` can point
+# the suites at a branch that has none of the CI files, such as a connector branch that carries kvp2p/tests, and still run them here.
 on:
   push:
     branches: ['tp4/p2p-gemma', 'tp4/p2p-gemma-*']
@@ -40,9 +44,16 @@ jobs:
       UV_TORCH_BACKEND: cpu
       CI_BRANCH: ${{ inputs.ref || github.head_ref || github.ref_name }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: The tree under test
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - name: The CI scaffolding (runner, manifest, its tests) at the commit this workflow runs from
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          path: ci
           persist-credentials: false
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -88,14 +99,16 @@ jobs:
           print(sys.version.split()[0], "vllm", vllm.__version__, "torch", torch.__version__, "plugin", vllm_tt_plugin.__file__)
           PY
       - name: The suite runner's own tests
+        working-directory: ci
         run: |
           source "$RUNNER_TEMP/qwen-vllm030/bin/activate"
-          PYTHONPATH=scripts/ci python -B scripts/ci/required_tests.py --min 20 test_vllm030_suites
+          PYTHONPATH=scripts/ci python -B scripts/ci/required_tests.py --min 41 test_vllm030_suites
       - name: kvp2p, kv_region_read and p2p script suites (a skip is a failure)
         run: |
           source "$RUNNER_TEMP/qwen-vllm030/bin/activate"
           mkdir -p experiment-results
-          P2P_TEST_DIR="$RUNNER_TEMP" python -B scripts/ci/vllm030_suites.py --json experiment-results/vllm030-suites.json --summary "$GITHUB_STEP_SUMMARY"
+          P2P_TEST_DIR="$RUNNER_TEMP" python -B ci/scripts/ci/vllm030_suites.py --root . --manifest ci/scripts/ci/vllm030_suites.json \
+            --manifest-root ci --json experiment-results/vllm030-suites.json --summary "$GITHUB_STEP_SUMMARY"
       - name: Record the environment
         if: always()
         run: |

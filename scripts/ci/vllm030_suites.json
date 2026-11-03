@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "comment": "Suites that qwen-vllm030-cpu.yml runs on Python 3.10 with an installed vLLM 0.30.0 and the pinned vllm-tt-plugin source, through scripts/ci/required_tests.py (a skip is a failure). A suite is every module under dir that matches glob, so a new test file is picked up without editing this file; require names modules that must stay (a deleted or renamed file fails the job); min_tests is a floor on the tests that must run. A suite whose directory does not exist FAILS unless absent_ok names this branch and the suite with a reason: that is the only way a suite may be missing, and the entry itself fails as soon as the directory appears (remove it then).",
+  "comment": "Suites that qwen-vllm030-cpu.yml runs on Python 3.10 with an installed vLLM 0.30.0 and the pinned vllm-tt-plugin source, through scripts/ci/required_tests.py (a skip is a failure). A suite is every module directly under dir that matches glob, so a new test file is picked up without editing this file; a test file the suite would not run (in a subdirectory, or one glob misses) FAILS the suite unless exclude names it with a reason; require names modules that must stay (a deleted or renamed file fails the job); min_tests is a floor on the tests that must run, kept close to the real count so that a deleted test shows; timeout_s kills a hung suite (default 900) and the three limits plus the install must fit the job's 45 minutes. A suite whose directory does not exist FAILS unless absent_ok names this branch and the suite with a reason: that is the only way a suite may be missing, and every entry, of any branch, fails the run as soon as the suite directory exists in the tree that carries this file (remove it then, also after merging a work-package branch into another).",
   "pins": {
     "python": "3.10",
     "vllm": "0.30.0",
@@ -13,27 +13,40 @@
       "glob": "test_*.py",
       "pythonpath": ["kvp2p"],
       "require": [
+        "test_cardlink",
         "test_connector_shape",
         "test_job_lifecycle",
+        "test_manager",
+        "test_object_count_262k",
+        "test_p2pio",
+        "test_p2pio_mutants",
         "test_roundtrip",
+        "test_runtime",
         "test_scheduler_flow",
-        "test_startup_sequence"
+        "test_startup_sequence",
+        "test_store_claim",
+        "test_store_completion",
+        "test_tier_rig",
+        "test_wp4_wiring"
       ],
-      "min_tests": 1
+      "min_tests": 500,
+      "timeout_s": 1200
     },
     "kv_region_read": {
       "dir": "optimisation/ttnn-op/kv_region_read",
       "glob": "test_p2p_staging*.py",
       "pythonpath": [],
       "require": ["test_p2p_staging", "test_p2p_staging_card"],
-      "min_tests": 90
+      "min_tests": 90,
+      "timeout_s": 600
     },
     "scripts_p2p": {
       "dir": "scripts/p2p",
       "glob": "test_*.py",
       "pythonpath": [],
       "require": ["test_kv_shard_layout", "test_p2p_probe", "test_p2p_topology"],
-      "min_tests": 130
+      "min_tests": 130,
+      "timeout_s": 300
     }
   },
   "absent_ok": {
