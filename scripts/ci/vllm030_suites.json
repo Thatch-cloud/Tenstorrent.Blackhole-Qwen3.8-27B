@@ -25,22 +25,23 @@
         "test_runtime_p2pio_seam",
         "test_scale_production",
         "test_scheduler_flow",
+        "test_shard_map",
         "test_startup_sequence",
         "test_store_claim",
         "test_store_completion",
         "test_tier_rig",
         "test_wp4_wiring"
       ],
-      "min_tests": 765,
-      "timeout_s": 1200
+      "min_tests": 808,
+      "timeout_s": 600
     },
     "kv_region_read": {
       "dir": "optimisation/ttnn-op/kv_region_read",
       "glob": "test_p2p_staging*.py",
       "pythonpath": [],
       "require": ["test_p2p_staging", "test_p2p_staging_card"],
-      "min_tests": 191,
-      "timeout_s": 600
+      "min_tests": 192,
+      "timeout_s": 1200
     },
     "scripts_p2p": {
       "dir": "scripts/p2p",

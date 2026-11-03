@@ -505,6 +505,10 @@ class ManifestValidationTests(unittest.TestCase):
         limits = [suite.get('timeout_s', suites.DEFAULT_TIMEOUT_S) for suite in spec['suites'].values()]
         # the job has 45 minutes and its install takes about 8: the three limits together must leave room for it
         self.assertLessEqual(sum(limits) + 10 * 60, 45 * 60, limits)
+        # the room goes where the time goes: on a CI runner kv_region_read (the C++ emulation tests) took 452 s and kvp2p 210 s (integration review)
+        by_suite = {name: suite.get('timeout_s', suites.DEFAULT_TIMEOUT_S) for name, suite in spec['suites'].items()}
+        self.assertGreaterEqual(by_suite['kv_region_read'], 2 * 452, by_suite)
+        self.assertGreaterEqual(by_suite['kvp2p'], 2 * 210, by_suite)
 
 
 @unittest.skipUnless(os.path.isfile(NEW_WORKFLOW), 'no .github tree here (the serving image)')
@@ -526,7 +530,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(sorted(on), ['pull_request', 'push', 'workflow_dispatch'])
         self.assertEqual(on['push']['branches'], ['tp4/p2p-gemma', 'tp4/p2p-gemma-*'])
         self.assertNotIn('tags', on['push'])
-        self.assertEqual(on['pull_request']['branches'], ['tp4/p2p-gemma'])
+        self.assertEqual(on['pull_request']['branches'], ['tp4/p2p-gemma', 'main'], 'a pull request to main runs the kvp2p suites too (review CI note)')
         ref = on['workflow_dispatch']['inputs']['ref']
         self.assertFalse(ref.get('required', False), 'a bare dispatch (gh workflow run --ref BRANCH) must work')
 

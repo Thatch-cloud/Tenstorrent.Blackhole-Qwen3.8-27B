@@ -19,7 +19,7 @@ on:
   push:
     branches: ['tp4/p2p-gemma', 'tp4/p2p-gemma-*']
   pull_request:
-    branches: ['tp4/p2p-gemma']
+    branches: ['tp4/p2p-gemma', 'main']
   workflow_dispatch:
     inputs:
       ref:
