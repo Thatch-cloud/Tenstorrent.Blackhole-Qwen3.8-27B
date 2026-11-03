@@ -195,6 +195,27 @@ class HelpersTest(unittest.TestCase):
             bump(chain[1], 'aer_dev_fatal', 'DLP')
             self.assertEqual(probe.aer_delta(before, probe.snapshot_aer(chain))['uncorrectable'], 2)
 
+    def test_the_monitor_samples_on_its_interval_and_keeps_the_longest_gap_from_when_the_dma_began(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = probe.make_fake_sysfs(tmp)
+            monitor = probe.AerMonitor(tree['drive_chain'], tree['drive_chain'][-1])
+            time.sleep(0.15)                                    # the card fill: no DMA moves, it is not a gap in watching the DMA
+            monitor.start()
+            self.assertIsNone(monitor.check(interval=60.0))        # not due yet
+            self.assertEqual(monitor.count, 0)
+            time.sleep(0.05)
+            self.assertIsNotNone(monitor.check(interval=0.01))
+            self.assertIsNotNone(monitor.check(force=True))
+            summary = monitor.summary()
+            self.assertEqual(summary['sample_count'], 2)
+            self.assertTrue(0.04 < summary['max_gap_seconds'] < 0.15, summary)
+            self.assertGreater(summary['mean_check_ms'], 0)
+            self.assertEqual(len(monitor.samples), 2)
+            bump(tree['drive_chain'][2], 'aer_dev_fatal', 'DLP')
+            with self.assertRaises(probe.StopRun):
+                monitor.check(force=True)
+            self.assertEqual(monitor.summary()['sample_count'], 3)               # the sample that raised is counted, and its cost
+
     def test_no_counters_is_not_a_clean_bill(self):
         with tempfile.TemporaryDirectory() as tmp:
             snapshot = probe.snapshot_aer([tmp])
@@ -574,6 +595,43 @@ class WriteRunTest(WriteFixture):
         self.assertEqual(report['scratch']['blank'], True)
         json.dumps(report)                                             # all of it is JSON
 
+    def test_the_whole_write_flow_through_a_real_o_direct_sink(self):
+        """The mock sink is buffered; here the paint, the pwritev of the p2pmem views, the read-back and the fence all go through O_DIRECT
+        (page-aligned iovecs taken from the card's mapping, as on the rig), on a regular file. Not exercised: a block device, the loop device
+        and the /sys/dev/block chain, which need root."""
+        directory = os.environ.get('P2P_TEST_DIR') or self.tmp.name
+        path = os.path.join(directory, 'direct-flow-%d.img' % os.getpid())
+        with open(path, 'wb') as handle:
+            handle.truncate(self.TARGET_BYTES)
+        self.addCleanup(os.unlink, path)
+        card = self.card()
+        try:
+            sink = probe.Sink(path, direct=True)
+        except OSError as error:
+            self.skipTest('no O_DIRECT here: %s' % error)
+        sink.card, sink.fault = card, None
+        sink.sysfs_dir = lambda *a: card.sysfs['block_dir']
+        sink.pci_chain = lambda: list(card.sysfs['drive_chain'])
+        self.assertTrue(sink.direct)
+        args = self.parsed('--qd', '1,4', '--reaim', '--soak', '0.005', '--target', path)
+        try:
+            report = probe.run_write_probe(card, sink, args)
+        except probe.ProbeError as error:
+            if 'Invalid argument' in str(error):
+                self.skipTest('O_DIRECT is not usable on this filesystem: %s' % error)
+            raise
+        finally:
+            sink.close()
+        self.assertEqual(report['result'], 'PASS', report['aborted'])
+        self.assertTrue(report['verdict']['byte_exact'])
+        self.assertGreater(report['bytes']['written_to_drive'], 0)
+        with open(path, 'rb') as handle:                                  # the first scratch write holds the first card slot's bytes
+            handle.seek(1 * MIB)
+            first = handle.read(SHARD)
+        self.assertEqual(first, bytes(card.banks[0][probe.PAGE:probe.PAGE + SHARD]))
+        with open(path, 'rb') as handle:                                  # and nothing was written below the range
+            self.assertEqual(handle.read(1 * MIB), bytes(1 * MIB))
+
     def test_the_drive_holds_the_cards_bytes_where_the_range_begins(self):
         report = self.report('--sizes', str(probe.OBJECT_BYTES), '--qd', '1', '--iov-bytes', str(SHARD))
         self.assertEqual(report['result'], 'PASS')
@@ -914,11 +972,33 @@ class WriteRunTest(WriteFixture):
         self.assertEqual(report['result'], 'FAIL')
         self.assertFalse(report['verdict']['subrun_drain_ok'])
         self.assertGreater(report['verdict']['subrun_drain_ms'], 50)
+        self.assertGreaterEqual(report['verdict']['subrun_drain_max_ms'], report['verdict']['subrun_drain_p99_ms'])
         report = self.report(*extra[:-1], '5000', hook=slow(0.0))
         self.assertEqual(report['result'], 'PASS')
         self.assertTrue(report['verdict']['subrun_drain_ok'])
         # without that cell there is no drain figure
         self.assertNotIn('subrun_drain_ok', self.report()['verdict'])
+
+    def test_a_single_slow_write_is_information_the_drain_gate_is_bytes_over_the_cells_rate(self):
+        calls = {'n': 0}
+
+        def hook(sink):
+            real = sink.write_iov
+
+            def writer(views, offset):
+                if len(views) == 32:                               # a sub-run write, not a sentinel paint or a read-back
+                    calls['n'] += 1
+                    if calls['n'] == 1:
+                        time.sleep(0.3)                            # the cold first write, or one garbage-collection pause
+                return real(views, offset)
+            sink.write_iov = writer
+
+        report = self.report('--sizes', str(probe.SUBRUN_BYTES), '--qd', '1', '--region', '24M', '--min-batches', '30', '--drain-ms', '100', hook=hook)
+        verdict = report['verdict']
+        self.assertGreater(verdict['subrun_drain_max_ms'], 300)               # reported ...
+        self.assertLess(verdict['subrun_drain_ms'], 100)                       # ... not gated on: 22 MB over the rate of all 30 writes
+        self.assertTrue(verdict['subrun_drain_ok'])
+        self.assertEqual(report['result'], 'PASS')
 
     def test_the_soak_is_paced_verified_and_ends_on_a_verified_cycle(self):
         report = self.report('--no-sweep', '--soak', '0.03', '--soak-max-gbps', '0.01', '--soak-verify-every', '3', '--aer-interval', '0.1')
@@ -954,6 +1034,113 @@ class WriteRunTest(WriteFixture):
         self.assertGreaterEqual(cpu['worker_seconds'], 0)
         self.assertGreaterEqual(cpu['busiest_worker_seconds'], 0)
         self.assertLessEqual(cpu['busiest_worker_seconds'], cpu['worker_seconds'] + 1e-9)
+
+    def burn_in_verify(self, seconds):
+        """Make every read-back compare spend `seconds` of CPU, as a large verify does; returns the total burned (a list cell)."""
+        burned = [0.0]
+        real = probe.WriteRun.verify
+
+        def verify(run, *args, **kw):
+            end = time.process_time() + seconds
+            while time.process_time() < end:
+                pass
+            burned[0] += seconds
+            return real(run, *args, **kw)
+        patcher = mock.patch.object(probe.WriteRun, 'verify', verify)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return burned
+
+    def test_cpu_counts_the_writes_only_not_the_verification(self):
+        burned = self.burn_in_verify(0.1)
+        report = self.report('--qd', '4,8')
+        for arm in report['sweep']:
+            cpu = arm['cpu']
+            self.assertLess(cpu['process_seconds'], 0.5 * 0.1 * arm['batches'], arm)                     # the 0.1 s per batch is not in it
+            self.assertGreaterEqual(cpu['non_write_process_seconds'], 0.8 * 0.1 * arm['batches'], arm)    # it is here
+            self.assertAlmostEqual(cpu['process_fraction_of_write_time'], cpu['process_seconds'] / arm['seconds'], places=6)
+        self.assertGreater(burned[0], 0)
+
+    def test_the_soaks_cpu_counts_the_writes_only_too(self):
+        self.burn_in_verify(0.05)
+        report = self.report('--no-sweep', '--soak', '0.01', '--soak-verify-every', '1')
+        soak = report['soak']
+        self.assertLess(soak['cpu']['process_seconds'], 0.5 * 0.05 * soak['verify']['cycles_verified'])
+        self.assertGreaterEqual(soak['cpu']['non_write_process_seconds'], 0.8 * 0.05 * soak['verify']['cycles_verified'])
+        self.assertAlmostEqual(soak['cpu']['process_fraction_of_write_time'], soak['cpu']['process_seconds'] / soak['write_seconds'], places=6)
+
+    def test_the_cpu_of_the_writes_is_what_the_workers_spent_in_them(self):
+        def hook(sink):
+            real = sink.write_iov
+
+            def writer(views, offset):
+                end = time.thread_time() + 0.02
+                while time.thread_time() < end:
+                    pass
+                return real(views, offset)
+            sink.write_iov = writer
+        report = self.report('--qd', '4', hook=hook)
+        arm = report['sweep'][0]
+        self.assertGreaterEqual(arm['cpu']['worker_seconds'], 0.8 * 0.02 * arm['writes'])
+        self.assertGreaterEqual(arm['cpu']['process_seconds'], 0.8 * 0.02 * arm['writes'])               # the same CPU, seen from the process
+        self.assertLess(arm['cpu']['busiest_worker_seconds'], arm['cpu']['worker_seconds'])
+
+    def test_the_report_says_what_cpu_and_queue_depth_mean(self):
+        notes = ' '.join(self.report()['notes'])
+        for text in ('pwritev batches', 'batch-synchronous', 'count the same error'):
+            self.assertIn(text, notes)
+
+    def test_aer_is_sampled_often_enough_to_act_within_about_a_second(self):
+        self.assertLessEqual(probe.build_parser().parse_args(['--mode', 'write']).aer_interval, 0.5)
+        report = self.report('--qd', '1,4')
+        self.assertGreaterEqual(report['aer']['sample_count'], 2)               # at least once per cell
+        self.assertEqual(report['aer']['interval_seconds'], 0.5)
+        self.assertGreater(report['aer']['mean_check_ms'], 0)
+        self.assertLess(report['aer']['max_gap_seconds'], 5.0)
+        self.assertLessEqual(len(report['aer']['samples']), report['aer']['sample_count'])
+
+    def test_an_uncorrectable_error_in_a_long_cell_stops_the_dma_within_the_interval(self):
+        card = self.card()
+        seen = {'writes': 0, 'bumped': None}
+
+        def hook(sink):
+            real = sink.write_iov
+
+            def writer(views, offset):
+                seen['writes'] += 1
+                time.sleep(0.01)
+                done = real(views, offset)
+                if seen['writes'] == 3:
+                    bump(card.sysfs['drive_chain'][1], 'aer_dev_nonfatal', 'CmpltTO')
+                    seen['bumped'] = time.monotonic()
+                return done
+            sink.write_iov = writer
+
+        # one cell that would run for 5 s of write time; the default interval is not used here, a small one keeps the test short
+        report, _ = self.run_with(card, '--sizes', str(SHARD), '--qd', '1', '--arm-seconds', '5', '--aer-interval', '0.1', hook=hook)
+        stopped = time.monotonic() - seen['bumped']
+        self.assertEqual(report['aborted']['kind'], 'aer')
+        self.assertLess(stopped, 1.0)
+        self.assertLess(seen['writes'] - 3, 30)                                   # about 0.1 s of writes of about 10 ms, not 5 s of them
+
+    def test_the_aer_gap_is_counted_from_the_first_dma_not_from_the_start_of_the_run(self):
+        real = probe.fill_banks
+
+        def slow_fill(*args, **kw):
+            time.sleep(0.4)                                       # a slow CPU fill through an uncached window
+            return real(*args, **kw)
+
+        with mock.patch.object(probe, 'fill_banks', slow_fill):
+            report = self.report('--qd', '1,4')
+        self.assertGreaterEqual(report['fill_stats']['seconds'], 0.4)
+        self.assertLess(report['aer']['max_gap_seconds'], 0.3)
+
+    def test_the_card_fill_is_timed(self):
+        fill = self.report()['fill_stats']
+        self.assertEqual(fill['cpu_map'], 'uc')
+        self.assertGreater(fill['bytes'], 4 * MIB)
+        self.assertGreater(fill['seconds'], 0)
+        self.assertGreater(fill['mbps'], 0)
 
     def test_the_card_must_be_free(self):
         card = self.card(in_use=1)
@@ -997,8 +1184,8 @@ class VerdictTest(unittest.TestCase):
         probe.resolve_target(args)
         return args
 
-    def arm(self, size=SHARD, qd=1, gbps=1.0, max_ms=1.0, ok=True):
-        return {'size': size, 'qd': qd, 'gbps': gbps, 'write_max_ms': max_ms, 'verify': {'ok': ok}}
+    def arm(self, size=SHARD, qd=1, gbps=1.0, max_ms=1.0, ok=True, p99_ms=None):
+        return {'size': size, 'qd': qd, 'gbps': gbps, 'write_max_ms': max_ms, 'write_p99_ms': max_ms if p99_ms is None else p99_ms, 'verify': {'ok': ok}}
 
     def report(self, sweep=(), reaim=None, soak=None, aborted=None, measured=True, uncorrectable=0):
         return {'sweep': list(sweep), 'reaim': reaim, 'soak': soak, 'aborted': aborted,
@@ -1012,7 +1199,9 @@ class VerdictTest(unittest.TestCase):
         result, verdict = self.verdict(self.report([self.arm(), self.arm(probe.SUBRUN_BYTES, 1, 2.0, 30.0)]))
         self.assertEqual(result, 'PASS')
         self.assertTrue(verdict['go'])
-        self.assertEqual((verdict['subrun_drain_ms'], verdict['subrun_drain_ok'], verdict['p2w_sustained_gbps']), (30.0, True, 1.0))
+        self.assertAlmostEqual(verdict['subrun_drain_ms'], probe.SUBRUN_BYTES / 2.0e9 * 1e3, places=6)         # bytes / the cell's rate, not the slowest write
+        self.assertEqual((verdict['subrun_drain_ok'], verdict['p2w_sustained_gbps']), (True, 1.0))
+        self.assertEqual((verdict['subrun_drain_max_ms'], verdict['subrun_drain_p99_ms']), (30.0, 30.0))
 
     def test_a_verify_that_failed_without_stopping_is_a_fail(self):
         result, verdict = self.verdict(self.report([self.arm(), self.arm(ok=False)]))
@@ -1044,12 +1233,21 @@ class VerdictTest(unittest.TestCase):
         result, verdict = self.verdict(self.report([self.arm(qd=1, gbps=0.05)]))
         self.assertEqual((result, verdict['p2w_sustained_gbps']), ('FAIL', 0.05))               # nothing deeper was run: the only figure there is
 
-    def test_the_drain_bound_is_the_sub_run_on_its_own(self):
-        result, verdict = self.verdict(self.report([self.arm(probe.SUBRUN_BYTES, 1, 2.0, 60.0)]))
+    def test_the_drain_bound_is_the_sub_run_on_its_own_at_the_rate_it_measured(self):
+        slow = self.arm(probe.SUBRUN_BYTES, 1, 0.3, 80.0)                      # 22,282,240 B at 0.3 GB/s is 74 ms
+        result, verdict = self.verdict(self.report([slow]))
         self.assertEqual((result, verdict['subrun_drain_ok']), ('FAIL', False))
-        self.assertEqual(self.verdict(self.report([self.arm(probe.SUBRUN_BYTES, 1, 2.0, 60.0)]), '--drain-ms', '100')[0], 'PASS')
+        self.assertAlmostEqual(verdict['subrun_drain_ms'], 74.27, places=1)
+        self.assertEqual(self.verdict(self.report([slow]), '--drain-ms', '100')[0], 'PASS')
         for cell in (self.arm(probe.SUBRUN_BYTES, 4, 2.0, 600.0), self.arm(probe.OBJECT_BYTES, 1, 2.0, 600.0)):
             self.assertNotIn('subrun_drain_ok', self.verdict(self.report([cell]))[1])
+
+    def test_one_slow_write_among_many_is_reported_and_not_gated(self):
+        # a hiccup of 600 ms in a cell that ran at 2 GB/s (11 ms per sub-run): the design's bound is bytes / rate, which holds
+        cell = self.arm(probe.SUBRUN_BYTES, 1, 2.0, max_ms=600.0, p99_ms=400.0)
+        result, verdict = self.verdict(self.report([cell]))
+        self.assertEqual((result, verdict['subrun_drain_ok'], verdict['go']), ('PASS', True, True))
+        self.assertEqual((verdict['subrun_drain_max_ms'], verdict['subrun_drain_p99_ms']), (600.0, 400.0))
 
     def test_the_canary_after_every_re_aim(self):
         reaim = {'rounds': 8, 'canary_ok': 8, 'verify': {'ok': True}}
@@ -1113,10 +1311,33 @@ class CommandLineTest(WriteFixture):
         with open(out_path) as handle:
             self.assertEqual(json.load(handle), report)
 
+    def test_the_report_file_goes_to_the_user_who_ran_sudo(self):
+        path = os.path.join(self.tmp.name, 'owned.json')
+        env = {'SUDO_UID': '1234', 'SUDO_GID': '5678'}
+        with mock.patch.dict(os.environ, env), mock.patch.object(os, 'geteuid', return_value=0), mock.patch.object(os, 'fchown') as chown:
+            probe.write_json_report(path, {'a': 1})
+        self.assertEqual(chown.call_count, 1)
+        self.assertEqual(chown.call_args[0][1:], (1234, 5678))
+        with open(path) as handle:
+            self.assertEqual(json.load(handle), {'a': 1})
+
+    def test_the_report_file_is_left_alone_when_not_root_or_not_through_sudo_or_when_chown_fails(self):
+        path = os.path.join(self.tmp.name, 'plain.json')
+        env = {'SUDO_UID': '1234', 'SUDO_GID': '5678'}
+        with mock.patch.dict(os.environ, env), mock.patch.object(os, 'geteuid', return_value=1000), mock.patch.object(os, 'fchown') as chown:
+            probe.write_json_report(path, {'a': 1})
+        with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(os, 'geteuid', return_value=0), mock.patch.object(os, 'fchown') as chown2:
+            probe.write_json_report(path, {'a': 2})
+        self.assertEqual((chown.call_count, chown2.call_count), (0, 0))
+        with mock.patch.dict(os.environ, env), mock.patch.object(os, 'geteuid', return_value=0), mock.patch.object(os, 'fchown', side_effect=PermissionError):
+            probe.write_json_report(path, {'a': 3})
+        with open(path) as handle:
+            self.assertEqual(json.load(handle), {'a': 3})
+
     def test_the_text_report_ends_in_a_verdict_and_names_the_range(self):
         code, out, _ = run_main(self.argv('--reaim', '--soak', '0.005'))
         self.assertEqual(code, 0)
-        for text in ('write arm:', 'scratch:', 'links drive', 're-aim 8 rounds', 'soak 0.0', 'aer: measured', 'verdict:', 'RESULT PASS'):
+        for text in ('write arm:', 'scratch:', 'links drive', 're-aim 8 rounds', 'soak 0.0', 'aer: measured', 'aer sampling:', 'card fill:', 'verdict:', 'RESULT PASS'):
             self.assertIn(text, out)
         self.assertEqual(out.count('RESULT'), 1)
 
@@ -1128,6 +1349,45 @@ class CommandLineTest(WriteFixture):
         code, _, err = run_main(self.argv())
         self.assertEqual(code, 2)                                          # the previous run left data in the range
         self.assertIn('not blank', err)
+
+    def test_a_gate_missed_on_a_clean_run_is_the_only_thing_the_neutral_gates_forgive(self):
+        """The W1 kit runs the probe with --min-write-gbps 0 --drain-ms 1e9 and applies the gates itself in its summary, so a slow drive costs
+        no data: such a run exits 0. Every safety failure still ends the run (exit 1) or is not a pass (exit 3)."""
+        slow = ('--sizes', str(probe.SUBRUN_BYTES), '--qd', '1', '--region', '24M')
+        gated, neutral = slow + ('--min-write-gbps', '0.25', '--drain-ms', '50'), slow + ('--min-write-gbps', '0', '--drain-ms', '1e9')
+        real = probe.MockSink.write_iov
+        state = {'bump': False}
+
+        def slow_write(sink, views, offset):
+            done = real(sink, views, offset)
+            if len(views) == 32:
+                time.sleep(0.1)                                   # 22 MB in 0.1 s: 0.22 GB/s and a 100 ms sub-run
+                if state['bump']:
+                    bump(sink.card.sysfs['card_chain'][1], 'aer_dev_nonfatal', 'CmpltTO')
+            return done
+
+        with mock.patch.object(probe.MockSink, 'write_iov', slow_write):
+            self.reset_target()
+            self.assertEqual(run_main(self.argv(*gated, '--json'))[0], 1)                      # both gates missed: FAIL
+            self.reset_target()
+            code, out, _ = run_main(self.argv(*neutral, '--json'))
+            report = json.loads(out)
+            self.assertEqual(code, 0)
+            self.assertEqual(report['result'], 'PASS')
+            self.assertGreater(report['verdict']['subrun_drain_ms'], 50)                       # the figures the summary gates on are all there
+            self.assertLess(report['verdict']['p2w_sustained_gbps'], 0.25)
+            only_gates = ('--min-write-gbps', '0', '--drain-ms', '1e9')
+            self.reset_target()
+            self.assertEqual(run_main(self.argv(*only_gates, '--mock-fault', 'flip'))[0], 1)      # bytes that differ
+            self.reset_target()
+            self.assertEqual(run_main(self.argv(*only_gates, '--mock-fault', 'drop'))[0], 1)      # a write that never happened
+            self.reset_target()
+            self.assertEqual(run_main(self.argv(*only_gates, '--write-verify', 'none'))[0], 3)    # nothing compared
+            self.reset_target()
+            state['bump'] = True
+            code, out, _ = run_main(self.argv(*neutral, '--json'))                                # an uncorrectable AER error
+            self.assertEqual(code, 1)
+            self.assertEqual(json.loads(out)['aborted']['kind'], 'aer')
 
     def test_a_missing_target_is_an_error_not_a_traceback(self):
         code, _, err = run_main(['--mode', 'write', '--mock', '--target', os.path.join(self.tmp.name, 'nope.img'), '--scratch-start', '1M',

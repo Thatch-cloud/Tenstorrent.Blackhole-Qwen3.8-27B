@@ -101,6 +101,12 @@ PASS, FAIL, UNVERIFIED = 'PASS', 'FAIL', 'UNVERIFIED'
 EXIT_CODES = {PASS: 0, FAIL: 1, UNVERIFIED: 3}
 NOTE_WRITE_FILL = ('the card is filled and its canaries are read through the CPU mapping of the window (--cpu-map), which is slow; the DMA itself goes '
                    'through the p2pmem mapping and the drive')
+NOTE_WRITE_CPU = ('the cpu figures of the write arm are the process CPU while the pwritev batches run (not the sentinel paint, the read-back compare '
+                  'or the AER sampling, which are reported apart as non_write_process_seconds); "cores" is CPU seconds per second of write time')
+NOTE_WRITE_QD = ('queue depth is batch-synchronous: QD writes are issued together and all are waited for before the next sentinel paint and verify, so '
+                 'the queue drains to zero between batches; the rates understate a steady queue of the same depth')
+NOTE_WRITE_AER = ('a root port\'s correctable total and its devices\' correctable counters count the same error: the correctable figures are not a count of '
+                  'distinct errors (uncorrectable detection is not affected)')
 NOTE_UNCACHED = ('CPU access through the window is uncached once the range is p2pmem (the kernel maps it uncached and reserves the range): the '
                  'verification is slow and the host-bounce baseline is indicative only, not the UMD DMA path')
 
@@ -599,22 +605,30 @@ def timed(function):
     return result, time.perf_counter() - began
 
 
-def read_all(source, view, plan, threads, offset_in_view):
+def read_all(source, view, plan, threads, offset_in_view, cpu=None):
     """Read plan['dest']['size'] bytes from the source into view[offset_in_view:], chunk by chunk, `threads` at a time. Returns the
-    per-chunk seconds."""
+    per-chunk seconds. When `cpu` is a dict, the CPU seconds each thread spent in its reads (user + system, not the time it slept waiting
+    for the drive) are added to it, keyed by thread."""
     size = plan['dest']['size']
     chunk = plan['chunk']
     jobs = [(done, min(chunk, size - done)) for done in range(0, size, chunk)]
+    lock = threading.Lock()
 
     def one(job):
         done, count = job
-        began = time.perf_counter()
+        began_cpu, began = time.thread_time(), time.perf_counter()
         piece = view[offset_in_view + done:offset_in_view + done + count]
         try:
             source.read_into(piece, plan['source_offset'] + done)
         finally:
             piece.release()
-        return time.perf_counter() - began
+        elapsed = time.perf_counter() - began
+        if cpu is not None:
+            used = time.thread_time() - began_cpu
+            with lock:
+                ident = threading.get_ident()
+                cpu[ident] = cpu.get(ident, 0.0) + used
+        return elapsed
 
     if threads <= 1:
         return [one(job) for job in jobs]
@@ -707,12 +721,15 @@ def run_p2p(card, source, cpu, plan, args, info, report):
         runs = []
         checks = []
         cpu_seconds = 0.0
+        worker_runs = []
         for _ in range(max(1, args.repeat)):
             # A sentinel before every run: a DMA that stops writing must not pass on what an earlier run left.
             paint_sentinel(cpu, plan, args.verify, args.samples, args.span, args.seed)
+            workers = {}
             cpu_before = time.process_time()
-            latencies, seconds = timed(lambda: read_all(source, buffer.view, plan, args.threads, plan['dest']['slice_offset']))
+            latencies, seconds = timed(lambda: read_all(source, buffer.view, plan, args.threads, plan['dest']['slice_offset'], workers))
             cpu_seconds += time.process_time() - cpu_before
+            worker_runs.append(list(workers.values()))
             runs.append((seconds, latencies))
             checks.append(verify(source, cpu, plan, args.verify, args.samples, args.span, args.seed))
     finally:
@@ -724,7 +741,13 @@ def run_p2p(card, source, cpu, plan, args, info, report):
                      'best_gbps': gbps(args.size, seconds_all[0]), 'runs': len(runs), 'threads': args.threads,
                      'chunk': plan['chunk'], 'chunk_p50_ms': percentile(all_latencies, 0.5) * 1e3,
                      'chunk_p99_ms': percentile(all_latencies, 0.99) * 1e3,
-                     'cpu_seconds': cpu_seconds, 'cpu_fraction': cpu_seconds / max(1e-9, sum(seconds_all))}
+                     'cpu_seconds': cpu_seconds, 'cpu_fraction': cpu_seconds / max(1e-9, sum(seconds_all)),
+                     # per-thread CPU of the reads (the timed part only, not the sentinel or the verify): the sum over all runs, the busiest
+                     # single thread of any one run, and CPU seconds per second of read time
+                     'worker_seconds': sum(sum(run) for run in worker_runs),
+                     'busiest_worker_seconds': max([max(run) for run in worker_runs if run] or [0.0]),
+                     'worker_threads': max([len(run) for run in worker_runs] or [0]),
+                     'worker_cores': sum(sum(run) for run in worker_runs) / max(1e-9, sum(seconds_all))}
     merged = dict(checks[-1])
     merged['mismatches'] = [dict(item, run=number) for number, check in enumerate(checks, 1) for item in check['mismatches']][:8]
     merged['ok'] = None if checks[-1]['ok'] is None else all(check['ok'] for check in checks)
@@ -1354,7 +1377,13 @@ def write_plan(args, info):
 
 class AerMonitor(object):
     """AER counters of the card, the drive and every bridge between them and the root, read before the run, sampled during it and read
-    after it. An uncorrectable increment (non-fatal, which holds the completion timeout, or fatal) stops the DMA at once."""
+    after it. An uncorrectable increment (non-fatal, which holds the completion timeout, or fatal) stops the DMA: the arms call `check`
+    after every batch and between the segments of a cycle (each sentinel chunk, each read-back), which samples when `interval` seconds
+    have passed since the last sample (and always after a cell, with force), so an error is acted on within the interval plus the
+    segment in flight. The longest time between two samples is kept (`max_gap`) and reported, so the report shows how quickly the probe
+    could have acted."""
+
+    MAX_SAMPLES = 4000          # the report keeps this many samples; the counts and the longest gap cover all of them
 
     def __init__(self, functions, drive_function=None):
         self.functions = list(dict.fromkeys(functions))
@@ -1362,25 +1391,44 @@ class AerMonitor(object):
         self.before = snapshot_aer(self.functions)
         self.last = None
         self.samples = []
+        self.count = 0
+        self.max_gap = 0.0
+        self.cost = 0.0
         self.stamp = time.monotonic()
 
     def delta(self):
         return aer_delta(self.before, snapshot_aer(self.functions))
 
-    def check(self, force=False, interval=0.0):
-        if not force and time.monotonic() - self.stamp < interval:
-            return None
+    def start(self):
+        """The DMA begins now: the gaps are counted from here (the card fill before it moves no data over the drive's link)."""
         self.stamp = time.monotonic()
-        delta = self.delta()
-        self.last = delta
-        self.samples.append({'t': time.time(), 'correctable': delta['correctable'], 'uncorrectable': delta['uncorrectable']})
-        if delta['uncorrectable']:
-            raise StopRun('aer', 'uncorrectable PCIe AER error(s) appeared: %s' % json.dumps(delta['by_function'], sort_keys=True))
-        if self.drive_function:
-            states = nvme_states(self.drive_function)
-            if any(state != 'live' for state in states):
-                raise StopRun('drive', 'the NVMe controller is no longer live: %s' % states)
-        return delta
+        self.max_gap = 0.0
+
+    def summary(self):
+        return {'sample_count': self.count, 'max_gap_seconds': self.max_gap, 'mean_check_ms': (self.cost / self.count * 1e3) if self.count else None}
+
+    def check(self, force=False, interval=0.0):
+        now = time.monotonic()
+        if not force and now - self.stamp < interval:
+            return None
+        self.max_gap = max(self.max_gap, now - self.stamp)
+        self.stamp = now
+        began = time.perf_counter()
+        try:
+            delta = self.delta()
+            self.last = delta
+            self.count += 1
+            if len(self.samples) < self.MAX_SAMPLES:
+                self.samples.append({'t': time.time(), 'correctable': delta['correctable'], 'uncorrectable': delta['uncorrectable']})
+            if delta['uncorrectable']:
+                raise StopRun('aer', 'uncorrectable PCIe AER error(s) appeared: %s' % json.dumps(delta['by_function'], sort_keys=True))
+            if self.drive_function:
+                states = nvme_states(self.drive_function)
+                if any(state != 'live' for state in states):
+                    raise StopRun('drive', 'the NVMe controller is no longer live: %s' % states)
+            return delta
+        finally:
+            self.cost += time.perf_counter() - began
 
 
 class Budget(object):
@@ -1438,7 +1486,9 @@ class WriteRun(object):
         self.p2w_bytes = 0
         self.sentinel_bytes = 0
         self.last_mismatch = None
-        self.cpu = {'threads': {}}
+        # CPU of the P2W path: `batch_process` is the process CPU seconds spent inside run.batch() and nowhere else (not the sentinel paint,
+        # the read-back compare or the AER sampling); `threads` is each worker's own CPU inside its pwritev.
+        self.cpu = {'threads': {}, 'batch_process': 0.0}
         self.lock = threading.Lock()
 
     def close(self):
@@ -1465,14 +1515,21 @@ class WriteRun(object):
         return elapsed
 
     def batch(self, pool, ops):
-        """Run the writes concurrently; returns (wall seconds, per-write seconds). The bytes are charged to the budget first."""
+        """Run the writes concurrently; returns (wall seconds, per-write seconds). The bytes are charged to the budget first. The process
+        CPU spent while the writes run is added to cpu['batch_process']: that is the CPU of P2W, and only that."""
         total = sum(op[1] for op in ops)
         self.budget.spend(total)
-        began = time.perf_counter()
+        began_cpu, began = time.process_time(), time.perf_counter()
         latencies = list(pool.map(self._one, ops))
         wall = time.perf_counter() - began
+        self.cpu['batch_process'] += time.process_time() - began_cpu
         self.p2w_bytes += total
         return wall, latencies
+
+    def watch(self):
+        """Sample the AER counters and the drive's state if --aer-interval has passed. Called between the segments of a cycle (every sentinel
+        chunk, every read-back, after every batch), so no segment is followed by more than one interval of silence."""
+        self.aer.check(force=False, interval=self.args.aer_interval)
 
     def paint(self, offset, nbytes):
         """Overwrite [offset, +nbytes) of the scratch range with a sentinel, so a write that never happened cannot pass on what was there."""
@@ -1483,7 +1540,8 @@ class WriteRun(object):
             with memoryview(self.sentinel)[:count] as view:
                 self.sink.write_buf(view, offset + done)
             done += count
-        self.sentinel_bytes += nbytes
+            self.sentinel_bytes += count
+            self.watch()
 
     def verify(self, label, bank, drive_offset, nbytes, count, slots):
         """Read `count` consecutive writes of `nbytes` back from `drive_offset` and compare each with the pattern of the card slot it came from
@@ -1494,6 +1552,7 @@ class WriteRun(object):
             self.readback = mmap.mmap(-1, max(nbytes, 1 << 20))
         compared = 0
         for index in range(count):
+            self.watch()
             slot = index % slots
             expected = memoryview(self.patterns[bank])[slot * nbytes:(slot + 1) * nbytes]
             with memoryview(self.readback)[:nbytes] as view:
@@ -1534,6 +1593,7 @@ def run_arm(run, size, qd, seconds, min_batches):
     batches, wall_total, latencies = 0, 0.0, []
     verified, compared = 0, 0
     process_before = time.process_time()
+    write_cpu_before = run.cpu['batch_process']
     threads_before = dict(run.cpu['threads'])
     with concurrent.futures.ThreadPoolExecutor(max_workers=qd) as pool:
         while True:
@@ -1554,11 +1614,12 @@ def run_arm(run, size, qd, seconds, min_batches):
                 break
     total = batches * qd * size
     threads = [value - threads_before.get(ident, 0.0) for ident, value in run.cpu['threads'].items()]
-    cpu = time.process_time() - process_before
+    write_cpu = run.cpu['batch_process'] - write_cpu_before
     return dict({'size': size, 'iovecs': 1 if not run.iov else -(-size // run.iov), 'qd': qd, 'bank': bank, 'card_slots': slots,
                  'batches': batches, 'writes': batches * qd, 'bytes': total, 'seconds': wall_total, 'gbps': gbps(total, wall_total),
-                 'cpu': {'process_seconds': cpu, 'worker_seconds': sum(threads), 'busiest_worker_seconds': max(threads) if threads else 0.0,
-                         'process_fraction_of_write_time': cpu / max(1e-9, wall_total)},
+                 'cpu': {'process_seconds': write_cpu, 'worker_seconds': sum(threads), 'busiest_worker_seconds': max(threads) if threads else 0.0,
+                         'process_fraction_of_write_time': write_cpu / max(1e-9, wall_total),
+                         'non_write_process_seconds': max(0.0, time.process_time() - process_before - write_cpu)},
                  'verify': {'mode': args.write_verify, 'writes': verified, 'bytes': compared, 'ok': True if run.verify_on else None}},
                 **{'write_' + key: value for key, value in summarize_latencies(latencies).items()})
 
@@ -1622,6 +1683,7 @@ def run_soak(run, minutes):
     buckets = {}
     verified_cycles, compared = 0, 0
     process_before = time.process_time()
+    write_cpu_before = run.cpu['batch_process']
     threads_before = dict(run.cpu['threads'])
     with concurrent.futures.ThreadPoolExecutor(max_workers=qd) as pool:
         while True:
@@ -1651,13 +1713,15 @@ def run_soak(run, minutes):
                 if ahead > 0:
                     time.sleep(min(ahead, 5.0))
     threads = [value - threads_before.get(ident, 0.0) for ident, value in run.cpu['threads'].items()]
+    write_cpu = run.cpu['batch_process'] - write_cpu_before
     wall = time.monotonic() - started
     rates = [gbps(count, seconds) for _, (count, seconds) in sorted(buckets.items()) if seconds > 0]
     return dict({'minutes': minutes, 'wall_seconds': wall, 'cycles': cycles, 'write_size': size, 'qd': qd, 'bank': bank, 'bytes': written,
                  'write_seconds': write_seconds, 'gbps': gbps(written, write_seconds), 'effective_gbps': gbps(written, wall), 'paced_to_gbps': args.soak_max_gbps or None,
                  'bucket_gbps': rates, 'min_bucket_gbps': min(rates) if rates else None,
-                 'cpu': {'process_seconds': time.process_time() - process_before, 'worker_seconds': sum(threads),
-                         'busiest_worker_seconds': max(threads) if threads else 0.0},
+                 'cpu': {'process_seconds': write_cpu, 'worker_seconds': sum(threads), 'busiest_worker_seconds': max(threads) if threads else 0.0,
+                         'process_fraction_of_write_time': write_cpu / max(1e-9, write_seconds),
+                         'non_write_process_seconds': max(0.0, time.process_time() - process_before - write_cpu)},
                  'verify': {'mode': args.write_verify, 'cycles_verified': verified_cycles, 'every': every, 'bytes': compared,
                             'ok': True if verified_cycles else None}},
                 **{'write_' + key: value for key, value in summarize_latencies(latencies).items()})
@@ -1706,7 +1770,8 @@ def run_write_probe(card, sink, args):
     scratch_end = args.scratch_start + args.scratch_size
     if scratch_end > sink.length:
         raise ProbeError('the scratch range ends at %d, beyond the %d bytes of %s' % (scratch_end, sink.length, sink.path))
-    report = {'mode': 'write', 'notes': [NOTE_WRITE_FILL], 'sweep': [], 'reaim': None, 'soak': None, 'aborted': None, 'mismatch': None}
+    report = {'mode': 'write', 'notes': [NOTE_WRITE_FILL, NOTE_WRITE_CPU, NOTE_WRITE_QD, NOTE_WRITE_AER], 'sweep': [], 'reaim': None, 'soak': None,
+              'aborted': None, 'mismatch': None}
     if sink.is_block:
         reason = block_device_in_use(sink.path)
         if reason:
@@ -1768,8 +1833,13 @@ def run_write_probe(card, sink, args):
         window_selftest(cpu, dict(plan, dest=dict(plan['dest'], size=plan['region_bytes'])))
         aimer = Aimer(window, cpu, plan, canaries)
         try:
+            fill_began = time.perf_counter()
             prove_banks(window, aimer, cpu, plan, canaries)
             report['fill'] = fill_banks(aimer, cpu, plan, patterns)
+            fill_seconds = time.perf_counter() - fill_began
+            fill_bytes = sum(len(pattern) for pattern in patterns.values()) + PAGE * len(canaries)
+            # what the CPU filled through the window (uncached by default, a speed nobody has measured on the rig yet) and how long it took
+            report['fill_stats'] = {'bytes': fill_bytes, 'seconds': fill_seconds, 'mbps': fill_bytes / 1e6 / max(1e-9, fill_seconds), 'cpu_map': args.cpu_map}
             buffer = card.p2p_buffer(info['size'])
             stack.callback(buffer.close)
             first_bus = buffer.bus_addr_of(0)
@@ -1781,6 +1851,7 @@ def run_write_probe(card, sink, args):
                            Budget(int(args.max_write_gib * GIB)))
             stack.callback(run.close)
             aimer.aim(args.bank)
+            monitor.start()
             if not args.no_sweep:
                 for size in args.sizes:
                     for qd in args.qds:
@@ -1802,6 +1873,7 @@ def run_write_probe(card, sink, args):
             report['aer']['after'] = snapshot_aer(monitor.functions)
             report['aer']['delta'] = monitor.delta()
             report['aer']['samples'] = monitor.samples
+            report['aer'].update(monitor.summary(), interval_seconds=args.aer_interval)
     finally:
         report['bytes'] = {'p2w': run.p2w_bytes if run else 0, 'sentinel': run.sentinel_bytes if run else 0, 'written_to_drive': sink.written}
         report['aims'] = aimer.records[-200:] if aimer else []
@@ -1833,8 +1905,14 @@ def finish_write(report, args):
         verdict['p2w_gbps_ok'] = verdict['p2w_sustained_gbps'] >= args.min_write_gbps
     drain = [arm for arm in report['sweep'] if arm['size'] == SUBRUN_BYTES and arm['qd'] == 1]
     if drain:
-        verdict['subrun_drain_ms'] = drain[0]['write_max_ms']
-        verdict['subrun_drain_ok'] = drain[0]['write_max_ms'] <= args.drain_ms
+        # Design 2.8: a sub-run drains in --drain-ms "at the measured P2W rate", that is SUBRUN_BYTES divided by the rate of the QD 1 cell
+        # (all its writes, the first and the slowest included). The slowest single write and the 99th percentile are reported beside it,
+        # not gated on: one slow write out of hundreds is information for the owner, not the bound the scheduler is sized by.
+        cell = drain[0]
+        verdict['subrun_drain_ms'] = SUBRUN_BYTES / (max(cell['gbps'], 1e-12) * 1e9) * 1e3
+        verdict['subrun_drain_ok'] = verdict['subrun_drain_ms'] <= args.drain_ms
+        verdict['subrun_drain_p99_ms'] = cell['write_p99_ms']
+        verdict['subrun_drain_max_ms'] = cell['write_max_ms']
     if args.reaim:
         reaim = report['reaim']
         if stopped and stopped['kind'] == 'canary':
@@ -1872,7 +1950,7 @@ def emit_write(report, as_json):
         if links:
             print('links %-5s %s' % (label, ', '.join('%s %s GT/s x%s' % (link['bdf'], link['speed_gts'], link['width']) for link in links)))
     for arm in report['sweep']:
-        print('write %9d B x%-2d qd %-2d %8.3f GB/s  op p50 %7.2f p99 %7.2f max %7.2f ms  cpu %5.2f cores  verify %s' % (
+        print('write %9d B x%-2d qd %-2d %8.3f GB/s  op p50 %7.2f p99 %7.2f max %7.2f ms  cpu %5.2f cores (writes only)  verify %s' % (
             arm['size'], arm['iovecs'], arm['qd'], arm['gbps'], arm['write_p50_ms'], arm['write_p99_ms'], arm['write_max_ms'],
             arm['cpu']['process_fraction_of_write_time'], VERIFY_WORDS[arm['verify']['ok']]))
     if report['reaim']:
@@ -1885,10 +1963,20 @@ def emit_write(report, as_json):
         print('soak %.1f min: %d cycles, %.1f GB written, %.3f GB/s while writing (slowest 30 s bucket %s), %.3f GB/s overall, verify %s' % (
             part['minutes'], part['cycles'], part['bytes'] / 1e9, part['gbps'],
             '%.3f' % part['min_bucket_gbps'] if part['min_bucket_gbps'] is not None else 'n/a', part['effective_gbps'], VERIFY_WORDS[part['verify']['ok']]))
+    verdict = report.get('verdict', {})
+    if 'subrun_drain_ms' in verdict:
+        print('sub-run drain: %.2f ms for %d B at the QD 1 cell\'s rate (gate %s); slowest single write %.2f ms, p99 %.2f ms' % (
+            verdict['subrun_drain_ms'], SUBRUN_BYTES, 'held' if verdict['subrun_drain_ok'] else 'MISSED', verdict['subrun_drain_max_ms'], verdict['subrun_drain_p99_ms']))
+    fill = report.get('fill_stats')
+    if fill:
+        print('card fill: %.1f MB through the %s CPU window in %.1f s (%.1f MB/s)' % (fill['bytes'] / 1e6, fill['cpu_map'], fill['seconds'], fill['mbps']))
     delta = report.get('aer', {}).get('delta')
     if delta:
         print('aer: %s, correctable +%d, uncorrectable +%d %s' % ('measured' if delta['measured'] else 'NOT MEASURED', delta['correctable'], delta['uncorrectable'],
                                                                  json.dumps(delta['by_function'], sort_keys=True) if delta['by_function'] else ''))
+        if 'max_gap_seconds' in report['aer']:
+            print('aer sampling: every %.2f s asked, %d samples, longest gap %.2f s, %.2f ms per sample' % (
+                report['aer']['interval_seconds'], report['aer']['sample_count'], report['aer']['max_gap_seconds'], report['aer']['mean_check_ms'] or 0.0))
     if report['aborted']:
         print('STOPPED (%s): %s' % (report['aborted']['kind'], report['aborted']['message']))
     print('bytes: %.2f GB from the card to the drive, %.2f GB of sentinel' % (report['bytes']['p2w'] / 1e9, report['bytes']['sentinel'] / 1e9))
@@ -2183,12 +2271,19 @@ def build_parser():
     write.add_argument('--soak-qd', type=int, default=8, help='writes in flight in the soak (default 8)')
     write.add_argument('--soak-verify-every', type=int, default=4, help='paint and verify every Nth soak cycle, and the last (default 4)')
     write.add_argument('--soak-max-gbps', type=float, default=2.0, help='pace the soak to this average rate, to spare the drive\'s endurance (default 2; 0 = unpaced)')
-    write.add_argument('--aer-interval', type=float, default=30.0, help='seconds between AER/drive-state samples inside an arm (default 30)')
+    write.add_argument('--aer-interval', type=float, default=0.5,
+                       help='seconds between AER/drive-state samples inside an arm (default 0.5: an uncorrectable error stops the DMA within this plus '
+                            'the segment in flight (a batch, a sentinel chunk, a read-back), about a second at most; a sample is a few dozen small '
+                            'sysfs reads, about 0.2 ms on the test tree, and the report carries the mean measured on the rig)')
     write.add_argument('--write-verify', choices=('full', 'none'), default='full',
                        help='full: paint a sentinel, write, read back and compare every byte; none: write only, the run ends UNVERIFIED')
     write.add_argument('--max-write-gib', type=float, default=1024.0, help='stop before this many GiB have been written to the drive (default 1024)')
-    write.add_argument('--min-write-gbps', type=float, default=0.25, help='go/no-go: sustained write rate at least this (default 0.25)')
-    write.add_argument('--drain-ms', type=float, default=50.0, help='go/no-go: one 22282240-byte sub-run on its own finishes within this (default 50)')
+    write.add_argument('--min-write-gbps', type=float, default=0.25,
+                       help='gate: sustained write rate at least this (default 0.25); a miss ends FAIL (exit 1). The W1 kit passes 0 and applies the gate '
+                            'in its summary, so a slow drive costs no data')
+    write.add_argument('--drain-ms', type=float, default=50.0,
+                       help='gate: one 22282240-byte sub-run on its own drains within this many ms at the measured rate, that is 22282240 B divided by '
+                            'the rate of the queue-depth-1 cell (default 50); the slowest write and the p99 are reported, not gated. A miss ends FAIL')
     write.add_argument('--cpu-map', choices=('uc', 'wc'), default='uc', help='CPU mapping of the window: uc (what the tier reads canaries through) or wc')
     write.add_argument('--min-drive-gts', type=float, default=16.0, help='refuse a drive link slower than this many GT/s (default 16; 0 = only Gen1 is refused)')
     write.add_argument('--allow-unknown-link', action='store_true', help='go on when a link speed or the drive\'s PCI function cannot be found (never for Gen1)')
@@ -2233,6 +2328,22 @@ def emit(report, as_json):
     print('RESULT', report['result'])
 
 
+def write_json_report(path, report):
+    """The JSON report file. Run through sudo, the probe is root, and a file root creates in the invoking user's home would be root's:
+    the user who ran sudo (SUDO_UID, SUDO_GID) gets it instead, so the report can be read, moved and deleted without root. Best effort: a
+    failed chown leaves the file with root, which is still readable."""
+    with open(path, 'w') as handle:
+        json.dump(report, handle, indent=2, sort_keys=True)
+        handle.write('\n')
+        handle.flush()
+        owner = (os.environ.get('SUDO_UID', ''), os.environ.get('SUDO_GID', ''))
+        if os.geteuid() == 0 and all(item.isdigit() for item in owner):
+            try:
+                os.fchown(handle.fileno(), int(owner[0]), int(owner[1]))
+            except OSError:
+                pass
+
+
 def main_write(args):
     """--mode write: dry-run plan, or the flow against a real card and drive, or against the mocks."""
     resolve_target(args)
@@ -2261,9 +2372,7 @@ def main_write(args):
         sink.close()
         card.close()
     if args.json_out:
-        with open(args.json_out, 'w') as handle:
-            json.dump(report, handle, indent=2, sort_keys=True)
-            handle.write('\n')
+        write_json_report(args.json_out, report)
     emit_write(report, args.json)
     return EXIT_CODES[report['result']]
 
