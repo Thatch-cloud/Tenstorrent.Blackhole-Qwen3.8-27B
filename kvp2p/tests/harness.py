@@ -161,22 +161,30 @@ class Rig:
     def __init__(self, *, slot_objects: int = 8, num_slots: int = 400, num_blocks: int = 600, extra: Optional[dict] = None,
                  max_batched: int = 4096, workers: int = 1, tmp: Optional[str] = None, start_worker: bool = True,
                  checks: bool = True, with_scheduler: bool = True, executor: Optional[str] = None, host_ok: bool = True,
-                 async_scheduling: bool = False):
+                 async_scheduling: bool = False, real_tier=None):
         register_layout(TINY)
+        self.real_tier = real_tier              # WP3a: a tier_kit.RealTier makes the rig use the REAL runtime and manager instead of the fakes
         self.tmp = tmp or tempfile.mkdtemp(prefix='ttkvp2p-rig-')
         self.slot_objects = slot_objects
         self.num_blocks = num_blocks
         self.checks = checks
         self.steps = 0
-        self.saved_modules = install_fake_modules()
-        FakeRuntime.reset(num_slots)
-        FakeRuntime.host_ok_default = host_ok
+        if real_tier is None:
+            self.saved_modules = install_fake_modules()
+            FakeRuntime.reset(num_slots)
+            FakeRuntime.host_ok_default = host_ok
+        else:
+            self.saved_modules = {}
+            real_tier.prepare(self, num_slots)
         self.card = FakeCard(num_blocks=num_blocks, slot_objs=slot_objects)
         self.drive = FakeDrive(os.path.join(self.tmp, 'drive.img'), num_slots)
         self.factory = FakeBackendFactory(self.card, self.drive, slot_objects, workers=workers)
         self.saved_factory = worker_module.BACKEND_FACTORY
         worker_module.BACKEND_FACTORY = self.factory
         self.extra = default_extra_config(slot_objects, **(extra or {}))
+        if real_tier is not None:
+            self.extra.update(real_tier.extra_config(self))
+            self.extra.update(extra or {})
 
         kv_transfer = KVTransferConfig(
             kv_connector='TTP2PConnector', kv_connector_module_path='ttkvp2p.connector', kv_role='kv_both',
@@ -213,6 +221,8 @@ class Rig:
         self.worker_conn = TTP2PConnector(self.vllm_config, KVConnectorRole.WORKER, self.kv_cache_config)
         if start_worker:
             self.worker_conn.register_kv_caches(self.registry)
+            if real_tier is not None:
+                real_tier.after_start(self)
         self.scheduler = None
         self.async_mode = async_scheduling
         self.pending: List[tuple] = []          # async scheduling: batches executed but not yet through update_from_output
@@ -243,6 +253,8 @@ class Rig:
 
     @property
     def runtime(self) -> FakeRuntime:
+        if self.real_tier is not None:
+            return self.real_tier.runtime(self)
         return next(iter(FakeRuntime.instances.values()))
 
     @property
@@ -353,6 +365,8 @@ class Rig:
             self.drive.close()
             worker_module.BACKEND_FACTORY = self.saved_factory
             restore_modules(self.saved_modules)
+            if self.real_tier is not None:
+                self.real_tier.finish(self)
         if worker is not None and self.expected_internal_errors is not None:
             # An unexpected exception inside the state machine is latched and survived in production; in the tests it is a failure.
             assert worker.stats['internal_error'] == self.expected_internal_errors, (
