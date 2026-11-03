@@ -12,6 +12,7 @@ import subprocess
 import sys
 import threading
 import time
+import types
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -50,7 +51,7 @@ def prime_drive(env, slots, tag_of):
 class RoundTripTests(IOCase):
     def test_a_spill_puts_each_cards_shard_in_order_on_the_drive(self):
         e = self.env()
-        self.assertTrue(e.direct or True, 'O_DIRECT is used where the file system takes it: %s' % e.direct)
+        self.assertEqual(e.direct, pio.fd_is_direct(e.fd), 'the fixture reports honestly whether O_DIRECT is in use (the file system may refuse it)')
         n = 3
         for j in range(n):
             for d in range(4):
@@ -399,7 +400,7 @@ class SchedulingTests(IOCase):
         self.assertEqual(stats['calls_read'], 24)
         self.assertEqual(stats['calls_write'], 12)
 
-    def test_the_scheduler_thread_failing_stops_the_layer_and_latches(self):
+    def test_the_scheduler_thread_failing_stops_the_layer_and_records_why(self):
         e = self.env()
 
         def broken():
@@ -409,7 +410,8 @@ class SchedulingTests(IOCase):
         error = future.exception(10)
         self.assertIsInstance(error, pio.P2PDead)
         self.assertIn('scheduler thread failed', str(error))
-        self.assertTrue(any('scheduler thread failed' in reason for reason in e.runtime.latched))
+        self.assertIn('scheduler thread failed', e.io.dead)
+        self.assertEqual(e.runtime.latched, [], 'the scheduler thread never calls into the runtime: the worker latches from the engine thread when it sees io.dead')
         self.assertEqual(e.ops.calls, [])
 
 
@@ -624,8 +626,8 @@ class IovecMutationTests(IOCase):
         error = future.exception(10)
         self.assertIsInstance(error, cl.StaleAim)
         self.assertEqual(len(e.ops.calls), 1, 'the stale call never reached the drive')
-        self.assertTrue(e.runtime.latched)
-        self.assertIsNotNone(e.io.dead)
+        self.assertEqual(e.runtime.latched, [], 'found on the scheduler thread: recorded, not latched from there')
+        self.assertTrue(e.io.dead.startswith(pio.FATAL_PREFIX), e.io.dead)
         self.assertEqual(e.links[0].inflight, 0, 'the cards that had counted the call in flight were released again')
 
 
@@ -637,7 +639,9 @@ class CanaryTests(IOCase):
         error = future.exception(10)
         self.assertIsInstance(error, pio.P2PDead)
         self.assertEqual(e.ops.calls, [])
-        self.assertTrue(any('re-aim to bank 4' in reason for reason in e.runtime.latched))
+        self.assertIn('re-aim to bank 4', e.io.dead)
+        self.assertTrue(e.io.dead.startswith(pio.FATAL_PREFIX), e.io.dead)
+        self.assertEqual(e.runtime.latched, [], 'found on the scheduler thread: recorded, not latched from there')
         self.assertEqual(e.io.stats()['canary_mismatches'], 1)
         self.assertIsInstance(e.io.read_piece(e.drive_off(0), 4, 1).exception(5), pio.P2PDead)
         self.assertIsInstance(e.io.write_subrun(e.drive_off(0), 0, 1).exception(5), pio.P2PDead)
@@ -737,18 +741,16 @@ class ShutdownTests(IOCase):
         self.assertEqual(e.rig.kmd.open_fds, 4 * 3, 'chardev, p2pmem file and pin of every card are still open: a DMA may be running into them')
         release.set()
 
-    def test_the_drive_fd_it_opened_is_closed_and_the_one_it_was_given_is_not(self):
-        e = self.env(start=False)
-        e.links = e.rig.open_links()
-        e.config.nvme_device = e.path
-        e.build_io(drive_fd=None)
-        self.assertEqual(e.ops.opened, [e.path])
-        self.assertEqual(e.io.read_piece(e.drive_off(0), 2, 1).result(10), e.object_bytes)
+    def test_the_drive_descriptor_is_the_runtimes_and_stays_open_after_close(self):
+        e = self.env()
         e.io.close()
-        self.assertEqual(len(e.ops.closed_fds), 1)
-        e2 = self.env()
+        os.fstat(e.fd)
+        e2 = self.env(start=False)
+        e2.links = e2.rig.open_links()
+        e2.runtime = e2.wp3a_runtime()
+        e2.build_io(drive_fd=None, drive_range=None)
+        self.assertEqual(e2.io.read_piece(e2.drive_off(0), 2, 1).result(10), e2.object_bytes)
         e2.io.close()
-        self.assertEqual(e2.ops.closed_fds, [], 'the runtime\'s descriptor stays the runtime\'s')
         os.fstat(e2.fd)
 
     def test_threads_are_named_for_the_per_thread_cpu_gate_and_stop_at_close(self):
@@ -758,7 +760,7 @@ class ShutdownTests(IOCase):
         self.assertIn('kvp2p-sched', names)
         self.assertTrue(any(name.startswith('kvp2p-io') for name in names), names)
         self.assertTrue(all(c['thread'].startswith('kvp2p-io') for c in e.ops.calls))
-        self.assertGreaterEqual(e.io.stats()['io_thread_cpu_s'], 0.0)
+        self.assertGreater(e.io.stats()['io_thread_cpu_s'], 0.0, 'the per-thread CPU time of the I/O threads is measured')
         e.io.close()
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline and 'kvp2p-sched' in {t.name for t in threading.enumerate()}:
@@ -767,33 +769,129 @@ class ShutdownTests(IOCase):
 
 
 class DriveSourceTests(IOCase):
-    def test_the_runtime_may_hand_over_the_descriptor_as_an_int_or_a_callable(self):
-        for form in ('int', 'callable'):
-            with self.subTest(form=form):
-                e = self.env(start=False)
-                e.links = e.rig.open_links()
-                e.runtime.drive_fd = e.fd if form == 'int' else (lambda: e.fd)
-                e.build_io(drive_fd=None)
-                self.assertEqual(e.io.read_piece(e.drive_off(0), 2, 1).result(10), e.object_bytes)
-                self.assertEqual(e.ops.opened, [])
+    """Where the descriptor, the data region and the canary offset come from: the runtime, with the names of WP3a's ``KVP2PRuntime`` (``drive.fd``, ``store.data_off`` /
+    ``num_slots`` / ``object_bytes``, ``canary_offset``). Nothing is guessed, and the device is never opened here."""
 
-    def test_no_drive_at_all_is_a_clean_error(self):
+    def built(self, **runtime_overrides):
         e = self.env(start=False)
         e.links = e.rig.open_links()
-        with self.assertRaises(pio.P2PIOError):
-            e.build_io(drive_fd=None)
+        e.runtime = e.wp3a_runtime(**runtime_overrides)
+        return e
+
+    def refused(self, e, text, **overrides):
+        with self.assertRaises(pio.P2PIOError) as caught:
+            e.build_io(drive_fd=None, drive_range=None, **overrides)
+        self.assertIn(text, str(caught.exception))
+        self.assertNotIn('kvp2p-sched', {t.name for t in threading.enumerate()}, 'a layer that failed to start leaves no thread')
+        self.assertFalse(hasattr(e.ops, 'opened'), 'the drive operations have no open: this layer never opens the device')
+
+    def test_the_wp3a_runtime_gives_the_descriptor_the_data_region_and_the_canary_offset(self):
+        e = self.built(num_slots=5)
+        e.build_io(drive_fd=None, drive_range=None)
+        self.assertEqual(e.io._drive_range, (e.DATA_OFF, e.DATA_OFF + 5 * e.object_bytes), 'the fence is exactly the region the runtime states')
+        self.assertEqual(e.io._canary_offset, 2 * PAGE)
+        prime_drive(e, [4], lambda slot: ('r', slot))
+        self.assertEqual(e.io.read_piece(e.drive_off(4), 2, 1).result(10), e.object_bytes, 'the last slot of the region')
+        for off in (e.drive_off(5), e.drive_off(6) + PAGE, e.drive_off(4) + PAGE):
+            with self.assertRaises(cl.BoundsViolation, msg='offset %d is past num_slots' % off):
+                e.io.read_piece(off, 2, 1)
+        self.assertEqual(len(e.ops.calls), 1)
+
+    def test_the_wp3a_runtime_makes_the_whole_start_up_work_without_any_keyword(self):
+        e = self.built()
+        e.build_io(drive_fd=None, drive_range=None)
+        e.io.dma_canary()
+        self.assertEqual([(c['kind'], c['offset']) for c in e.ops.calls[:2]], [('write', 2 * PAGE), ('read', 2 * PAGE)])
+        self.assertEqual(e.runtime.latched, [])
+
+    def test_the_keywords_win_over_the_runtime(self):
+        e = self.built(num_slots=2)
+        e.build_io(drive_fd=e.fd, drive_range=(e.DATA_OFF, e.data_hi))
+        self.assertEqual(e.io._drive_range, (e.DATA_OFF, e.data_hi))
+
+    def test_no_drive_at_all_is_a_clean_error_and_the_configured_path_is_not_opened(self):
+        e = self.env(start=False)
+        e.links = e.rig.open_links()
+        e.config.nvme_device = e.path
+        self.refused(e, 'no drive')
+        e.runtime = types.SimpleNamespace(latch=lambda reason: None, drive=types.SimpleNamespace(), store=types.SimpleNamespace(data_off=e.DATA_OFF, num_slots=3, object_bytes=e.object_bytes))
+        self.refused(e, 'no drive')
+
+    def test_a_runtime_that_states_no_data_region_is_refused_instead_of_a_guessed_fence(self):
+        for label, store in (('no store', None), ('no data_off', dict(num_slots=3)), ('no num_slots', dict(data_off=1 << 20)), ('zero slots', dict(data_off=1 << 20, num_slots=0)),
+                             ('a string', dict(data_off='1048576', num_slots=3))):
+            with self.subTest(label):
+                e = self.built()
+                if store is None:
+                    del e.runtime.store
+                else:
+                    e.runtime.store = types.SimpleNamespace(**store)
+                self.refused(e, 'no data region')
+
+    def test_the_runtimes_object_size_must_be_the_cards(self):
+        e = self.built(object_bytes=4 * fc.SMALL_SHARD + PAGE)
+        self.refused(e, 'objects are')
+
+    def test_the_region_must_still_clear_the_superblock_and_the_canary_block(self):
+        e = self.built(data_off=2 * PAGE)
+        self.refused(e, 'superblock')
+
+    def test_the_runtimes_canary_offset_must_be_inside_the_canary_block(self):
+        for offset in (0, PAGE, 4 * PAGE, 2 * PAGE + 1, 'x'):
+            with self.subTest(offset=offset):
+                e = self.built(canary_offset=offset)
+                self.refused(e, 'canary')
+        e = self.built(canary_offset=3 * PAGE)            # the second page of the block is fine, and is the one used
+        e.build_io(drive_fd=None, drive_range=None)
+        e.io.dma_canary()
+        self.assertEqual({c['offset'] for c in e.ops.calls}, {3 * PAGE})
+        e = self.built(canary_offset=None)                # a runtime that says nothing: the frozen block start
+        e.build_io(drive_fd=None, drive_range=None)
+        self.assertEqual(e.io._canary_offset, 2 * PAGE)
+
+    def test_a_descriptor_that_is_not_an_integer_is_refused(self):
+        for bad in ('3', 3.0, True, object()):
+            with self.subTest(bad=bad):
+                e = self.built()
+                e.runtime.drive.fd = bad
+                self.refused(e, 'no drive')
+
+
+class DirectIoTests(IOCase):
+    """Buffered I/O on the drive would make the CPU copy the cards' BAR pages: a descriptor that is not O_DIRECT is refused outside a test."""
+
+    def setUp(self):
+        if not hasattr(os, 'O_DIRECT'):
+            self.skipTest('this platform has no O_DIRECT')
+
+    def test_a_buffered_descriptor_is_refused(self):
+        e = self.env(start=False)
+        e.links = e.rig.open_links()
+        fd = os.open(e.path, os.O_RDWR)
+        self.addCleanup(os.close, fd)
+        self.assertFalse(pio.fd_is_direct(fd))
+        with self.assertRaises(pio.P2PIOError) as caught:
+            e.build_io(drive_fd=fd, allow_buffered=False)
+        self.assertIn('O_DIRECT', str(caught.exception))
         self.assertNotIn('kvp2p-sched', {t.name for t in threading.enumerate()})
 
-    def test_the_default_data_range_leaves_the_first_mib_alone_and_comes_from_the_runtime_when_it_says(self):
+    def test_a_buffered_descriptor_is_taken_only_where_a_test_says_so(self):
         e = self.env(start=False)
         e.links = e.rig.open_links()
-        e.build_io(drive_range=None)
-        self.assertEqual(e.io._drive_range, (1 << 20, e.data_hi))
-        e.io.close()
-        e.runtime.data_off = 2 << 20
-        e.runtime.num_slots = 5
-        e.build_io(drive_range=None)
-        self.assertEqual(e.io._drive_range, (2 << 20, (2 << 20) + 5 * e.object_bytes))
+        fd = os.open(e.path, os.O_RDWR)
+        self.addCleanup(os.close, fd)
+        e.build_io(drive_fd=fd, allow_buffered=True)
+        self.assertEqual(e.io.read_piece(e.drive_off(0), 2, 1).result(10), e.object_bytes)
+
+    def test_a_direct_descriptor_passes_the_default_and_a_bad_one_does_not(self):
+        e = self.env(start=False)
+        e.links = e.rig.open_links()
+        if not e.direct:
+            self.skipTest('this file system does not take O_DIRECT')
+        self.assertTrue(pio.fd_is_direct(e.fd))
+        e.build_io(allow_buffered=False)
+        self.assertFalse(pio.fd_is_direct(-1))
+        self.assertFalse(pio.fd_is_direct(10 ** 6))
 
 
 class ConstructionTests(IOCase):
@@ -868,6 +966,279 @@ class ConstructionTests(IOCase):
             e.io.read_piece(e.drive_off(0), 2, 1, first_obj=4)
 
 
+class FutureResolutionTests(IOCase):
+    """A future resolves only when no call of its request is still in flight. The worker releases the bank and the slots' in-flight counts when it sees the future done,
+    so a future that resolved early would let a bank be reused, or a slot be trimmed, under a DMA that is still running. This arises when a request is cut into several calls
+    (``restore_run_objects`` shorter than the run), a knob the W1 sweeps may turn."""
+
+    def split(self, **kwargs):
+        io_kwargs = dict(restore_run_objects=2)
+        io_kwargs.update(kwargs.pop('io_kwargs', {}))
+        e = self.env(rig_kwargs=dict(slot_objects=12), io_kwargs=io_kwargs, **kwargs)
+        prime_drive(e, range(8), lambda slot: ('f', slot))
+        return e
+
+    def wait_for(self, condition, what):
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if condition():
+                return
+            time.sleep(0.005)
+        self.fail('timed out waiting for %s' % what)
+
+    def inflight_when_resolved(self, e, future):
+        seen = []
+        future.add_done_callback(lambda done: seen.append(e.io.stats()['inflight_calls']))
+        return seen
+
+    def test_an_error_in_one_call_does_not_resolve_the_request_while_a_sibling_is_in_flight(self):
+        e = self.split()
+        (release, entered), = e.ops.hold_next(1)
+        e.ops.fail_at = {1: OSError(errno.EIO, 'media error')}               # the second call fails at once, the first is held
+        future = e.io.read_piece(e.drive_off(0), 2, 4)                       # two calls of two objects, both in flight together
+        seen = self.inflight_when_resolved(e, future)
+        self.assertTrue(entered.wait(5))
+        self.wait_for(lambda: e.io.stats()['io_errors'] == 1, 'the failing call to return')
+        self.settle()
+        self.assertEqual(e.io.stats()['inflight_calls'], 1)
+        self.assertFalse(future.done(), 'resolved on the first error while the sibling call was still in flight')
+        release.set()
+        self.assertEqual(future.exception(5).errno, errno.EIO)
+        self.assertEqual(seen, [0], 'the future resolved with a call still in flight')
+
+    def test_an_errored_request_with_calls_left_to_issue_waits_for_the_call_in_flight(self):
+        e = self.split(config_kwargs=dict(io_threads=2))
+        (release, entered), = e.ops.hold_next(1)
+        e.ops.fail_at = {1: OSError(errno.EIO, 'media error')}
+        future = e.io.read_piece(e.drive_off(0), 2, 6)                       # three calls: the first held, the second fails, the third is never issued
+        seen = self.inflight_when_resolved(e, future)
+        self.assertTrue(entered.wait(5))
+        self.wait_for(lambda: e.io.stats()['io_errors'] == 1, 'the failing call to return')
+        self.settle()
+        self.assertFalse(future.done(), 'the scheduler resolved an errored request that still had a call in flight')
+        self.assertEqual(len(e.ops.calls), 2, 'the third call was never issued')
+        release.set()
+        self.assertEqual(future.exception(5).errno, errno.EIO)
+        self.assertEqual(seen, [0])
+        self.assertEqual(e.io.stats()['queued_restore'], 0)
+
+    def test_a_partly_issued_request_is_not_resolved_by_the_death_of_the_layer_while_a_call_is_in_flight(self):
+        e = self.split(config_kwargs=dict(io_threads=1))
+        (release, entered), = e.ops.hold_next(1)
+        future = e.io.read_piece(e.drive_off(0), 2, 6)                       # three calls, one thread: the first is held, two are still to issue
+        seen = self.inflight_when_resolved(e, future)
+        self.assertTrue(entered.wait(5))
+        with self.assertRaises(cl.BoundsViolation):
+            e.io.read_piece(e.drive_off(0), 0, 1)                            # a bad request stops the layer and fails what is queued
+        self.settle()
+        self.assertFalse(future.done(), 'resolved by the death of the layer with its first call still in flight')
+        release.set()
+        self.assertIsInstance(future.exception(5), pio.P2PDead)
+        self.assertEqual(seen, [0])
+        self.assertEqual(len(e.ops.calls), 1, 'the calls that were never issued stay unissued')
+
+    def test_a_partly_issued_request_is_not_resolved_by_close_while_a_call_is_in_flight(self):
+        e = self.split(config_kwargs=dict(io_threads=1))
+        (release, entered), = e.ops.hold_next(1)
+        future = e.io.read_piece(e.drive_off(0), 2, 6)
+        seen = self.inflight_when_resolved(e, future)
+        self.assertTrue(entered.wait(5))
+        outcome = []
+        closer = threading.Thread(target=lambda: outcome.append(e.io.close(timeout=10)))
+        closer.start()
+        self.settle()
+        self.assertFalse(future.done(), 'resolved by close() with its first call still in flight')
+        release.set()
+        closer.join(10)
+        self.assertEqual(outcome, [True])
+        self.assertIsInstance(future.exception(5), pio.P2PClosed)
+        self.assertEqual(seen, [0])
+
+    def test_a_request_that_succeeds_resolves_once_with_all_its_bytes(self):
+        e = self.split()
+        future = e.io.read_piece(e.drive_off(0), 2, 6)
+        seen = self.inflight_when_resolved(e, future)
+        self.assertEqual(future.result(10), 6 * e.object_bytes)
+        self.assertEqual(seen, [0])
+        self.assertEqual(len(e.ops.calls), 3)
+
+
+class ThreadContractTests(IOCase):
+    """The layer's own threads never call into the runtime (I7: the runtime belongs to the engine thread). A fault found there stops the layer and is recorded in
+    ``dead``, which the worker reads and latches from the engine thread. A fault found on a caller's thread is latched on that thread."""
+
+    @staticmethod
+    def filed_as(reason):
+        """The part of the runtime's latch classifier (WP3a ``health.latch_code``) that decides between these reasons, in its order."""
+        text = (reason or '').lower()
+        if 'control' in text and 'off' in text:
+            return 'control_off'
+        if 'consecutive job failure' in text or 'strike' in text:
+            return 'strikes'
+        if 'no completion' in text or 'stall' in text:
+            return 'stall'
+        if 'aer' in text:
+            return 'aer_uncorrectable'
+        if 'device lost' in text or 'enodev' in text or 'enxio' in text or 'not live' in text or 'reads 0 bytes' in text:
+            return 'device_lost'
+        if 'bound' in text or 'canary' in text:
+            return 'bounds_violation'
+        return 'op_throw'
+
+    def test_a_violation_found_on_a_pool_thread_is_recorded_and_the_runtime_is_not_called(self):
+        e = self.env()
+        e.io.read_piece(e.drive_off(0), 2, 1).result(10)
+        e.links[1].locate = lambda view: 12345                               # the check right before the syscall (an I/O thread) now finds a buffer in the wrong place
+        error = e.io.read_piece(e.drive_off(1), 2, 1, first_obj=1).exception(10)
+        self.assertIsInstance(error, cl.BoundsViolation)
+        self.assertTrue(e.io.dead.startswith(pio.FATAL_PREFIX), e.io.dead)
+        self.assertEqual(self.filed_as(e.io.dead), 'bounds_violation')
+        self.assertEqual((e.runtime.latched, e.runtime.latch_threads), ([], []))
+        self.assertEqual(len(e.ops.calls), 1, 'the second call never reached the drive')
+
+    def test_a_card_that_moved_found_on_the_scheduler_thread_is_recorded_and_the_runtime_is_not_called(self):
+        e = self.env()
+        e.io.read_piece(e.drive_off(0), 2, 1).result(10)
+        e.links[3].aim(2)                                                    # behind the layer's back
+        self.assertIsInstance(e.io.read_piece(e.drive_off(1), 2, 1, first_obj=1).exception(10), cl.StaleAim)
+        self.assertEqual(self.filed_as(e.io.dead), 'bounds_violation', 'a stale aim is a window fault, not an internal error: %s' % e.io.dead)
+        self.assertEqual(e.runtime.latched, [])
+
+    def test_a_canary_mismatch_on_a_re_aim_is_filed_as_a_bounds_violation(self):
+        e = self.env()
+        e.rig.boards[1].ignore_configure = True
+        e.io.read_piece(e.drive_off(0), 4, 1).exception(10)
+        self.assertEqual(self.filed_as(e.io.dead), 'bounds_violation', e.io.dead)
+        self.assertEqual(e.runtime.latched, [])
+
+    def test_a_failing_re_aim_that_is_not_a_canary_mismatch_is_filed_the_same_way(self):
+        e = self.env()
+        e.rig.kmd.fail['configure'] = errno.EIO
+        e.io.read_piece(e.drive_off(0), 4, 1).exception(10)
+        self.assertIn('re-aim to bank 4 failed', e.io.dead)
+        self.assertEqual(self.filed_as(e.io.dead), 'bounds_violation', e.io.dead)
+        self.assertEqual(e.runtime.latched, [])
+
+    def test_a_bad_request_is_latched_on_the_callers_thread(self):
+        e = self.env()
+        with self.assertRaises(cl.BoundsViolation):
+            e.io.read_piece(e.drive_off(0), 0, 1)
+        self.assertEqual(len(e.runtime.latched), 1)
+        self.assertEqual(e.runtime.latch_threads, [threading.current_thread().name])
+        self.assertEqual(self.filed_as(e.runtime.latched[0]), 'bounds_violation')
+        self.assertEqual(e.runtime.latched[0], e.io.dead)
+
+    def test_the_start_up_dma_canary_is_latched_on_the_callers_thread_and_filed_as_a_bounds_violation(self):
+        e = self.env()
+        e.ops.on_call = lambda kind, record: setattr(e.ops, 'swallow_next', 1) if kind == 'read' else None
+        with self.assertRaises(pio.DmaCanaryError):
+            e.io.dma_canary()
+        self.assertEqual(e.runtime.latch_threads, [threading.current_thread().name])
+        self.assertEqual(self.filed_as(e.runtime.latched[0]), 'bounds_violation', e.runtime.latched[0])
+
+    def test_the_first_reason_is_kept_and_the_runtime_is_latched_once(self):
+        e = self.env()
+        with self.assertRaises(cl.BoundsViolation):
+            e.io.read_piece(e.drive_off(0), 0, 1)
+        first = e.io.dead
+        with self.assertRaises(cl.BoundsViolation):
+            e.io.read_piece(e.drive_off(0), 9, 1)
+        self.assertEqual(e.io.dead, first)
+        self.assertEqual(len(e.runtime.latched), 1)
+
+    def test_a_scheduler_crash_is_an_internal_error_not_a_bounds_violation(self):
+        e = self.env()
+        e.io._decide = lambda: 1 / 0
+        e.io.read_piece(e.drive_off(0), 2, 1).exception(10)
+        self.assertTrue(e.io.dead.startswith('P2PIO internal error'), e.io.dead)
+        self.assertEqual(self.filed_as(e.io.dead), 'op_throw')
+        self.assertEqual(e.runtime.latched, [])
+
+
+class DeadLayerTests(IOCase):
+    """A call decided before the layer died is not issued afterwards (the ``P2PDead`` docstring: nothing more is issued)."""
+
+    def test_a_layer_that_dies_while_the_cards_count_a_call_issues_no_syscall(self):
+        e = self.env()
+        link = e.links[0]
+        original = link.begin_io
+
+        def begin_io(bank, epoch):
+            e.io._die('%s: another thread found a violation' % pio.FATAL_PREFIX)
+            link.begin_io = original
+            return original(bank, epoch)
+        link.begin_io = begin_io
+        future = e.io.read_piece(e.drive_off(0), 2, 1)
+        self.assertIsInstance(future.exception(10), pio.P2PDead)
+        self.assertEqual(e.ops.calls, [], 'a syscall was issued after the layer was dead')
+        self.assertTrue(e.io.wait_idle(5))
+        self.assertEqual([link.inflight for link in e.links], [0] * 4)
+        self.assertEqual(e.rig.inflight, 0)
+
+    def test_a_layer_that_dies_while_the_iovecs_are_built_issues_no_syscall(self):
+        e = self.env()
+        link = e.links[2]
+        original = link.slot_view
+
+        def slot_view(bank, first_obj, n_obj):
+            e.io._die('%s: another thread found a violation' % pio.FATAL_PREFIX)
+            return original(bank, first_obj, n_obj)
+        link.slot_view = slot_view
+        future = e.io.read_piece(e.drive_off(0), 2, 1)
+        self.assertIsInstance(future.exception(10), pio.P2PDead)
+        self.assertEqual(e.ops.calls, [])
+        self.assertTrue(e.io.wait_idle(5))
+        self.assertEqual([link.inflight for link in e.links], [0] * 4)
+
+    def test_a_call_decided_just_before_the_layer_died_does_not_even_count_in_flight_on_the_cards(self):
+        e = self.env()
+        counted = []
+        for link in e.links:
+            original = link.begin_io
+            link.begin_io = lambda bank, epoch, original=original: counted.append(bank) or original(bank, epoch)
+        issue = e.io._do_issue
+
+        def late(req, call):
+            e.io._die('%s: another thread found a violation' % pio.FATAL_PREFIX)
+            return issue(req, call)
+        e.io._do_issue = late
+        future = e.io.read_piece(e.drive_off(0), 2, 1)
+        self.assertIsInstance(future.exception(10), pio.P2PDead)
+        self.assertEqual((counted, e.ops.calls), ([], []))
+        self.assertTrue(e.io.wait_idle(5))
+        self.assertEqual(e.io.stats()['inflight_calls'], 0)
+
+
+class WallClockDeadlineTests(IOCase):
+    """The deadlines of close() and wait_idle() are wall time: an injected clock (for the statistics) that stands still must not make them wait forever."""
+
+    def test_close_with_a_clock_that_stands_still_and_a_stuck_call_returns(self):
+        e = self.env(io_kwargs=dict(clock=lambda: 0.0))
+        (release, entered), = e.ops.hold_next(1)
+        e.io.read_piece(e.drive_off(0), 2, 1)
+        self.assertTrue(entered.wait(5))
+        outcome = []
+        closer = threading.Thread(target=lambda: outcome.append(e.io.close(timeout=0.2)), daemon=True)
+        closer.start()
+        closer.join(3.0)
+        alive = closer.is_alive()
+        release.set()
+        closer.join(5)
+        self.assertFalse(alive, 'close(timeout=0.2) was still waiting after 3 s')
+        self.assertEqual(outcome, [False])
+
+    def test_wait_idle_with_a_clock_that_stands_still_returns(self):
+        e = self.env(io_kwargs=dict(clock=lambda: 0.0))
+        (release, entered), = e.ops.hold_next(1)
+        e.io.read_piece(e.drive_off(0), 2, 1)
+        self.assertTrue(entered.wait(5))
+        started = time.monotonic()
+        self.assertFalse(e.io.wait_idle(0.2))
+        self.assertLess(time.monotonic() - started, 3.0)
+        release.set()
+        self.assertTrue(e.io.wait_idle(5))
+
+
 class InterfaceTests(unittest.TestCase):
     def test_signatures_are_the_frozen_ones_plus_one_optional_keyword(self):
         sig = inspect.signature
@@ -880,7 +1251,8 @@ class InterfaceTests(unittest.TestCase):
         self.assertEqual(init[:5], ['self', 'links', 'runtime', 'config', 'staging_info'], 'the order the WP4 factory calls it in')
         for name, parameter in list(sig(pio.P2PIO.__init__).parameters.items())[5:]:
             self.assertEqual(parameter.kind, inspect.Parameter.KEYWORD_ONLY, name)
-        for method in ('dma_canary', 'close', 'stats'):
+        self.assertEqual(sig(pio.P2PIO.__init__).parameters['allow_buffered'].default, False, 'production never passes it: the default refuses a buffered descriptor')
+        for method in ('dma_canary', 'close', 'stats', 'wait_idle'):
             self.assertTrue(callable(getattr(pio.P2PIO, method)))
 
     def test_the_futures_are_concurrent_futures(self):
@@ -922,10 +1294,10 @@ class ImportTests(unittest.TestCase):
         self.assertEqual((out.returncode, out.stdout.strip()), (0, 'clean'), out.stderr)
 
     def test_no_syntax_newer_than_python_3_10(self):
-        for name in ('ttkvp2p/cardlink.py', 'ttkvp2p/p2pio.py', 'tests/fake_card.py', 'tests/test_cardlink.py', 'tests/test_p2pio.py', 'tests/test_p2pio_mutants.py'):
+        for name in ('ttkvp2p/cardlink.py', 'ttkvp2p/p2pio.py', 'tests/fake_card.py', 'tests/test_cardlink.py', 'tests/test_p2pio.py', 'tests/test_p2pio_mutants.py',
+                     'tests/test_wp4_wiring.py'):
             path = os.path.join(PACKAGE_ROOT, name)
-            if not os.path.exists(path):
-                continue
+            self.assertTrue(os.path.exists(path), '%s is a file of this work package and must exist' % name)
             with open(path) as handle:
                 ast.parse(handle.read(), filename=name, feature_version=(3, 10))
 

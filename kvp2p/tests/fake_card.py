@@ -8,7 +8,10 @@ What is modelled, because the safety of the real path rests on it:
     aperture's bytes into the old bank's store and loads the new bank's store into it. A DMA that runs while the window is somewhere
     else than the test thinks lands in the wrong bank, and the tests can see it.
   * ``ALLOCATE_TLB`` hands out the lowest free 4 GiB window id (202 and up); ``EXPORT_TLB_DMABUF`` pins; the p2pmem file can be
-    mapped once (a second mapping fails with ENOMEM, the lease).
+    mapped once (a second mapping fails with ENOMEM, the lease). The lease ends when the MAPPING goes away (munmap: ``close()`` of the
+    mapping, which fails while a view of it exists, or its deallocation), not when the file descriptor closes.
+  * The CPU reaches the window only through ``ops.words``: aligned 8-byte loads and stores, counted per card (``FakeBoard.word_loads`` /
+    ``word_stores``); nothing narrower exists in this fake.
   * Faults: a ``CONFIGURE_TLB`` the card ignores (the window stays where it was), a bank that lands on another bank, a window held by
     another process, a pin that fails, and a sysfs record that disagrees.
   * ``Rig.inflight`` counts the bios the drive wrapper has in flight; every ``CONFIGURE_TLB`` records it, so a re-aim with a bio in
@@ -22,9 +25,11 @@ import errno
 import mmap
 import os
 import struct
+import sys
 import tempfile
 import threading
 import time
+import types
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 from ttkvp2p import cardlink as cl
@@ -81,14 +86,26 @@ def anonymous_file(name: str) -> int:
 
 
 class FakeRuntime(object):
-    """The one thing P2PIO asks of the runtime: ``latch``."""
+    """What P2PIO asks of the runtime. ``latch`` records the reason and the name of the thread that called it. The other members are WP3a's names (``drive.fd``,
+    ``store.data_off`` / ``num_slots`` / ``object_bytes``, ``canary_offset``) and are absent unless given (see ``wp3a_runtime``)."""
 
     def __init__(self, **attributes):
         self.latched: List[str] = []
+        self.latch_threads: List[str] = []
         self.__dict__.update(attributes)
 
     def latch(self, reason: str) -> None:
         self.latched.append(reason)
+        self.latch_threads.append(threading.current_thread().name)
+
+
+def wp3a_runtime(fd: int, data_off: int, num_slots: int, object_bytes: int, canary_offset: Optional[int] = 2 * PAGE, **attributes) -> FakeRuntime:
+    """A runtime with the shape of WP3a's ``KVP2PRuntime``: ``drive`` (a DriveFile: ``fd``), ``store`` (``data_off``, ``num_slots``, ``object_bytes``) and ``canary_offset``."""
+    members = dict(drive=types.SimpleNamespace(fd=fd), store=types.SimpleNamespace(data_off=data_off, num_slots=num_slots, object_bytes=object_bytes))
+    if canary_offset is not None:
+        members['canary_offset'] = canary_offset
+    members.update(attributes)
+    return FakeRuntime(**members)
 
 
 class Config(object):
@@ -132,6 +149,14 @@ class FakeBoard(object):
         self.bad_config = 0
         self.lock = threading.Lock()
         self.swaps = 0
+        self.word_loads = 0
+        self.word_stores = 0
+
+    def release_lease(self) -> None:
+        """The p2pmem mapping went away (munmap): the slice can be mapped again."""
+        self.slice_mapped = False
+        self.available = self.rig.region_size
+        self.rig.kmd.files['%s/%s/p2pmem/available' % (PCI_ROOT, self.bdf)] = str(self.rig.region_size)
 
     def point(self, x: int, y: int) -> Optional[int]:
         for bank, xy in NOC.items():
@@ -182,6 +207,58 @@ class FakeBoard(object):
             os.close(self.memfd)
         except OSError:
             pass
+
+
+class SliceMap(mmap.mmap):
+    """The mapping of the published p2pmem slice. Closing it (munmap) ends the lease; ``close`` fails with BufferError while a view of the mapping exists, and then
+    the lease stays until the last view is gone and the mapping is deallocated."""
+
+    lease_held = False
+
+    def _release(self) -> None:
+        if self.lease_held:
+            self.lease_held = False
+            self.board.release_lease()
+
+    def close(self):
+        super().close()                       # BufferError while a view exists: the lease is kept
+        self._release()
+
+    def __del__(self):
+        try:
+            self._release()
+        except Exception:                     # (interpreter shutdown)
+            pass
+
+
+class FakeWords(object):
+    """The 64-bit word view of a window (``ops.words``): ``words[i]`` is one aligned 8-byte load of window byte ``8 * i``, ``words[i] = v`` one 8-byte store."""
+
+    def __init__(self, window: 'FakeWindow'):
+        self.window = window
+        self.board = window.board
+        self.released = False
+
+    def _at(self, index: int) -> int:
+        if self.released:
+            raise ValueError('the word view was released')
+        lo = index * 8 - self.board.rig.region_base
+        if index < 0 or lo < 0 or lo + 8 > self.board.rig.region_size:
+            raise IndexError('window word %d is outside what the fake card backs' % index)
+        return lo
+
+    def __getitem__(self, index: int) -> int:
+        lo = self._at(index)
+        self.board.word_loads += 1
+        return int.from_bytes(self.board.aperture[lo:lo + 8], sys.byteorder)
+
+    def __setitem__(self, index: int, value: int) -> None:
+        lo = self._at(index)
+        self.board.word_stores += 1
+        self.board.aperture[lo:lo + 8] = int(value).to_bytes(8, sys.byteorder)
+
+    def release(self) -> None:
+        self.released = True
 
 
 class FakeWindow(object):
@@ -283,10 +360,7 @@ class FakeKmd(object):
             if fd not in self.fds:
                 raise OSError(errno.EBADF, 'not open')
             kind, board = self.fds.pop(fd)
-        if kind == 'allocate':                               # the lease ends with the last mapping
-            board.slice_mapped = False
-            board.available = board.rig.region_size
-            self.files['%s/%s/p2pmem/available' % (PCI_ROOT, board.bdf)] = str(board.rig.region_size)
+        # (the p2pmem lease does NOT end here: it ends when the mapping goes away, see SliceMap)
 
     @property
     def open_fds(self) -> int:
@@ -351,6 +425,9 @@ class FakeKmd(object):
         board.window_kind = kind
         return FakeWindow(board, kind)
 
+    def words(self, window: 'FakeWindow') -> FakeWords:
+        return FakeWords(window)
+
     def mmap_slice(self, fd: int, size: int):
         board = self._board(fd, 'allocate')
         if board.slice_mapped:
@@ -359,7 +436,10 @@ class FakeKmd(object):
         board.slice_mapped = True
         board.available = 0
         self.files['%s/%s/p2pmem/available' % (PCI_ROOT, board.bdf)] = '0'
-        return mmap.mmap(board.memfd, size)                    # a mapping of its own (the link unmaps it on close; the DRAM stays)
+        mapping = SliceMap(board.memfd, size)                  # a mapping of its own (the link unmaps it on close; the DRAM stays)
+        mapping.board = board
+        mapping.lease_held = True
+        return mapping
 
 
 _NAMES = {cl.IOCTL_SET_POWER_STATE: 'power', cl.IOCTL_ALLOCATE_TLB: 'allocate', cl.IOCTL_FREE_TLB: 'free',
@@ -417,7 +497,7 @@ class Rig(object):
 
     def make_link(self, shard: int, **overrides) -> cl.CardLink:
         board = self.boards[shard]
-        kwargs = dict(shard_object_bytes=self.shard_object_bytes, slot_objects=self.slot_objects, sysfs_class=CLASS_ROOT, sysfs_pci=PCI_ROOT, ops=self.kmd)
+        kwargs = dict(shard_object_bytes=self.shard_object_bytes, slot_objects=self.slot_objects, sysfs_class=CLASS_ROOT, sysfs_pci=PCI_ROOT, ops=self.kmd, settle_s=0.0)
         kwargs.update(overrides)
         link = self.cl.CardLink(board.chardev, board.bdf, board.allocate_path, self.window_id, **kwargs)
         self.links.append(link)
@@ -454,8 +534,6 @@ class DriveOps(object):
         self.swallow_next = 0                             # the next calls report success and move nothing
         self.sequence = 0
         self.over_next = 0                                # the next calls report one byte more than they were asked for
-        self.opened: List[str] = []
-        self.closed_fds: List[int] = []
         self.on_call = None                               # a hook(kind, call) run inside the call, after it counted as in flight
 
     def hold_next(self, count: int = 1) -> List[Tuple[threading.Event, threading.Event]]:
@@ -478,17 +556,6 @@ class DriveOps(object):
 
     def pwritev(self, fd: int, buffers: Sequence[Any], offset: int) -> int:
         return self._call('write', os.pwritev, fd, buffers, offset)
-
-    def open_drive(self, path: str) -> int:
-        self.opened.append(path)
-        return os.open(path, os.O_RDWR | getattr(os, 'O_DIRECT', 0))
-
-    def size(self, fd: int) -> int:
-        return os.lseek(fd, 0, os.SEEK_END)
-
-    def close_fd(self, fd: int) -> None:
-        self.closed_fds.append(fd)
-        os.close(fd)
 
     def _call(self, kind: str, function, fd: int, buffers: Sequence[Any], offset: int) -> int:
         lengths = [memoryview(b).nbytes for b in buffers]
@@ -586,15 +653,29 @@ class Env(object):
         self.links: List[Any] = []
         self.io: Any = None
         self.io_kwargs = dict(io_kwargs or {})
+        self.kept: List[Any] = []
         if start:
             self.start()
+
+    def keep(self, *views: Any) -> Any:
+        """Register slot views (or lists of them) a test made, so that ``close`` releases them before the links unmap: a view that outlives its link stops the unmap
+        and costs a garbage collection. Returns the first argument."""
+        for view in views:
+            self.kept.extend(view if isinstance(view, (list, tuple)) else [view])
+        return views[0] if views else None
 
     def start(self) -> None:
         self.links = self.rig.open_links()
         self.build_io()
 
+    def wp3a_runtime(self, **overrides) -> FakeRuntime:
+        """A runtime shaped like WP3a's, over this drive (the descriptor, the data region and the canary block of INTERFACE 3.4)."""
+        members = dict(fd=self.fd, data_off=self.DATA_OFF, num_slots=self.data_slots, object_bytes=self.object_bytes)
+        members.update(overrides)
+        return wp3a_runtime(**members)
+
     def build_io(self, **overrides) -> Any:
-        kwargs = dict(drive_fd=self.fd, drive_ops=self.ops, drive_range=(self.DATA_OFF, self.data_hi))
+        kwargs = dict(drive_fd=self.fd, drive_ops=self.ops, drive_range=(self.DATA_OFF, self.data_hi), allow_buffered=not self.direct)
         kwargs.update(self.io_kwargs)
         kwargs.update(overrides)
         self.io = self.io_module.P2PIO(self.links, self.runtime, self.config, self.rig.staging_info(), **kwargs)
@@ -638,6 +719,12 @@ class Env(object):
         self.ops.release_all()
         if self.io is not None:
             self.io.close(timeout=5)
+        for view in self.kept:
+            try:
+                view.release()
+            except (BufferError, ValueError):
+                pass
+        self.kept = []
         for link in self.links:
             link.close()
         self.rig.close()

@@ -24,18 +24,32 @@ aimed at.
     exception (EIO / EILSEQ are what the worker counts as media errors).
 
 ``read_piece`` and ``write_subrun`` return a ``Future[int]`` (bytes moved, which is ``n_obj * object_bytes`` or the future carries an
-exception). They never touch the device command queue. Importing this module imports neither ttnn nor the extension and starts
-nothing (invariant I14). Stdlib only; Python 3.10.
+exception). A future resolves only when **no call of its request is still in flight** (the worker releases the bank and the slots'
+in-flight counts when it sees the future done). They never touch the device command queue. Importing this module imports neither ttnn
+nor the extension and starts nothing (invariant I14). Stdlib only; Python 3.10.
 
-Additions to the frozen INTERFACE.md text, all backwards compatible (see the WP2b report): the optional keyword ``first_obj`` of
-``read_piece`` / ``write_subrun`` (the WP4 worker already passes it), and ``dma_canary()``, ``close()`` and ``stats()``.
+**What it asks of the runtime** (the names WP3a's ``KVP2PRuntime`` has; INTERFACE.md, amendment A2): ``runtime.drive.fd`` (the open
+O_DIRECT descriptor of the cache drive, which the runtime opened exclusively), ``runtime.store.data_off`` / ``num_slots`` /
+``object_bytes`` (the data region, which is the fence of every request), optionally ``runtime.canary_offset``, and ``runtime.latch(reason)``.
+It never opens the device itself, never guesses a data region (a runtime that states none is refused and the tier stays UNAVAILABLE), and refuses a
+descriptor that is not O_DIRECT (buffered I/O would make the CPU copy the cards' BAR pages).
+
+**Threads (I7).** The layer's own threads (``kvp2p-sched``, ``kvp2p-io_N``) never call into the runtime. A fatal fault found there stops the layer
+and is recorded in ``dead`` (a reason that begins ``P2PIO bounds violation``, which the runtime files under that latch code); the worker latches the
+tier from the engine thread at its next ``service``. A fault found on the caller's thread (a bad request, the start-up DMA canary) is latched here, on
+that thread.
+
+Additions to the frozen INTERFACE.md text, all backwards compatible (INTERFACE.md, amendment A2): the optional keyword ``first_obj`` of
+``read_piece`` / ``write_subrun`` (the WP4 worker already passes it), and ``dma_canary()``, ``close()``, ``stats()``, ``wait_idle()`` and ``dead``.
 """
 
 import collections
 import concurrent.futures
 import errno
+import fcntl
 import hashlib
 import logging
+import operator
 import os
 import threading
 import time
@@ -54,8 +68,8 @@ logger = logging.getLogger(__name__)
 
 DMA_CANARY_OFFSET = 2 * PAGE          # the drive's DMA canary block (INTERFACE 3.4: LBA 2-3, 8 KiB)
 DMA_CANARY_BYTES = 2 * PAGE
-MIN_DATA_OFFSET = 1 << 20             # the data region starts MiB-aligned after the superblock and canary (INTERFACE 3.4); nothing below it is ever read or written as data
 DEFAULT_DRAIN_S = 15.0                # design 2.9: the drain waits 15 s or less for in-flight bios
+FATAL_PREFIX = 'P2PIO bounds violation'   # begins every reason of a fatal fault found by this layer; the runtime's latch classifier files it as bounds_violation
 
 
 def _iov_max() -> int:
@@ -82,7 +96,8 @@ class P2PClosed(P2PIOError):
 
 
 class P2PDead(P2PIOError):
-    """The I/O layer stopped itself after a canary or bounds violation (the tier is latched); nothing more is issued."""
+    """The I/O layer stopped itself after a canary or bounds violation (the tier is latched); nothing more is issued, not even a call that was
+    already decided."""
 
 
 class DmaCanaryError(P2PIOError):
@@ -106,15 +121,26 @@ class SystemDriveOps(object):
     def pwritev(self, fd: int, buffers: Sequence[Any], offset: int) -> int:
         return os.pwritev(fd, buffers, offset)
 
-    def open_drive(self, path: str) -> int:
-        """Not O_EXCL: the runtime owns the exclusive claim; this is the fallback when it hands over no descriptor."""
-        return os.open(path, os.O_RDWR | getattr(os, 'O_DIRECT', 0) | getattr(os, 'O_CLOEXEC', 0))
 
-    def size(self, fd: int) -> int:
-        return os.lseek(fd, 0, os.SEEK_END)
+def fd_is_direct(fd: int) -> bool:
+    """Whether the descriptor is open with O_DIRECT (False for a bad descriptor and where the platform has no O_DIRECT)."""
+    flag = getattr(os, 'O_DIRECT', 0)
+    if not flag:
+        return False
+    try:
+        return bool(fcntl.fcntl(fd, fcntl.F_GETFL) & flag)
+    except (OSError, ValueError, OverflowError):
+        return False
 
-    def close_fd(self, fd: int) -> None:
-        os.close(fd)
+
+def _index(value: Any) -> Optional[int]:
+    """``value`` as an int if it is one (anything with ``__index__``, never a bool), else None."""
+    if isinstance(value, bool):
+        return None
+    try:
+        return operator.index(value)
+    except TypeError:
+        return None
 
 
 def vector_io(function: Callable[[int, Sequence[Any], int], int], fd: int, views: Sequence[Any], offset: int, total: int) -> int:
@@ -204,16 +230,17 @@ class _Request(object):
 class P2PIO(object):
     def __init__(self, links: Sequence[Any], runtime: Any, config: Any, staging_info: dict, *,
                  drive_fd: Optional[int] = None, drive_ops: Any = None, drive_range: Optional[Tuple[int, int]] = None,
-                 restore_run_objects: Optional[int] = None, canary_offset: int = DMA_CANARY_OFFSET,
+                 restore_run_objects: Optional[int] = None, canary_offset: Optional[int] = None, allow_buffered: bool = False,
                  clock: Callable[[], float] = time.monotonic, nonce: Optional[bytes] = None):
-        """``links`` are the four opened ``CardLink`` s (any order: the shard map comes from each link's ``shard``), ``runtime`` is the process-wide runtime (only
-        ``latch(reason)`` is used, and ``drive_fd`` / ``data_off`` / ``num_slots`` / ``object_bytes`` if present), ``config`` is the tier's ``P2PConfig`` (read by
-        attribute name with the design's defaults), ``staging_info`` is ``qwen_p2p_staging_info``.
+        """``links`` are the four opened ``CardLink`` s (any order: the shard map comes from each link's ``shard``), ``runtime`` is the process-wide runtime (see the
+        module docstring for what is read from it), ``config`` is the tier's ``P2PConfig`` (read by attribute name with the design's defaults), ``staging_info`` is
+        ``qwen_p2p_staging_info``.
 
-        The drive descriptor is, in order: ``drive_fd``, ``runtime.drive_fd`` (an int or a callable), or ``config.nvme_device`` opened O_DIRECT here (and closed by
-        ``close``). ``drive_range`` is the byte range of the drive that may be read or written as DATA; default ``[runtime.data_off, + num_slots * object_bytes)`` if the
-        runtime says, else ``[1 MiB, size of the drive)``, so the superblock and the DMA canary block are never data. ``restore_run_objects`` caps the objects of one
-        ``preadv`` (default: the whole run, as the design says; the W1 sweeps may lower it)."""
+        The drive descriptor is ``drive_fd`` if given, else ``runtime.drive.fd``; there is no other source, and it must be open O_DIRECT unless ``allow_buffered`` (a
+        test on a file system without O_DIRECT; the production wiring never passes it). ``drive_range`` is the byte range of the drive that may be read or written
+        as DATA: ``drive_range`` if given, else ``[runtime.store.data_off, + num_slots * object_bytes)``; a runtime that states neither is refused. The superblock and
+        the DMA canary block are never data. ``canary_offset`` is where the start-up DMA canary reads and writes (default ``runtime.canary_offset``, else the frozen
+        8192). ``restore_run_objects`` caps the objects of one ``preadv`` (default: the whole run, as the design says; the W1 sweeps may lower it)."""
         self._links_given = list(links)
         self._runtime = runtime
         self._cfg = config
@@ -221,7 +248,8 @@ class P2PIO(object):
         self._nonce = nonce if nonce is not None else os.urandom(16)
         self._drive = drive_ops or SystemDriveOps()
         self._fd: Optional[int] = None
-        self._owns_fd = False
+        self._allow_buffered = bool(allow_buffered)
+        self._own_threads: set = set()          # idents of the layer's own threads (the scheduler and the pool): they never call into the runtime
         self._pool: Optional[concurrent.futures.ThreadPoolExecutor] = None
         self._thread: Optional[threading.Thread] = None
         self._cv = threading.Condition()
@@ -256,7 +284,7 @@ class P2PIO(object):
         return default if value is None else value
 
     def _setup(self, staging_info: dict, drive_fd: Optional[int], drive_range: Optional[Tuple[int, int]],
-               restore_run_objects: Optional[int], canary_offset: int) -> None:
+               restore_run_objects: Optional[int], canary_offset: Optional[int]) -> None:
         links = self._links_given
         if not links:
             raise P2PIOError('no card links')
@@ -309,38 +337,34 @@ class P2PIO(object):
         self._threads = max(1, int(self._setting('io_threads', 8)))
         self._qd_objects = max(1, int(self._setting('io_queue_depth_objects', 8)))
         self._drain_s = float(self._setting('shutdown_drain_s', DEFAULT_DRAIN_S))
-        self._canary_offset = int(canary_offset)
         # the drive
         self._resolve_drive(drive_fd)
         self._drive_range = self._resolve_range(drive_range)
+        self._canary_offset = self._resolve_canary_offset(canary_offset)
         # threads last: nothing can fail after this
-        self._pool = concurrent.futures.ThreadPoolExecutor(max_workers=self._threads, thread_name_prefix='kvp2p-io')
+        self._pool = concurrent.futures.ThreadPoolExecutor(max_workers=self._threads, thread_name_prefix='kvp2p-io', initializer=self._mark_own_thread)
         self._thread = threading.Thread(target=self._scheduler, name='kvp2p-sched', daemon=True)
         self._thread.start()
 
     def _resolve_drive(self, drive_fd: Optional[int]) -> None:
         if drive_fd is None:
-            held = getattr(self._runtime, 'drive_fd', None)
-            drive_fd = held() if callable(held) else held
-        if drive_fd is not None:
-            self._fd, self._owns_fd = int(drive_fd), False
-            return
-        path = getattr(self._cfg, 'nvme_device', None)
-        if not path:
-            raise P2PIOError('no drive: no drive_fd, runtime.drive_fd or config.nvme_device')
-        try:
-            self._fd, self._owns_fd = self._drive.open_drive(path), True
-        except OSError as error:
-            raise P2PIOError('cannot open the drive %s: %s' % (path, error))
+            drive_fd = getattr(getattr(self._runtime, 'drive', None), 'fd', None)
+        fd = _index(drive_fd)
+        if fd is None or fd < 0:
+            raise P2PIOError('no drive: the runtime holds no open drive (runtime.drive.fd) and no drive_fd was passed; this layer never opens the device itself')
+        if not self._allow_buffered and not fd_is_direct(fd):
+            raise P2PIOError('the drive descriptor %d is not open O_DIRECT: buffered I/O would make the CPU copy the cards\' BAR pages, so it is refused' % fd)
+        self._fd = fd
 
     def _resolve_range(self, drive_range: Optional[Tuple[int, int]]) -> Tuple[int, int]:
         if drive_range is None:
-            data_off = getattr(self._runtime, 'data_off', None)
-            slots = getattr(self._runtime, 'num_slots', None)
-            if isinstance(data_off, int) and isinstance(slots, int) and slots > 0:
-                drive_range = (data_off, data_off + slots * self.object_bytes)
-            else:
-                drive_range = (MIN_DATA_OFFSET, int(self._drive.size(self._fd)))
+            store = getattr(self._runtime, 'store', None)
+            data_off, slots, stride = (_index(getattr(store, name, None)) for name in ('data_off', 'num_slots', 'object_bytes'))
+            if data_off is None or slots is None or slots <= 0:
+                raise P2PIOError('the runtime states no data region (runtime.store.data_off / num_slots): there is no fence to enforce, and this layer does not guess one')
+            if stride is not None and stride != self.object_bytes:
+                raise P2PIOError('the runtime\'s objects are %d bytes, the cards\' are %d (%d cards x %d)' % (stride, self.object_bytes, self.chips, self.shard_object_bytes))
+            drive_range = (data_off, data_off + slots * self.object_bytes)
         lo, hi = int(drive_range[0]), int(drive_range[1])
         if lo < 0 or hi <= lo or lo % PAGE or hi % PAGE:
             raise P2PIOError('the data range [%d, %d) must be non-empty and 4 KiB aligned' % (lo, hi))
@@ -348,15 +372,22 @@ class P2PIO(object):
             raise P2PIOError('the data range starts at %d, inside the superblock / DMA canary block (below %d)' % (lo, DMA_CANARY_OFFSET + DMA_CANARY_BYTES))
         return lo, hi
 
+    def _resolve_canary_offset(self, canary_offset: Optional[int]) -> int:
+        """An explicit offset is taken as given (``dma_canary`` checks it against the block before every use); the runtime's must be inside the frozen block now."""
+        if canary_offset is not None:
+            return int(canary_offset)
+        offered = getattr(self._runtime, 'canary_offset', None)
+        if offered is None:
+            return DMA_CANARY_OFFSET
+        offset = _index(offered)
+        if offset is None or offset < DMA_CANARY_OFFSET or offset + PAGE > DMA_CANARY_OFFSET + DMA_CANARY_BYTES or offset % PAGE:
+            raise P2PIOError('the runtime puts the DMA canary at %r, outside the canary block [%d, +%d)' % (offered, DMA_CANARY_OFFSET, DMA_CANARY_BYTES))
+        return offset
+
     def _teardown_failed_start(self) -> None:
         if self._pool is not None:
             self._pool.shutdown(wait=False)
-        if self._owns_fd and self._fd is not None:
-            try:
-                self._drive.close_fd(self._fd)
-            except OSError:
-                pass
-            self._fd = None
+        self._fd = None
 
     # -- the public surface ----------------------------------------------------------------------------------------
     def read_piece(self, drive_off: int, bank: int, n_obj: int, first_obj: int = 0) -> 'concurrent.futures.Future[int]':
@@ -373,9 +404,15 @@ class P2PIO(object):
         """Count and latch a bounds violation; the caller raises the returned exception."""
         with self._cv:
             self._stats['bounds_violations'] += 1
-        logger.error('ttkvp2p: P2PIO bounds violation: %s', message)
-        self._die('P2PIO bounds violation: %s' % message)           # stops issuing, fails what is queued, latches the tier
+        logger.error('ttkvp2p: %s: %s', FATAL_PREFIX, message)
+        self._die('%s: %s' % (FATAL_PREFIX, message))               # stops issuing, fails what is queued, records why, latches the tier (from a caller's thread)
         return BoundsViolation(message)
+
+    def _mark_own_thread(self) -> None:
+        self._own_threads.add(threading.get_ident())
+
+    def _on_own_thread(self) -> bool:
+        return threading.get_ident() in self._own_threads
 
     def _latch(self, reason: str) -> None:
         hook = getattr(self._runtime, 'latch', None)
@@ -473,6 +510,7 @@ class P2PIO(object):
         return ('issue', req, call)
 
     def _scheduler(self) -> None:
+        self._mark_own_thread()
         try:
             while True:
                 with self._cv:
@@ -494,7 +532,7 @@ class P2PIO(object):
                     self._do_issue(action[1], action[2])
         except BaseException as error:           # the layer must never die silently with work queued
             logger.exception('ttkvp2p: the P2PIO scheduler thread failed')
-            self._die('the I/O scheduler thread failed: %s: %s' % (type(error).__name__, error))
+            self._die('P2PIO internal error: the I/O scheduler thread failed: %s: %s' % (type(error).__name__, error))
 
     def _do_aim(self, bank: int) -> None:
         """Every card's window to ``bank`` (no bio in flight: the scheduler only gets here idle), each with its canary read-back."""
@@ -506,7 +544,7 @@ class P2PIO(object):
             with self._cv:
                 if isinstance(error, CanaryMismatch):
                     self._stats['canary_mismatches'] += 1
-            self._die('re-aim to bank %d failed: %s: %s' % (bank, type(error).__name__, error))
+            self._die('%s: re-aim to bank %d failed: %s: %s' % (FATAL_PREFIX, bank, type(error).__name__, error))
             return
         tokens = tuple(link.aim_epoch for link in self._by_shard)
         took = self._clock() - began
@@ -520,15 +558,21 @@ class P2PIO(object):
             self._cv.notify_all()
 
     def _do_issue(self, req: _Request, call: _Call) -> None:
-        """Count the call in flight on every card, at the epoch it was planned for, and hand it to the pool."""
+        """Count the call in flight on every card, at the epoch it was planned for, and hand it to the pool. The layer may have died since the call was decided: it
+        is checked again here, before the cards count the call, and again on the pool thread right before the syscall (``_execute``); a dead layer completes the call
+        with ``P2PDead`` instead."""
         with self._cv:
             tokens = self._tokens
+            dead = self._dead
             if req.kind == 'read' and req.next_call == 1:
                 waited = self._clock() - req.t_enqueue
                 self._stats['restore_wait_s_max'] = max(self._stats['restore_wait_s_max'], waited)
                 if req.behind_spill:
                     self._stats['restore_behind_spill'] += 1
                     self._stats['restore_behind_spill_wait_s_max'] = max(self._stats['restore_behind_spill_wait_s_max'], waited)
+        if dead:
+            self._complete(call, 0, P2PDead(dead), 0.0, 0.0)
+            return
         call.tokens = tokens
         started = 0
         try:
@@ -590,6 +634,9 @@ class P2PIO(object):
         try:
             iovs = self._build_iovecs(call)
             self._check_iovecs(call, iovs)
+            dead = self._dead
+            if dead:                                  # the layer died after this call was decided: nothing more is issued
+                raise P2PDead(dead)
             nbytes = self._transfer(call, iovs)
         except BaseException as caught:            # the request records it; the scheduler decides what it means
             error = caught
@@ -638,7 +685,7 @@ class P2PIO(object):
                 finished = True
             self._cv.notify_all()
         if fatal:
-            self._die('%s: %s' % (type(error).__name__, error))
+            self._die('%s: %s: %s' % (FATAL_PREFIX, type(error).__name__, error))
         if finished:
             self._resolve(req)
 
@@ -666,7 +713,9 @@ class P2PIO(object):
         return out
 
     def _die(self, reason: str) -> None:
-        """A canary, bounds or scheduler fault: stop issuing, fail what is queued, latch the tier."""
+        """A canary, bounds or scheduler fault: stop issuing, fail what is queued, record why (``dead``). The tier is latched from here only when this runs on a
+        caller's thread (a bad request or the start-up canary: the engine thread). On the layer's own threads it only records: the runtime belongs to the engine
+        thread (I7), and the worker latches from there when it sees ``dead``."""
         with self._cv:
             if self._dead:
                 return
@@ -675,7 +724,8 @@ class P2PIO(object):
             pending = self._drain_queues(P2PDead(reason))
             self._cv.notify_all()
         logger.error('ttkvp2p: the I/O layer stopped: %s', reason)
-        self._latch(reason)
+        if not self._on_own_thread():
+            self._latch(reason)
         for req in pending:
             self._resolve(req)
 
@@ -692,7 +742,7 @@ class P2PIO(object):
             for d, link in enumerate(self._by_shard):
                 self._canary_card(d, link)
         except BaseException as error:
-            self._die('DMA canary failed: %s: %s' % (type(error).__name__, error))
+            self._die('%s: DMA canary failed: %s: %s' % (FATAL_PREFIX, type(error).__name__, error))
             raise
         finally:
             with self._cv:
@@ -766,18 +816,18 @@ class P2PIO(object):
 
     def wait_idle(self, timeout: float = 5.0) -> bool:
         """True once nothing is queued or in flight (a test and shutdown helper)."""
-        end = self._clock() + timeout
+        end = time.monotonic() + timeout                       # (wall time: the injectable clock is for the statistics, and may stand still in a test)
         with self._cv:
             while self._inflight_calls or self._restore_q or self._spill_q or self._to_resolve:
-                left = end - self._clock()
+                left = end - time.monotonic()
                 if left <= 0:
                     return False
                 self._cv.wait(min(left, 0.05))
             return True
 
     def close(self, timeout: Optional[float] = None) -> bool:
-        """Fail what is queued, wait up to ``timeout`` (``shutdown_drain_s``) for the calls in flight to return, stop the threads and release the drive descriptor if
-        it is ours. Returns True when every call returned. If not, the cards' links are marked abandoned: a bio may still be in flight, DMA cannot be cancelled, and
+        """Fail what is queued, wait up to ``timeout`` (``shutdown_drain_s``) for the calls in flight to return and stop the threads (the drive descriptor is the
+        runtime's and is left alone). Returns True when every call returned. If not, the cards' links are marked abandoned: a bio may still be in flight, DMA cannot be cancelled, and
         nothing may be unmapped under it (design 2.9)."""
         with self._cv:
             if self._closed:
@@ -787,10 +837,10 @@ class P2PIO(object):
             self._cv.notify_all()
         for req in pending:
             self._resolve(req)
-        end = self._clock() + (self._drain_s if timeout is None else timeout)
+        end = time.monotonic() + (self._drain_s if timeout is None else timeout)
         with self._cv:
             while self._inflight_calls:
-                left = end - self._clock()
+                left = end - time.monotonic()
                 if left <= 0:
                     break
                 self._cv.wait(min(left, 0.05))
@@ -813,10 +863,4 @@ class P2PIO(object):
                 abandon = getattr(link, 'abandon', None)
                 if abandon is not None:
                     abandon()
-        elif self._owns_fd and self._fd is not None:
-            try:
-                self._drive.close_fd(self._fd)
-            except OSError:
-                pass
-            self._fd = None
         return drained

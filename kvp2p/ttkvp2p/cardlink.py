@@ -12,7 +12,18 @@ A port of the Qwen ``TtLink`` (``qwen_p2p_restore.py``) with the Gemma changes:
   * the published slice is mapped once and never handed out whole: ``slot_view`` returns per-object views inside one bank's
     slot, bounds-checked, and ``locate`` lets the I/O layer prove where any iovec points (INTERFACE: DMA-only views);
   * ``begin_io`` / ``end_io`` count the bios in flight on this card; ``aim`` refuses while any is (the window must never move
-    under a DMA), and ``begin_io`` refuses an I/O planned in an earlier aim epoch.
+    under a DMA), and ``begin_io`` refuses an I/O planned in an earlier aim epoch;
+  * every CPU access to the window is one **aligned 8-byte load or store** (``ops.words``: a ``Q`` view of the mapping), never a ``memcpy``
+    of the range: on an uncached mapping a ``memcpy`` may become byte-wide transactions, and whether the card accepts those is not known.
+
+Not proven on a card (the W1 kit settles each; the CPU tests use a fake kernel and cannot):
+
+  * the uncached mapping of window 202 (the P1 probe proved write-combining only), and the claim that an 8-byte non-posted read cannot
+    complete before the posted ``CONFIGURE_TLB`` writes landed;
+  * only the bank's first NOC endpoint is used. The Qwen ``TtLink`` fell back to the bank's other endpoints when the first did not store,
+    because it is not known whether they are interchangeable for a PCIe window. This module fails closed instead (``CanaryMismatch`` or a
+    refused open), so the risk is availability, not safety;
+  * the ordering value ``relaxed`` for the canary writes, and the sysfs file names under ``p2pmem`` (taken from the Qwen module that ran on a card).
 
 Everything the kernel is asked for goes through one small ``ops`` object (``SystemOps`` by default), so the CPU tests run the
 whole class against a fake driver (``tests/fake_card.py``). Importing this module imports neither ttnn nor the extension and
@@ -39,7 +50,7 @@ import struct
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -47,11 +58,13 @@ PAGE = 4096
 GIB = 1 << 30
 WINDOW_4G = 4 * GIB
 FIRST_4G_TLB = 202                    # Blackhole: 202 windows of 2 MiB, then 8 of 4 GiB
+DEFAULT_SETTLE_S = 1.0                # after SET_POWER_STATE, as the Qwen TtLink waits (the DRAM PHY wake-up); a test passes 0
 WINDOW_TOP = 0xFF000000               # the top 16 MiB of a 4 GiB window is not DRAM
 NOC_COORDINATE_LIMIT = 64             # the TLB register's x and y fields are 6 bits wide
 ORDERINGS = {'relaxed': 0, 'strict': 1, 'posted': 2}
 CANARY_BYTES = PAGE                   # the canary page at the start of every bank's range; slot data follows it
 CANARY_COMPARE_BYTES = 8              # what an aim reads back (one non-posted 8-byte read)
+WORD = 8                              # the width of every CPU access to the window
 GEMMA_SHARD_OBJECT_BYTES = 10 * 69632  # 696,320: one object on one card = 10 tensors x one 69,632-byte block row
 MAX_SLOT_OBJECTS = 128                # the device digest takes at most 128 blocks (INTERFACE 3.3)
 SYSFS_CLASS = '/sys/class/tenstorrent'
@@ -132,6 +145,11 @@ class SystemOps(object):
 
     def mmap_window(self, fd: int, size: int, offset: int):
         return mmap.mmap(fd, size, flags=mmap.MAP_SHARED, prot=mmap.PROT_READ | mmap.PROT_WRITE, offset=offset)
+
+    def words(self, mapping):
+        """The window mapping as a view of aligned 64-bit words: ``words[i]`` is one 8-byte load of byte ``8 * i`` and ``words[i] = v`` one 8-byte store. The caller
+        releases the view before closing the mapping."""
+        return memoryview(mapping).cast('B').cast('Q')
 
     def open_allocate(self, path: str) -> int:
         return os.open(path, os.O_RDWR | getattr(os, 'O_CLOEXEC', 0))
@@ -251,7 +269,7 @@ class CardLink(object):
 
     def __init__(self, chardev: str, bdf: str, allocate_path: str, window_id: int = FIRST_4G_TLB, *,
                  shard_object_bytes: int = GEMMA_SHARD_OBJECT_BYTES, slot_objects: Optional[int] = None,
-                 ordering: str = 'relaxed', cpu_mapping: str = 'uc', settle_s: float = 0.0,
+                 ordering: str = 'relaxed', cpu_mapping: str = 'uc', settle_s: float = DEFAULT_SETTLE_S,
                  sysfs_class: Optional[str] = None, sysfs_pci: Optional[str] = None,
                  ops: Any = None, nonce: Optional[bytes] = None):
         if ordering not in ORDERINGS:
@@ -284,6 +302,7 @@ class CardLink(object):
         self._pin_fd: Optional[int] = None
         self._p2p_fd: Optional[int] = None
         self._cpu = None
+        self._words = None
         self._slice_map = None
         self._view: Optional[memoryview] = None
         self._base_address = 0
@@ -301,7 +320,7 @@ class CardLink(object):
         self._window_held = False
         self.proved = False                       # every bank's canary page was written, then read back, before any data
         self.info: Dict[str, Any] = {}
-        self.stats: Dict[str, int] = dict(aims=0, flushes=0, flush_mismatches=0, flush_errors=0, canary_mismatches=0)
+        self.stats: Dict[str, int] = dict(aims=0, flushes=0, flush_mismatches=0, flush_errors=0, canary_mismatches=0, unmap_failed=0)
 
     # -- state -----------------------------------------------------------------------------------------------------
     @property
@@ -386,6 +405,9 @@ class CardLink(object):
         window_base = (self.window_id - FIRST_4G_TLB) * WINDOW_4G
         self._slice_window_off = info['offset'] - window_base
         self._slice_size = info['size']
+        if self._slice_window_off % PAGE:
+            raise CardLinkUnavailable('the published slice of %s starts at window offset %#x, not on a 4 KiB boundary: a DMA target inside it could not be O_DIRECT aligned'
+                                      % (self.bdf, self._slice_window_off))
         if self._slice_window_off < 0 or self._slice_window_off + self._slice_size > WINDOW_4G:
             raise CardLinkUnavailable('the published slice [%d, +%d) of %s is not inside window %d' % (info['offset'], info['size'], self.bdf, self.window_id))
         self._plan_banks(staging_info)
@@ -476,6 +498,10 @@ class CardLink(object):
             self._cpu = ops.mmap_window(self._fd, self.cpu_window_bytes, offset)
         except (OSError, ValueError) as error:
             raise CardLinkUnavailable('cannot map TLB window %d of %s (%s): %s' % (self.window_id, self.bdf, self.cpu_mapping, error))
+        try:
+            self._words = ops.words(self._cpu)
+        except (OSError, ValueError, TypeError, BufferError) as error:
+            raise CardLinkUnavailable('cannot take a 64-bit word view of the window of %s: %s' % (self.bdf, error))
         self._map_slice()
         self._write_canaries()
         self._prove_canaries()
@@ -553,11 +579,25 @@ class CardLink(object):
             logger.warning('ttkvp2p: after mapping the whole slice of %s, p2pmem reports %s bytes still available', self.bdf, self.info['available_after_map'])
 
     # -- the canaries ----------------------------------------------------------------------------------------------
+    def _word_span(self, window_off: int, size: int) -> Tuple[int, int]:
+        """(first word, word count) of a CPU access. Anything not made of whole aligned words is a bug in the caller: a narrower access to an uncached
+        window is exactly what this module does not do."""
+        if size <= 0 or size % WORD or window_off < 0 or window_off % WORD:
+            raise BoundsViolation('a CPU access of %d bytes at window offset %#x is not made of whole aligned 8-byte words' % (size, window_off))
+        return window_off // WORD, size // WORD
+
     def _cpu_read(self, window_off: int, size: int) -> bytes:
-        return bytes(self._cpu[window_off:window_off + size])
+        """``size`` bytes at ``window_off`` of the window, one aligned 8-byte load at a time."""
+        first, count = self._word_span(window_off, size)
+        words = self._words
+        return struct.pack('=%dQ' % count, *[words[first + i] for i in range(count)])
 
     def _cpu_write(self, window_off: int, data: bytes) -> None:
-        self._cpu[window_off:window_off + len(data)] = data
+        """``data`` to ``window_off`` of the window, one aligned 8-byte store at a time."""
+        first, count = self._word_span(window_off, len(data))
+        words = self._words
+        for i, value in enumerate(struct.unpack('=%dQ' % count, bytes(data))):
+            words[first + i] = value
 
     def _write_canaries(self) -> None:
         """A fresh canary page in every bank. The nonce is new for every open, so a canary left in the DRAM by an earlier process (or a write that
@@ -688,7 +728,7 @@ class CardLink(object):
                 self.stats['flush_mismatches'] += 1
 
     def scratch_write(self, bank: int, data: bytes) -> None:
-        """CPU write of up to one page through the UC window at the start of ``bank``'s slot (object 0). For the DMA canary only; the bank must be the aimed one."""
+        """CPU write of up to one page (whole 8-byte words) through the UC window at the start of ``bank``'s slot (object 0). For the DMA canary only; the bank must be the aimed one."""
         with self._lock:
             self._require_open()
             plan = self._scratch_plan(bank, len(data))
@@ -706,8 +746,8 @@ class CardLink(object):
             raise StaleAim('scratch access to bank %s while the window of %s is at bank %s' % (bank, self.bdf, self._aimed))
         if self._inflight:
             raise AimWhileBusy('scratch access on %s with %d bio(s) in flight' % (self.bdf, self._inflight))
-        if not 0 < size <= PAGE:
-            raise BoundsViolation('scratch access of %d bytes (at most one page)' % size)
+        if not 0 < size <= PAGE or size % WORD:
+            raise BoundsViolation('scratch access of %d bytes (whole 8-byte words, at most one page)' % size)
         return self._plan[bank]
 
     # -- close -----------------------------------------------------------------------------------------------------
@@ -715,6 +755,26 @@ class CardLink(object):
         """A bio of this card may still be in flight and cannot be cancelled: ``close`` will release nothing (the process is going away; the export keeps the
         window pinned and the kernel tears the mappings down at exit)."""
         self._abandoned = True
+
+    def _unmap(self, mapped: Any, what: str) -> None:
+        """Close one mapping. A view of it that is still alive (a finished I/O whose view has not been collected, or one a caller kept) exports it and stops the
+        unmap: one collection is tried, and if the mapping still cannot close that is counted and logged (the kernel unmaps it when the last view goes; until then
+        the p2pmem lease is held)."""
+        for attempt in (0, 1):
+            try:
+                mapped.close()
+                return
+            except BufferError:
+                if attempt == 0:
+                    gc.collect()
+            except ValueError:                      # already closed
+                return
+            except OSError as error:
+                logger.warning('ttkvp2p: unmapping the %s mapping of %s failed: %s', what, self.bdf, error)
+                self.stats['unmap_failed'] += 1
+                return
+        self.stats['unmap_failed'] += 1
+        logger.warning('ttkvp2p: the %s mapping of %s could not be unmapped: views of it are still alive; the kernel unmaps it when they are released', what, self.bdf)
 
     def close(self) -> None:
         with self._lock:
@@ -725,25 +785,19 @@ class CardLink(object):
         if abandoned:
             logger.warning('ttkvp2p: the link to %s is left open: a bio may still be in flight', self.bdf)
             return
-        if self._view is not None:
-            try:
-                self._view.release()
-            except BufferError:
-                pass
-            self._view = None
-        for name in ('_slice_map', '_cpu'):
-            mapped = getattr(self, name)
-            if mapped is None:
-                continue
-            for _attempt in (0, 1):
+        for name in ('_view', '_words'):
+            held = getattr(self, name)
+            if held is not None:
                 try:
-                    mapped.close()
-                    break
-                except BufferError:
-                    gc.collect()                    # (a view of a finished I/O that has not been collected yet still exports the mapping)
-                except (OSError, ValueError):
-                    break
-            setattr(self, name, None)
+                    held.release()
+                except (BufferError, ValueError):
+                    pass
+                setattr(self, name, None)
+        for name, what in (('_slice_map', 'p2pmem'), ('_cpu', 'window')):
+            mapped = getattr(self, name)
+            if mapped is not None:
+                self._unmap(mapped, what)
+                setattr(self, name, None)
         for name in ('_p2p_fd', '_pin_fd'):
             descriptor = getattr(self, name)
             if descriptor is not None:

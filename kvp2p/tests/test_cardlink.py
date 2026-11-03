@@ -6,10 +6,12 @@ import errno
 import gc
 import inspect
 import logging
+import mmap
 import os
 import re
 import sys
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PACKAGE_ROOT = os.environ.get('TTKVP2P_PACKAGE_ROOT') or os.path.dirname(HERE)
@@ -195,6 +197,12 @@ class HostCheckTests(RigCase):
                 finally:
                     rig.close()
 
+    def test_a_published_slice_that_does_not_start_on_a_page_boundary_is_refused(self):
+        rig = self.rig()
+        path = '%s/tenstorrent!%d/p2pmem/offset' % (fc.CLASS_ROOT, rig.boards[0].index)
+        rig.kmd.files[path] = str(int(rig.kmd.files[path]) + 64)
+        self.refused(rig, '4 KiB boundary')
+
     def test_the_pci_cores_size_must_equal_the_drivers(self):
         rig = self.rig()
         rig.kmd.files['%s/%s/p2pmem/size' % (fc.PCI_ROOT, fc.BDFS[0])] = str(rig.region_size - PAGE)
@@ -271,6 +279,18 @@ class HostCheckTests(RigCase):
         link = cl.CardLink('/dev/tenstorrent/by-name', fc.BDFS[0], 'x', 202, sysfs_class=fc.CLASS_ROOT, sysfs_pci=fc.PCI_ROOT, ops=rig.kmd)
         with self.assertRaises(cl.CardLinkUnavailable):
             link.open(rig.staging_info())
+
+    def test_the_default_wait_after_the_power_state_is_the_one_the_qwen_link_uses(self):
+        self.assertEqual(inspect.signature(cl.CardLink.__init__).parameters['settle_s'].default, 1.0)
+        rig = self.rig()
+        board = rig.boards[0]
+        link = cl.CardLink(board.chardev, board.bdf, board.allocate_path, rig.window_id, shard_object_bytes=rig.shard_object_bytes, slot_objects=rig.slot_objects,
+                           sysfs_class=fc.CLASS_ROOT, sysfs_pci=fc.PCI_ROOT, ops=rig.kmd)
+        rig.links.append(link)
+        with mock.patch.object(cl.time, 'sleep') as sleep:
+            link.open(rig.staging_info())
+        sleep.assert_called_once_with(1.0)
+        self.assertEqual([name for name, shard in rig.kmd.log if shard == 0][:2], ['power', 'allocate'], 'the wait follows SET_POWER_STATE and precedes the window')
 
     def test_constructor_arguments_are_checked(self):
         with self.assertRaises(ValueError):
@@ -365,17 +385,83 @@ class AimTests(RigCase):
     def test_scratch_access_needs_the_aimed_bank_and_no_bio_in_flight(self):
         link = self.links[0]
         link.aim(0)
-        link.scratch_write(0, b'abcd')
-        self.assertEqual(link.scratch_read(0, 4), b'abcd')
+        link.scratch_write(0, b'abcdefgh')
+        self.assertEqual(link.scratch_read(0, 8), b'abcdefgh')
         with self.assertRaises(cl.StaleAim):
-            link.scratch_read(1, 4)
-        for size in (0, PAGE + 1):
+            link.scratch_read(1, 8)
+        for size in (0, 4, 12, PAGE + 8):
             with self.assertRaises(cl.BoundsViolation):
                 link.scratch_read(0, size)
+        with self.assertRaises(cl.BoundsViolation):
+            link.scratch_write(0, b'abcd')
         link.begin_io(0, link.aim_epoch)
         with self.assertRaises(cl.AimWhileBusy):
-            link.scratch_write(0, b'x')
+            link.scratch_write(0, b'x' * 8)
         link.end_io()
+
+
+class WordAccessTests(RigCase):
+    """Every CPU access to the uncached window is one aligned 8-byte load or store (never a memcpy of the range)."""
+
+    def test_open_touches_the_window_only_in_whole_words(self):
+        rig = self.rig()
+        rig.open_links()
+        words_per_page = PAGE // 8
+        for board in rig.boards:
+            self.assertEqual(board.word_stores, 8 * words_per_page, 'a canary page per bank, written word by word')
+            self.assertEqual(board.word_loads, 8 * (1 + words_per_page), 'per bank one 8-byte read before the write and a whole-page read to prove it')
+
+    def test_aim_and_flush_each_read_one_word_and_a_scratch_page_is_written_word_by_word(self):
+        rig = self.rig()
+        link, board = rig.open_links()[0], rig.boards[0]
+        loads, stores = board.word_loads, board.word_stores
+        link.aim(3)
+        self.assertEqual((board.word_loads - loads, board.word_stores - stores), (1, 0))
+        link.flush()
+        self.assertEqual(board.word_loads - loads, 2)
+        link.scratch_write(3, bytes(range(256)) * (PAGE // 256))
+        self.assertEqual(board.word_stores - stores, PAGE // 8)
+        self.assertEqual(link.scratch_read(3, PAGE), bytes(range(256)) * (PAGE // 256))
+
+    def test_what_is_not_whole_aligned_words_is_refused_before_the_card_is_touched(self):
+        rig = self.rig()
+        link, board = rig.open_links()[0], rig.boards[0]
+        loads, stores = board.word_loads, board.word_stores
+        base = rig.bank_window(0) + rig.lead
+        for offset, size in ((base + 1, 8), (base + 4, 8), (base, 7), (base, 12), (base, 0), (-8, 8)):
+            with self.subTest(offset=offset, size=size):
+                with self.assertRaises(cl.BoundsViolation):
+                    link._cpu_read(offset, size)
+                with self.assertRaises(cl.BoundsViolation):
+                    link._cpu_write(offset, bytes(size))
+        self.assertEqual((board.word_loads, board.word_stores), (loads, stores))
+
+    def test_the_system_ops_view_is_a_64_bit_word_view_of_the_mapping(self):
+        mapping = mmap.mmap(-1, 4 * PAGE)
+        words = cl.SystemOps().words(mapping)
+        words[3] = 0x0102030405060708
+        self.assertEqual(bytes(mapping[24:32]), (0x0102030405060708).to_bytes(8, sys.byteorder))
+        self.assertEqual(words[3], 0x0102030405060708)
+        with self.assertRaises(BufferError):
+            mapping.close()                 # the view exports the mapping: it is released first
+        words.release()
+        mapping.close()
+
+    def test_the_link_reads_and_writes_a_real_mapping_through_the_system_ops_view(self):
+        """The same accessors the card path uses, on a real buffer."""
+        link = cl.CardLink('/dev/tenstorrent/1', fc.BDFS[0], 'x')
+        link._cpu = mmap.mmap(-1, 4 * PAGE)
+        link._words = link.ops.words(link._cpu)
+        try:
+            data = bytes(range(256)) * (PAGE // 256)
+            link._cpu_write(PAGE, data)
+            self.assertEqual(bytes(link._cpu[PAGE:2 * PAGE]), data)
+            self.assertEqual(link._cpu_read(PAGE, PAGE), data)
+            self.assertEqual(link._cpu_read(PAGE + 8, 16), data[8:24])
+            self.assertEqual(bytes(link._cpu[:PAGE]), bytes(PAGE), 'nothing else was written')
+        finally:
+            link._words.release()
+            link._cpu.close()
 
 
 class FlushTests(RigCase):
@@ -482,20 +568,52 @@ class CloseTests(RigCase):
     def test_close_releases_everything_and_is_idempotent(self):
         rig = self.rig()
         links = rig.open_links()
-        views = [link.slot_view(0, 0, 2) for link in links]       # views left lying around must not stop the unmap
         for link in links:
             link.close()
             link.close()
             self.assertTrue(link.closed)
+            self.assertEqual(link.stats['unmap_failed'], 0)
+            self.assertTrue(link._slice_map is None and link._cpu is None and link._words is None)
         self.assertEqual(rig.kmd.open_fds, 0)
         for board in rig.boards:
             self.assertEqual(board.taken, set(), 'FREE_TLB')
-            self.assertFalse(board.slice_mapped)
+            self.assertFalse(board.slice_mapped, 'the mapping was unmapped: the lease is over')
             self.assertEqual(board.available, rig.region_size)
-        del views
-        gc.collect()
         with self.assertRaises(cl.LinkClosed):
             links[0].aim(0)
+
+    def test_a_view_that_is_still_alive_stops_the_unmap_and_close_says_so(self):
+        """The kernel ends the p2pmem lease at munmap, not when the descriptor closes. A view of the mapping that outlives close keeps it mapped: that is logged and
+        counted, and the lease ends when the view goes."""
+        rig = self.rig()
+        links = rig.open_links()
+        views = [link.slot_view(0, 0, 2) for link in links]
+        mapping = links[0]._slice_map
+        for link in links:
+            with self.assertLogs('ttkvp2p.cardlink', level='WARNING') as logged:
+                link.close()
+            self.assertTrue(any('could not be unmapped' in line for line in logged.output), logged.output)
+            self.assertEqual(link.stats['unmap_failed'], 1)
+            self.assertTrue(link.closed)
+        self.assertFalse(mapping.closed, 'the mapping is still mapped')
+        self.assertEqual(rig.kmd.open_fds, 0, 'the descriptors are closed all the same')
+        for board in rig.boards:
+            self.assertTrue(board.slice_mapped, 'the lease is held while a view of the mapping exists')
+            self.assertEqual(board.available, 0)
+        del views, mapping
+        gc.collect()
+        for board in rig.boards:
+            self.assertFalse(board.slice_mapped, 'the last view went: the mapping was unmapped and the lease is over')
+            self.assertEqual(board.available, rig.region_size)
+
+    def test_a_released_view_does_not_stop_the_unmap(self):
+        rig = self.rig()
+        link = rig.open_links()[0]
+        for view in link.slot_view(0, 0, 2):
+            view.release()
+        link.close()
+        self.assertEqual(link.stats['unmap_failed'], 0)
+        self.assertFalse(rig.boards[0].slice_mapped)
 
     def test_an_abandoned_link_releases_nothing(self):
         rig = self.rig()
@@ -587,7 +705,8 @@ class InterfaceTests(unittest.TestCase):
 class HygieneTests(unittest.TestCase):
     """The repo is public: nothing from the rig goes into these files."""
 
-    FILES = ('ttkvp2p/cardlink.py', 'ttkvp2p/p2pio.py', 'tests/fake_card.py', 'tests/test_cardlink.py', 'tests/test_p2pio.py', 'tests/test_p2pio_mutants.py')
+    FILES = ('README.md', 'ttkvp2p/cardlink.py', 'ttkvp2p/p2pio.py', 'tests/fake_card.py', 'tests/test_cardlink.py', 'tests/test_p2pio.py', 'tests/test_p2pio_mutants.py',
+             'tests/test_wp4_wiring.py')
 
     def test_no_rig_identifiers(self):
         # (each is split so that this file does not match its own patterns)
@@ -596,8 +715,7 @@ class HygieneTests(unittest.TestCase):
         bdf = re.compile(r'(?<![0-9a-fA-F:])(?:[0-9a-f]{4}:)?([0-9a-f]{2}):([0-9a-f]{2})\.([0-7])(?![0-9a-fA-F])')
         for name in self.FILES:
             path = os.path.join(PACKAGE_ROOT, name)
-            if not os.path.exists(path):
-                continue
+            self.assertTrue(os.path.exists(path), '%s is a file of this work package and must exist' % name)
             with open(path) as handle:
                 text = handle.read()
             for pattern in patterns:

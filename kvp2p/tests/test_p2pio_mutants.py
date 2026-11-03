@@ -4,6 +4,8 @@ A battery of behavioural checks runs against the real modules (it must pass) and
 must fail). A mutant that survives means a check that no test would miss if it were broken. The copies are executed from the source text, so the
 mutations are exactly the strings listed here and nothing about the real files changes. No vLLM, no numpy, no device: stdlib only."""
 
+import errno
+import inspect
 import logging
 import os
 import sys
@@ -77,6 +79,22 @@ class Scenario(object):
     def __exit__(self, *exc):
         self.env.close()
         return False
+
+
+def wait_for(condition, timeout=2.0):
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if condition():
+            return True
+        time.sleep(0.003)
+    return False
+
+
+def one(e, link, bank, obj):
+    """One slot view that the scenario releases when it ends (a view that outlives its link stops the unmap and costs a garbage collection)."""
+    view = link.slot_view(bank, obj, 1)[0]
+    e.keep(view)
+    return view
 
 
 def prime(e, count, tag='p'):
@@ -155,8 +173,8 @@ def check_canaries_carry_a_fresh_nonce(cl_mod, io_mod):
 def check_locate_knows_where_a_buffer_is(cl_mod, io_mod):
     with Scenario((cl_mod, io_mod), start=False) as e:
         links = e.rig.open_links()
-        own = links[0].slot_view(2, 1, 1)[0]
-        foreign = links[1].slot_view(2, 1, 1)[0]
+        own = one(e, links[0], 2, 1)
+        foreign = one(e, links[1], 2, 1)
         assert links[0].locate(own) == e.rig.data_offset(2, 1)
         assert links[0].locate(foreign) is None, 'another card\'s buffer'
         assert links[0].locate(bytearray(100)) is None, 'host memory'
@@ -220,14 +238,14 @@ def planned(e, io_mod, bank=2, first=1, n=2):
     req = io_mod._Request('read', bank, 0.0)
     call = io_mod._Call(req, first, n, e.drive_off(0))
     call.tokens = tuple(link.aim_epoch for link in e.links)
-    return call, e.io._build_iovecs(call)
+    return call, e.keep(e.io._build_iovecs(call))
 
 
 def check_iovec_off_by_one(cl_mod, io_mod):
     for delta in (-1, 1):
         with Scenario((cl_mod, io_mod)) as e:
             call, iovs = planned(e, io_mod, first=2)
-            iovs[1] = e.links[1].slot_view(2, 2 + delta, 1)[0]
+            iovs[1] = one(e, e.links[1], 2, 2 + delta)
             must_raise(cl_mod.BoundsViolation, e.io._check_iovecs, call, iovs)
 
 
@@ -241,7 +259,7 @@ def check_iovec_wrong_card(cl_mod, io_mod):
 def check_iovec_wrong_bank(cl_mod, io_mod):
     with Scenario((cl_mod, io_mod), rig_kwargs=dict(per_bank_offset=0x10000)) as e:        # addresses differ per bank: the view says which
         call, iovs = planned(e, io_mod)
-        iovs[3] = e.links[3].slot_view(3, 1, 1)[0]
+        iovs[3] = one(e, e.links[3], 3, 1)
         must_raise(cl_mod.BoundsViolation, e.io._check_iovecs, call, iovs)
     with Scenario((cl_mod, io_mod)) as e:                                                    # lockstep: the aim says which
         call, iovs = planned(e, io_mod)
@@ -267,7 +285,7 @@ def check_iovec_shape(cl_mod, io_mod):
         must_raise(cl_mod.BoundsViolation, e.io._check_iovecs, call, iovs)
     with Scenario((cl_mod, io_mod)) as e:
         call, iovs = planned(e, io_mod)
-        iovs[3] = iovs[3][:-PAGE]
+        iovs[3] = e.keep(iovs[3][:-PAGE])
         must_raise(cl_mod.BoundsViolation, e.io._check_iovecs, call, iovs)
     with Scenario((cl_mod, io_mod)) as e:
         call, iovs = planned(e, io_mod)
@@ -282,7 +300,8 @@ def check_a_card_moved_behind_the_layers_back(cl_mod, io_mod):
         error = e.io.read_piece(e.drive_off(1), 2, 1, first_obj=1).exception(2)
         assert error is not None and not isinstance(error, TimeoutError), 'the stale call was issued'
         assert len(e.ops.calls) == 1, 'a call ran on a window whose epoch had moved'
-        assert e.io.dead and e.runtime.latched, 'a card that moved behind the layer\'s back must stop the layer and latch the tier'
+        assert e.io.dead, 'a card that moved behind the layer\'s back must stop the layer'
+        assert e.io.dead.startswith(io_mod.FATAL_PREFIX), e.io.dead
 
 
 def check_round_trip_and_iovec_order(cl_mod, io_mod):
@@ -406,17 +425,207 @@ def check_a_violation_latches_and_stops_the_layer(cl_mod, io_mod):
         assert isinstance(e.io.read_piece(e.drive_off(0), 2, 1).exception(2), io_mod.P2PDead)
 
 
+def check_a_future_resolves_only_when_no_call_of_its_request_is_in_flight(cl_mod, io_mod):
+    split = dict(rig_kwargs=dict(slot_objects=12), io_kwargs=dict(restore_run_objects=2))
+    # an error in one call while its sibling call is in flight
+    with Scenario((cl_mod, io_mod), **split) as e:
+        prime(e, 4, 'f')
+        (release, entered), = e.ops.hold_next(1)
+        e.ops.fail_at = {1: OSError(errno.EIO, 'media error')}
+        future = e.io.read_piece(e.drive_off(0), 2, 4)
+        assert entered.wait(2)
+        assert wait_for(lambda: e.io.stats()['io_errors'] == 1)
+        time.sleep(0.05)
+        assert not future.done(), 'resolved on the first error with a sibling call in flight'
+        release.set()
+        assert future.exception(2).errno == errno.EIO
+    # an errored request with calls left to issue, popped from the queue while a call is in flight
+    with Scenario((cl_mod, io_mod), config_kwargs=dict(io_threads=2), **split) as e:
+        prime(e, 6, 'f')
+        (release, entered), = e.ops.hold_next(1)
+        e.ops.fail_at = {1: OSError(errno.EIO, 'media error')}
+        future = e.io.read_piece(e.drive_off(0), 2, 6)
+        assert entered.wait(2)
+        assert wait_for(lambda: e.io.stats()['io_errors'] == 1)
+        time.sleep(0.05)
+        assert not future.done(), 'resolved by the scheduler with a call in flight'
+        release.set()
+        assert future.exception(2).errno == errno.EIO
+        assert len(e.ops.calls) == 2
+    # a partly issued request, failed by the death of the layer or by close
+    for how in ('death', 'close'):
+        with Scenario((cl_mod, io_mod), config_kwargs=dict(io_threads=1), **split) as e:
+            prime(e, 6, 'f')
+            (release, entered), = e.ops.hold_next(1)
+            future = e.io.read_piece(e.drive_off(0), 2, 6)
+            assert entered.wait(2)
+            closer = None
+            if how == 'death':
+                must_raise(cl_mod.BoundsViolation, e.io.read_piece, e.drive_off(0), 0, 1)
+            else:
+                closer = threading.Thread(target=lambda: e.io.close(timeout=5), daemon=True)
+                closer.start()
+            time.sleep(0.05)
+            assert not future.done(), 'resolved by %s with its first call still in flight' % how
+            release.set()
+            assert isinstance(future.exception(2), io_mod.P2PIOError)
+            if closer is not None:
+                closer.join(5)
+
+
+def check_the_layers_own_threads_never_call_the_runtime(cl_mod, io_mod):
+    with Scenario((cl_mod, io_mod)) as e:                                  # a violation found by an I/O thread
+        e.io.read_piece(e.drive_off(0), 2, 1).result(2)
+        e.links[1].locate = lambda view: 12345
+        e.io.read_piece(e.drive_off(1), 2, 1, first_obj=1).exception(2)
+        assert e.io.dead, 'the layer did not stop'
+        assert e.runtime.latch_threads == [], 'an I/O thread called runtime.latch: %s' % e.runtime.latch_threads
+    with Scenario((cl_mod, io_mod)) as e:                                  # a window fault found by the scheduler thread
+        e.rig.boards[1].ignore_configure = True
+        e.io.read_piece(e.drive_off(0), 4, 1).exception(2)
+        assert e.io.dead, 'the layer did not stop'
+        assert e.runtime.latch_threads == [], 'the scheduler thread called runtime.latch: %s' % e.runtime.latch_threads
+    with Scenario((cl_mod, io_mod)) as e:                                  # a bad request is the caller's: latched on its thread
+        must_raise(cl_mod.BoundsViolation, e.io.read_piece, e.drive_off(0), 0, 1)
+        assert e.runtime.latch_threads == [threading.current_thread().name], e.runtime.latch_threads
+
+
+def check_every_fatal_reason_is_filed_under_bounds_violation(cl_mod, io_mod):
+    reasons = []
+    with Scenario((cl_mod, io_mod)) as e:                                  # a request outside the slot
+        must_raise(cl_mod.BoundsViolation, e.io.read_piece, e.drive_off(0), 0, 1)
+        reasons.append(e.io.dead)
+    with Scenario((cl_mod, io_mod)) as e:                                  # a card that moved behind the layer's back (an error of the card link)
+        e.io.read_piece(e.drive_off(0), 2, 1).result(2)
+        e.links[3].aim(2)
+        e.io.read_piece(e.drive_off(1), 2, 1, first_obj=1).exception(2)
+        reasons.append(e.io.dead)
+    with Scenario((cl_mod, io_mod)) as e:                                  # a re-aim that fails
+        e.rig.kmd.fail['configure'] = errno.EIO
+        e.io.read_piece(e.drive_off(0), 4, 1).exception(2)
+        reasons.append(e.io.dead)
+    with Scenario((cl_mod, io_mod)) as e:                                  # the start-up DMA canary
+        e.ops.on_call = lambda kind, record: setattr(e.ops, 'swallow_next', 1) if kind == 'read' else None
+        must_raise(io_mod.DmaCanaryError, e.io.dma_canary)
+        reasons.append(e.io.dead)
+    for reason in reasons:
+        assert reason and reason.startswith(io_mod.FATAL_PREFIX), 'a fatal reason that the runtime would not file as a bounds violation: %r' % (reason,)
+
+
+def check_a_dead_layer_issues_nothing_more(cl_mod, io_mod):
+    with Scenario((cl_mod, io_mod)) as e:                                  # it dies after the call was decided, before the cards count it
+        counted = []
+        for link in e.links:
+            link.begin_io = lambda bank, epoch, original=link.begin_io: counted.append(bank) or original(bank, epoch)
+        issue = e.io._do_issue
+
+        def late(req, call):
+            e.io._die('%s: another thread found a violation' % io_mod.FATAL_PREFIX)
+            return issue(req, call)
+        e.io._do_issue = late
+        future = e.io.read_piece(e.drive_off(0), 2, 1)
+        assert isinstance(future.exception(2), io_mod.P2PDead)
+        assert counted == [], 'the cards counted a call in flight on a dead layer'
+        assert e.ops.calls == []
+    with Scenario((cl_mod, io_mod)) as e:                                  # it dies while the I/O thread builds the iovecs
+        link = e.links[2]
+        original = link.slot_view
+
+        def slot_view(bank, first_obj, n_obj):
+            e.io._die('%s: another thread found a violation' % io_mod.FATAL_PREFIX)
+            return original(bank, first_obj, n_obj)
+        link.slot_view = slot_view
+        future = e.io.read_piece(e.drive_off(0), 2, 1)
+        assert isinstance(future.exception(2), io_mod.P2PDead)
+        assert e.ops.calls == [], 'a syscall was issued after the layer was dead'
+        assert e.io.wait_idle(2)
+        assert [l.inflight for l in e.links] == [0] * 4
+
+
+def check_close_and_wait_idle_use_wall_time(cl_mod, io_mod):
+    with Scenario((cl_mod, io_mod), io_kwargs=dict(clock=lambda: 0.0)) as e:         # an injected clock that stands still
+        (release, entered), = e.ops.hold_next(1)
+        e.io.read_piece(e.drive_off(0), 2, 1)
+        assert entered.wait(2)
+        for name, call in (('wait_idle', lambda: e.io.wait_idle(0.1)), ('close', lambda: e.io.close(timeout=0.1))):
+            outcome = []
+            started = time.monotonic()
+            thread = threading.Thread(target=lambda: outcome.append(call()), daemon=True)
+            thread.start()
+            thread.join(2.0)
+            stuck = thread.is_alive()
+            elapsed = time.monotonic() - started
+            if stuck:
+                release.set()                  # (lets a mutant that waits on the stopped clock finish, so the battery goes on)
+                thread.join(2.0)
+            assert not stuck, '%s(0.1) was still waiting after 2 s with a clock that stands still' % name
+            assert outcome == [False], (name, outcome)
+            assert elapsed >= 0.08, '%s(0.1) gave up after %.3f s' % (name, elapsed)
+        release.set()
+
+
+def check_the_runtime_states_the_drive_and_the_data_region(cl_mod, io_mod):
+    with Scenario((cl_mod, io_mod), start=False) as e:                     # a buffered descriptor is refused
+        e.links = e.rig.open_links()
+        fd = os.open(e.path, os.O_RDWR)
+        try:
+            must_raise(io_mod.P2PIOError, e.build_io, drive_fd=fd, allow_buffered=False)
+        finally:
+            os.close(fd)
+    refusals = (('no store', lambda rt: delattr(rt, 'store')), ('no drive', lambda rt: delattr(rt, 'drive')),
+                ('objects of another size', lambda rt: setattr(rt.store, 'object_bytes', rt.store.object_bytes + PAGE)),
+                ('a canary outside its block', lambda rt: setattr(rt, 'canary_offset', 4 * PAGE)))
+    for label, damage in refusals:
+        with Scenario((cl_mod, io_mod), start=False) as e:
+            e.links = e.rig.open_links()
+            e.runtime = e.wp3a_runtime()
+            damage(e.runtime)
+            must_raise(io_mod.P2PIOError, e.build_io, drive_fd=None, drive_range=None)
+    with Scenario((cl_mod, io_mod), start=False) as e:                     # the fence is exactly the region the runtime states
+        e.links = e.rig.open_links()
+        e.runtime = e.wp3a_runtime(num_slots=3)
+        e.build_io(drive_fd=None, drive_range=None)
+        assert e.io.read_piece(e.drive_off(2), 2, 1).result(2) == e.object_bytes
+        must_raise(cl_mod.BoundsViolation, e.io.read_piece, e.drive_off(3), 2, 1)
+
+
+def check_cpu_accesses_to_the_window_are_whole_aligned_words(cl_mod, io_mod):
+    with Scenario((cl_mod, io_mod), start=False) as e:
+        link = e.rig.open_links()[0]
+        base = e.rig.bank_window(0) + e.rig.lead
+        for offset, size in ((base + 1, 8), (base + 4, 8), (base, 12), (base, 0)):
+            must_raise(cl_mod.BoundsViolation, link._cpu_read, offset, size)
+            must_raise(cl_mod.BoundsViolation, link._cpu_write, offset, bytes(size))
+
+
+def check_a_slice_off_the_page_boundary_is_refused(cl_mod, io_mod):
+    rig = fc.Rig(cardlink_module=cl_mod)
+    try:
+        path = '%s/tenstorrent!%d/p2pmem/offset' % (fc.CLASS_ROOT, rig.boards[0].index)
+        rig.kmd.files[path] = str(int(rig.kmd.files[path]) + 64)
+        must_raise(cl_mod.CardLinkUnavailable, rig.make_link(0).open, rig.staging_info())
+    finally:
+        rig.close()
+
+
+def check_the_default_wait_after_the_power_state_is_the_qwen_links(cl_mod, io_mod):
+    assert inspect.signature(cl_mod.CardLink.__init__).parameters['settle_s'].default == 1.0
+
+
 CHECKS = [value for name, value in sorted(globals().items()) if name.startswith('check_') and callable(value)]
 
 
-def battery(cl_mod, io_mod):
-    """Names of the checks that failed (an exception of any kind counts as a failure, a hang as a timeout inside the check)."""
+def battery(cl_mod, io_mod, first_only=False):
+    """Names of the checks that failed (an exception of any kind counts as a failure, a hang as a timeout inside the check). ``first_only`` stops at the first
+    failure: enough to kill a mutant, and the battery is the slow part of this file."""
     failed = []
     for check in CHECKS:
         try:
             check(cl_mod, io_mod)
         except BaseException as error:        # noqa: B902  (a mutant may break anything)
             failed.append('%s: %s: %s' % (check.__name__, type(error).__name__, str(error)[:120]))
+            if first_only:
+                break
     return failed
 
 
@@ -441,6 +650,9 @@ CARDLINK_MUTANTS = [
     ('two mesh devices for one card are accepted', "if len(found) != 1:", "if len(found) < 1:"),
     ('the canary has no nonce', "canary_page(self._nonce, self.bdf, bank)", "canary_page(b'', self.bdf, bank)"),
     ('the nonce is the same for every link', "self._nonce = nonce if nonce is not None else os.urandom(16)", "self._nonce = nonce if nonce is not None else b'fixed'"),
+    ('a CPU access that is not whole aligned words is accepted', "if size <= 0 or size % WORD or window_off < 0 or window_off % WORD:", "if False:"),
+    ('a slice that does not start on a page boundary is accepted', "if self._slice_window_off % PAGE:", "if False:"),
+    ('the wait after the power state is dropped from the default', "DEFAULT_SETTLE_S = 1.0", "DEFAULT_SETTLE_S = 0.0"),
 ]
 
 P2PIO_MUTANTS = [
@@ -467,10 +679,40 @@ P2PIO_MUTANTS = [
     ('the thread count is ignored', "if self._inflight_calls >= self._threads:", "if False:"),
     ('end of file is progress', "if count <= 0:\n                raise P2PShortIO(", "if count < 0:\n                raise P2PShortIO("),
     ('a count beyond the call is believed', "if count > total - done:", "if False:"),
-    ('a bounds violation does not stop the layer', "self._die('P2PIO bounds violation: %s' % message)", "pass"),
+    ('a bounds violation does not stop the layer', "self._die('%s: %s' % (FATAL_PREFIX, message))", "pass"),
     ('the DMA canary result is not compared', "if back != pattern:", "if False:"),
     ('the DMA canary may use any offset', "if self._canary_offset < DMA_CANARY_OFFSET or self._canary_offset + PAGE > DMA_CANARY_OFFSET + DMA_CANARY_BYTES or self._canary_offset % PAGE:", "if False:"),
     ('a fatal error does not stop the layer', "fatal = isinstance(error, (BoundsViolation, CardLinkError))", "fatal = False"),
+    # a future resolves only when no call of its request is in flight
+    ('a request resolves on its first error while a sibling call is in flight', "if req.outstanding == 0 and (req.error is not None or req.issued_all) and not req.resolved:",
+     "if (req.error is not None or (req.outstanding == 0 and req.issued_all)) and not req.resolved:"),
+    ('a partly issued request resolves when the layer dies or closes with a call in flight', "                if req.outstanding == 0:\n                    out.append(req)", "                if True:\n                    out.append(req)"),
+    ('an errored request resolves when the scheduler pops it with a call in flight', "            queue.popleft()\n            if req.outstanding == 0:\n                self._to_resolve.append(req)",
+     "            queue.popleft()\n            if True:\n                self._to_resolve.append(req)"),
+    # the runtime contract
+    ('a buffered descriptor is accepted', "if not self._allow_buffered and not fd_is_direct(fd):", "if False:"),
+    ('the runtime need not state a data region', "if data_off is None or slots is None or slots <= 0:", "if False:"),
+    ('the object size of the runtime is not compared with the cards', "if stride is not None and stride != self.object_bytes:", "if False:"),
+    ('the fence is one slot too wide', "drive_range = (data_off, data_off + slots * self.object_bytes)", "drive_range = (data_off, data_off + (slots + 1) * self.object_bytes)"),
+    ('the canary offset of the runtime is not checked', "if offset is None or offset < DMA_CANARY_OFFSET or offset + PAGE > DMA_CANARY_OFFSET + DMA_CANARY_BYTES or offset % PAGE:", "if False:"),
+    # threads, and how a fatal reason is filed
+    ('a thread of the layer latches the tier', "if not self._on_own_thread():\n            self._latch(reason)", "if True:\n            self._latch(reason)"),
+    ('a caller\'s thread does not latch the tier', "if not self._on_own_thread():\n            self._latch(reason)", "if False:\n            self._latch(reason)"),
+    ('a violation reason has no prefix', "self._die('%s: %s' % (FATAL_PREFIX, message))", "self._die(message)"),
+    ('a fatal error of the card link has no prefix', "self._die('%s: %s: %s' % (FATAL_PREFIX, type(error).__name__, error))", "self._die('%s: %s' % (type(error).__name__, error))"),
+    ('a failing re-aim has no prefix', "self._die('%s: re-aim to bank %d failed: %s: %s' % (FATAL_PREFIX, bank, type(error).__name__, error))",
+     "self._die('re-aim to bank %d failed: %s: %s' % (bank, type(error).__name__, error))"),
+    ('a failing DMA canary has no prefix', "self._die('%s: DMA canary failed: %s: %s' % (FATAL_PREFIX, type(error).__name__, error))", "self._die('DMA canary failed: %s: %s' % (type(error).__name__, error))"),
+    # nothing more is issued once the layer is dead
+    ('a dead layer still counts a decided call on the cards', "        if dead:\n            self._complete(call, 0, P2PDead(dead), 0.0, 0.0)\n            return\n        call.tokens = tokens",
+     "        if False:\n            self._complete(call, 0, P2PDead(dead), 0.0, 0.0)\n            return\n        call.tokens = tokens"),
+    ('a dead layer still issues the syscall of a call being built', "            if dead:                                  # the layer died after this call was decided: nothing more is issued",
+     "            if False:                                 # the layer died after this call was decided: nothing more is issued"),
+    # wall-time deadlines
+    ('close waits on an injected clock', "end = time.monotonic() + (self._drain_s if timeout is None else timeout)\n        with self._cv:\n            while self._inflight_calls:\n                left = end - time.monotonic()",
+     "end = self._clock() + (self._drain_s if timeout is None else timeout)\n        with self._cv:\n            while self._inflight_calls:\n                left = end - self._clock()"),
+    ('wait_idle waits on an injected clock', "end = time.monotonic() + timeout  ", "end = self._clock() + timeout  "),
+    ('wait_idle compares with an injected clock', "left = end - time.monotonic()\n                if left <= 0:\n                    return False", "left = end - self._clock()\n                if left <= 0:\n                    return False"),
 ]
 
 
@@ -481,7 +723,7 @@ class Baseline(unittest.TestCase):
 
     def test_the_battery_is_not_empty_and_covers_the_four_planted_mistakes(self):
         names = [check.__name__ for check in CHECKS]
-        self.assertGreaterEqual(len(names), 25)
+        self.assertGreaterEqual(len(names), 34)
         for needed in ('check_iovec_off_by_one', 'check_iovec_wrong_bank', 'check_iovec_wrong_card', 'check_iovec_stale_epoch', 'check_re_aim_only_when_idle'):
             self.assertIn(needed, names)
 
@@ -517,7 +759,7 @@ class Mutants(unittest.TestCase):
         else:
             io_source = io_source.replace(old, new)
         cl_mod, io_mod = load_variant(cl_source, io_source)
-        failed = battery(cl_mod, io_mod)
+        failed = battery(cl_mod, io_mod, first_only=True)
         self.assertTrue(failed, 'SURVIVED: %s' % label)
         return failed
 
