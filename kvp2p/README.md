@@ -8,7 +8,7 @@ This directory holds the connector side:
 
 | Module | What it is |
 |---|---|
-| `ttkvp2p/registry.py` | `TTKVRegistry`: the allocated KV tensors, as the plugin runner hands them over |
+| `ttkvp2p/registry.py` | `TTKVRegistry`: the allocated KV tensors, as the plugin runner hands them over, and the shard map (mesh coordinate to the PCI address of its card): `resolve_shard_bdf` reads it from the extension's `qwen_p2p_mesh_devices`, an op that allocates nothing on a card, so the start-up order keeps its zero device footprint. The plugin fills the map when it builds the registry; the spec completes a registry that arrives without one |
 | `ttkvp2p/spec.py` | `TTP2PNvmeSpec`, `P2PConfig` (the `kv_connector_extra_config` keys), `NvmeLoadStoreSpec`, `ReqTag`, the layout table |
 | `ttkvp2p/connector.py` | `TTP2PConnector` and its scheduler and worker roles |
 | `ttkvp2p/worker.py` | `TTP2PWorker`: the job state machine, the staging ring, budgets, deadlines, strikes and latch, `wait()` |

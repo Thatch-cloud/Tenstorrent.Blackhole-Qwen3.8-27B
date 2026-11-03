@@ -20,7 +20,7 @@ from vllm.v1.kv_offload.base import (
 from ttkvp2p import store as store_module
 from ttkvp2p.manager import ALLOCATED_REAP_S, NvmeKVManager, PairingError, estimate_objects
 from ttkvp2p.runtime import S_TRIM_WAIT, S_USED, STATE_LATCHED
-from ttkvp2p.spec import NvmeLoadStoreSpec
+from ttkvp2p.spec import NvmeLoadStoreSpec, ReqTag
 
 GEMMA_GROUPS = (None, 8, 8, 8, 8, 8)
 
@@ -1428,6 +1428,96 @@ class ResetCache(ManagerCase):
         self.settle()
         b = req('b', prompt_tokens=6000)
         self.assertEqual(len(self.store(AdmissionKeys.keys_for(6000, 2)[:32], b).keys_to_store), 32)
+
+
+class ResetAfterAdmission(ManagerCase):
+    """Review P2 and P3 at the manager (test_tier_rig drives the same through vLLM's scheduler)."""
+
+    def test_after_a_reset_the_reoffered_job_of_the_same_request_is_taken_for_its_own(self):
+        """P2. vLLM discards the report of a job that was in flight at a reset, so the dead job's ledger entry is never taken; the request, still
+        decoding, offers the same keys again from chunk 0. The new job's report must not be matched with the dead job's record."""
+        mgr = self.build(num_slots=64)
+        keys = [key_for(i) for i in range(4)]
+        a = req('a')
+        self.store(keys, a)                                   # the job vLLM will never report
+        mgr.reset_cache()
+        self.settle()
+        new = self.store(keys, a)
+        self.assertEqual(new.keys_to_store, keys)
+        self.finish_store(new, a)
+        self.assertEqual(mgr.written(), 4)
+        self.assertEqual((mgr.store_completion_stale, mgr.store_completion_unmatched), (0, 0))
+        mgr.check_invariants()
+
+    def test_the_ledger_retires_only_the_batches_of_an_earlier_reset(self):
+        from ttkvp2p.manager import _StoreLedger
+        ledger = _StoreLedger()
+        keys = [key_for(1), key_for(2)]
+        ledger.add(1, keys, 0)
+        ledger.add(2, keys, 0)
+        self.assertEqual(ledger.take(keys, 0), 1, 'within one reset the oldest record with the keys is the one reporting')
+        ledger.add(3, keys, 1)                                # add() retires what an earlier reset left behind: batch 2 is dead
+        self.assertEqual([batch for batch, _keys, _resets in ledger.batches], [3])
+        self.assertEqual(ledger.take(keys, 1), 3)
+        ledger.add(4, keys, 1)
+        self.assertIsNone(ledger.take(keys, 2), 'a reset retires batch 4 before it can be taken')
+        self.assertEqual(len(ledger.batches), 0)
+
+    def test_a_wipe_keeps_the_records_of_the_jobs_whose_reports_are_still_due(self):
+        mgr = self.build(num_slots=64)
+        keys = [key_for(i) for i in range(4)]
+        a = req('a')
+        old = self.store(keys, a)
+        resets = mgr._resets
+        mgr.wipe()
+        self.assertEqual(mgr._resets, resets, 'only vLLM\'s reset discards the reports')
+        self.assertEqual(mgr.epoch, 1)
+        mgr.reset_cache()
+        self.assertEqual((mgr._resets, mgr.epoch), (resets + 1, 2))
+        self.finish_store(old, a)                             # (a report that does arrive after a reset finds nothing to complete)
+        self.assertEqual(mgr.written(), 0)
+
+    def test_a_verdict_is_void_after_a_reset_and_the_request_is_admitted_afresh_as_a_whole(self):
+        """P3. The reset cleared the reservation behind the verdict; the request offers its prompt again from chunk 0. It used to be judged call by
+        call (no reservation, no overrun counted) with the old verdict, which breaks all-or-nothing."""
+        mgr = self.build(num_slots=300, daily_write_cap_bytes=1000 * OBJ)
+        mgr.groups = GEMMA_GROUPS
+        a = req('a', prompt_tokens=6000)                      # 86 objects
+        keys = AdmissionKeys.keys_for(6000, 1)
+        self.assertEqual(len(self.store(keys[:32], a).keys_to_store), 32)
+        tag = a.get_state(ReqTag)
+        self.assertEqual((tag.admitted, tag.admitted_epoch), (True, 0))
+        self.assertEqual((mgr.admitted_objects, mgr.snapshot()['reserved_slots']), (86, 54))
+        mgr.reset_cache()
+        self.settle()
+        self.assertEqual(mgr.snapshot()['reserved_slots'], 0)
+        self.assertEqual(mgr.snapshot()['bytes_written_today'], 32 * OBJ, 'the 54 reserved objects were refunded; the 32 that were stored stay charged')
+        self.assertEqual(len(self.store(keys[:32], a).keys_to_store), 32)
+        self.assertEqual((tag.admitted, tag.admitted_epoch), (True, 1), 'a fresh whole-boundary verdict of the new epoch')
+        self.assertEqual((mgr.admitted_objects, mgr.snapshot()['reserved_slots']), (172, 54), 'reserved again as a whole: the rest of the boundary is held')
+        self.assertEqual(mgr.admission_overrun, 0)
+        self.assertEqual(mgr.snapshot()['bytes_written_today'], (32 + 86) * OBJ, 'charged once for the new boundary, never twice for the same reservation')
+
+    def test_a_denial_does_not_outlive_the_reset_either(self):
+        mgr = self.build(num_slots=100, daily_write_cap_bytes=100 * OBJ)
+        mgr.groups = GEMMA_GROUPS
+        mgr.cfg.daily_write_cap_bytes = 40 * OBJ              # 86 objects do not fit the cap
+        a = req('a', prompt_tokens=6000)
+        keys = AdmissionKeys.keys_for(6000, 1)
+        self.assertEqual(self.store(keys[:32], a).keys_to_store, [])
+        self.assertEqual(self.store(keys[:32], a).keys_to_store, [], 'denied is cached within the epoch')
+        self.assertEqual(mgr.dropped['cap'], 1)
+        mgr.reset_cache()
+        mgr.cfg.daily_write_cap_bytes = 1000 * OBJ            # the operator raised the cap
+        self.settle()
+        self.assertEqual(len(self.store(keys[:32], a).keys_to_store), 32, 'judged again, and now admitted')
+
+    def test_a_tag_whose_verdict_the_manager_did_not_make_counts_as_current(self):
+        mgr = self.build(num_slots=100)
+        a = req('a')
+        a.get_state(ReqTag).admitted = False                  # a preset verdict with no epoch
+        self.assertEqual(self.store([key_for(1)], a).keys_to_store, [])
+        self.assertEqual(mgr.dropped['denied'], 1)
 
 
 class WipeVerb(ManagerCase):

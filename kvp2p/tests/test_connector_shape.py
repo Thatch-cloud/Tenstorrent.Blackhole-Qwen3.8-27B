@@ -381,8 +381,9 @@ class RefusedTierTests(RigCase):
 
         for name, declared in REFUSED_SIGNATURES.items():
             with self.subTest(name):
+                manager_class = manager_with(declared)
                 with self.assertLogs('ttkvp2p.spec', level='ERROR') as logged:
-                    rig = self.rig(manager_class=manager_with(declared))
+                    rig = self.rig(manager_class=manager_class)
                 manager = rig.connector_scheduler.manager._manager
                 self.assertIsInstance(manager, RefusedManager)
                 self.assertIn('complete_store', manager.reason)
@@ -398,7 +399,13 @@ class RefusedTierTests(RigCase):
                 rig.add('r2', prompt)
                 rig.drain()
                 self.assertEqual(rig.loads, [])
-                self.assertEqual(rig.runtime.state, 'AVAILABLE', 'nothing latched: the refusal is a tier that never stores, not a failure')
+                # Review P1: the worker role started the tier before the scheduler role asked for its manager, so the runtime WAS available. A tier whose
+                # scheduler has no usable manager must not stay AVAILABLE with nothing servicing it: it is latched under a closed code (op_throw).
+                self.assertEqual(rig.runtime.state, 'LATCHED', 'the refused manager leaves the tier off, not AVAILABLE')
+                self.assertEqual(rig.runtime.latch_code, 'op_throw')
+                self.assertIn('complete_store', rig.runtime.latch_reason)
+                self.assertEqual(len(rig.runtime.detached), 1, 'the refused manager is no longer the runtime\'s manager')
+                self.assertIsInstance(rig.runtime.detached[0], manager_class)
                 self.assertFalse(rig.worker.stats['submit_store'])
 
     def test_a_manager_with_the_a1_signature_is_handed_out_and_the_runtime_stays_attached(self):
@@ -456,6 +463,131 @@ class RefusedTierTests(RigCase):
         self.assertEqual(rig.runtime.released, ['scheduler'], 'the reference acquired for the manager that never came to be was given back')
         self.assertEqual(rig.runtime.roles, ['worker'])
         self.assertFalse(rig.runtime.closed, 'the worker role is still attached')
+        self.assertEqual((rig.runtime.state, rig.runtime.latch_code), ('LATCHED', 'op_throw'), 'no manager was ever built: the tier is off, not available')
+        self.assertEqual(rig.runtime.detached, [], 'there was no manager to detach')
+
+
+class SettingsThatBreakTheAdmissionAreRefused(RigCase):
+    """Review M-cfg: the admission sizes a request's whole prompt boundary assuming a prompt-only offload and a prefix-cache retention interval of 0 (or an
+    aligned one). Anything else makes requests overrun into per-call judgment, which is what all-or-nothing exists to prevent: the tier refuses to start."""
+
+    FAKE_TIER = True
+
+    def vllm_config(self, interval=0, world_size=1, executor='uni', policy='recompute'):
+        return SimpleNamespace(parallel_config=SimpleNamespace(world_size=world_size, distributed_executor_backend=executor),
+                               kv_transfer_config=SimpleNamespace(kv_load_failure_policy=policy),
+                               cache_config=SimpleNamespace(prefix_cache_retention_interval=interval))
+
+    def test_offload_prompt_only_false_is_refused_by_the_spec(self):
+        from ttkvp2p.spec import P2PConfig, RefusedManager, TierRefused
+
+        with self.assertRaises(ValueError) as raised:
+            P2PConfig.from_extra_config({'offload_prompt_only': False})
+        self.assertIn('offload_prompt_only', str(raised.exception))
+        rig = self.rig(extra={'offload_prompt_only': False}, start_worker=False)
+        self.assertIsInstance(rig.connector_scheduler.manager._manager, RefusedManager)
+        self.assertIn('offload_prompt_only', rig.connector_scheduler.manager._manager.reason)
+        rig.worker_conn.register_kv_caches(rig.registry)
+        self.assertIsNone(rig.worker)
+        self.assertIn('offload_prompt_only', rig.worker_conn.connector_worker.unavailable_reason)
+        self.assertTrue(P2PConfig.from_extra_config({'offload_prompt_only': True}).offload_prompt_only)
+        self.assertTrue(issubclass(TierRefused, RuntimeError))
+
+    def test_a_retention_interval_of_none_or_a_misaligned_one_is_refused(self):
+        from ttkvp2p.connector import topology_refusal
+
+        self.assertIsNone(topology_refusal(self.vllm_config(0)))
+        self.assertIsNone(topology_refusal(self.vllm_config(1024)), 'an aligned interval is the plugin\'s to allow; the extra checkpoints count as overrun')
+        self.assertIn('retain every sliding-window block', topology_refusal(self.vllm_config(None)), 'None is refused for what it does, not as a misaligned number')
+        for bad in (100, 129, 1, -128, True, 'x'):
+            with self.subTest(bad):
+                self.assertIn('prefix_cache_retention_interval', topology_refusal(self.vllm_config(bad)) or '')
+
+    def test_the_older_refusals_come_first_and_a_config_without_a_cache_section_is_not_refused(self):
+        from ttkvp2p.connector import topology_refusal
+
+        self.assertIn('world_size', topology_refusal(self.vllm_config(None, world_size=2)))
+        self.assertIn('executor', topology_refusal(self.vllm_config(None, executor='mp')))
+        self.assertIn('recompute', topology_refusal(self.vllm_config(None, policy='fail')))
+        bare = self.vllm_config()
+        del bare.cache_config
+        self.assertIsNone(topology_refusal(bare))
+
+    def test_a_none_interval_stops_the_tier_in_a_real_engine_config(self):
+        from ttkvp2p.spec import RefusedManager
+
+        rig = self.rig(start_worker=False, with_scheduler=False)
+        rig.vllm_config.cache_config.prefix_cache_retention_interval = None
+        from ttkvp2p.connector import TTP2PConnector
+        from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
+        connector = TTP2PConnector(rig.vllm_config, KVConnectorRole.SCHEDULER, rig.kv_cache_config)
+        self.assertIsInstance(connector.connector_scheduler.manager._manager, RefusedManager)
+        self.assertIn('prefix_cache_retention_interval', connector.connector_scheduler.manager._manager.reason)
+
+
+class RefusedManagerOnTheRealRuntime(RigCase):
+    """Review P1 with nothing stubbed but the devices: the real runtime, the real manager class (given the pre-A1 signature), the connector, the scheduler."""
+
+    def old_signature_manager(self):
+        import ttkvp2p.manager as manager_module
+        real = manager_module.NvmeKVManager
+
+        class OldSignature(real):
+            def complete_store(self, keys, req_context, success=True):          # the signature frozen before amendment A1
+                return super().complete_store(keys, req_context, success)
+
+        manager_module.NvmeKVManager = OldSignature
+        self.addCleanup(setattr, manager_module, 'NvmeKVManager', real)
+        return OldSignature
+
+    def test_a_manager_refused_by_the_a1_guard_leaves_the_real_tier_latched_detached_and_released(self):
+        import json
+        from ttkvp2p.spec import RefusedManager
+
+        self.old_signature_manager()
+        with self.assertLogs('ttkvp2p', level='ERROR'):
+            rig = self.rig()
+        runtime = rig.runtime
+        self.assertIsInstance(rig.connector_scheduler.manager._manager, RefusedManager)
+        self.assertIn('complete_store', rig.connector_scheduler.manager._manager.reason)
+        self.assertEqual(runtime.state, 'LATCHED', 'the worker started the tier and set it AVAILABLE; the refusal must take that back')
+        self.assertEqual(runtime.latch_code, 'op_throw', 'a closed code (KV-TIER-STANDARD 5.1), not free text')
+        self.assertIsNone(runtime._manager, 'the refused manager is detached: nothing calls into it')
+        self.assertEqual(runtime.roles, ['worker'], 'the scheduler reference was released')
+        state = json.load(open(rig.real_tier.tree.state_file))
+        self.assertEqual((state['state'], state.get('reason')), ('LATCHED', 'op_throw'), 'the state file and so the alerts say the tier is off')
+        prompt = tokens(PROMPT, 'p1 real')
+        rig.add('r1', prompt)
+        rig.drain()
+        rig.reset_device_cache()
+        rig.add('r2', prompt)
+        rig.drain()
+        self.assertEqual(rig.loads, [])
+        self.assertFalse(rig.worker.stats['submit_store'], 'a latched tier stores nothing')
+        self.assertEqual(rig.runtime.allocator.n_used, 0)
+
+    def test_a_manager_that_fails_to_build_on_the_real_runtime_leaves_it_latched_too(self):
+        import sys
+        from ttkvp2p.spec import RefusedManager
+
+        rig = self.rig(with_scheduler=False)
+        self.assertEqual(rig.runtime.state, 'AVAILABLE')
+
+        def broken(cfg, runtime):
+            raise RuntimeError('the manager could not be built')
+
+        saved = sys.modules['ttkvp2p.manager'].NvmeKVManager
+        sys.modules['ttkvp2p.manager'].NvmeKVManager = broken
+        self.addCleanup(setattr, sys.modules['ttkvp2p.manager'], 'NvmeKVManager', saved)
+        from vllm.v1.core.sched.scheduler import Scheduler
+        from vllm.v1.structured_output import StructuredOutputManager
+        with self.assertLogs('ttkvp2p', level='ERROR'):
+            scheduler = Scheduler(vllm_config=rig.vllm_config, kv_cache_config=rig.kv_cache_config,
+                                  structured_output_manager=StructuredOutputManager(rig.vllm_config), block_size=128,
+                                  hash_block_size=128, include_finished_set=False, log_stats=False)
+        self.assertIsInstance(scheduler.connector.connector_scheduler.manager._manager, RefusedManager)
+        self.assertEqual((rig.runtime.state, rig.runtime.latch_code), ('LATCHED', 'op_throw'))
+        self.assertEqual(rig.runtime.roles, ['worker'])
 
 
 class ConnectorSurfaceTests(unittest.TestCase):

@@ -32,6 +32,8 @@ from vllm.v1.kv_offload.base import (
 )
 from vllm.v1.kv_offload.config import OffloadingConfig
 
+from ttkvp2p.registry import ShardMapError, with_shard_bdf
+
 logger = logging.getLogger(__name__)
 
 # The runtime states (the frozen interface's KVP2PRuntime.state).
@@ -165,6 +167,8 @@ class P2PConfig:
         problems = []
         if self.blocks_per_chunk != 1:
             problems.append('blocks_per_chunk must be 1 (one object is one block of one group)')
+        if not self.offload_prompt_only:
+            problems.append('offload_prompt_only must be true (the admission sizes a request\'s whole prompt boundary, and an offload of the decoded tail would overrun it)')
         if not self.spill_banks or not self.restore_banks:
             problems.append('spill_banks and restore_banks must both be non-empty')
         if set(self.spill_banks) & set(self.restore_banks):
@@ -199,7 +203,8 @@ class P2PConfig:
 class ReqTag:
     tenant: Optional[bytes] = None       # blake2b-8 of the request's cache salt, or None
     has_mm: bool = False                 # the request carries multimodal features (never stored: D9)
-    admitted: Optional[bool] = None      # the I12 verdict, decided once at the request's first store
+    admitted: Optional[bool] = None      # the I12 verdict, decided once at the request's first store (and again after a reset or a wipe: see admitted_epoch)
+    admitted_epoch: Optional[int] = None # the manager epoch the verdict was made in; a verdict of an earlier epoch is void. None = not set by the manager
     no_retry: bool = False               # a deadline or stall failed this request's load: its recompute must not look up again (I13)
     num_prompt_tokens: Optional[int] = None   # the request's prompt length: the manager sizes the WHOLE boundary from it (I12); None = unknown
     hit_tokens: int = 0                  # tokens already on the device or restored from this tier: a later turn stores only what lies beyond them
@@ -318,6 +323,7 @@ class TTP2PNvmeSpec(OffloadingSpec):
         if self.refusal is not None:
             return RefusedManager(self.refusal)
         runtime = None
+        manager = None
         try:
             runtime_module = importlib.import_module('ttkvp2p.runtime')
             manager_module = importlib.import_module('ttkvp2p.manager')
@@ -327,18 +333,34 @@ class TTP2PNvmeSpec(OffloadingSpec):
         except Exception as error:     # a broken tier must not stop the engine: it stays a no-op that always misses
             logger.error('ttkvp2p: the scheduler role cannot attach to the runtime (%s: %s); the tier stays off',
                          type(error).__name__, error, exc_info=True)
-            return self._give_up_manager(runtime, 'scheduler role cannot attach: %s' % (error,))
+            return self._give_up_manager(runtime, manager, 'scheduler role cannot attach: %s' % (error,))
         if mismatch is not None:
             # The connector hands every store's digests to complete_store. A manager that cannot take them would raise on the first
             # successful store and latch the tier then: refuse it here instead, so the tier is off from boot and the log says why.
             logger.error('ttkvp2p: the manager does not take the store completion this connector makes (%s); the tier stays off', mismatch)
-            return self._give_up_manager(runtime, 'the manager does not take the store completion: %s' % (mismatch,))
+            return self._give_up_manager(runtime, manager, 'the manager does not take the store completion: %s' % (mismatch,))
         self.runtime = runtime
         return manager
 
-    def _give_up_manager(self, runtime, reason: str) -> OffloadingManager:
-        """The scheduler role goes without a manager: give back the runtime reference taken for it and hand out the no-op manager."""
+    def _give_up_manager(self, runtime, manager, reason: str) -> OffloadingManager:
+        """The scheduler role goes without a manager (amendment A1; review P1): the tier must not look available.
+
+        The worker role may already have started the tier (under the uni executor it initialises first), so the runtime can be AVAILABLE with nothing
+        servicing it: no heartbeat, no TRIM pump, no eviction, no control polling. Detach the manager, latch the runtime under a closed code
+        (``op_throw``: an internal contract mismatch; the vocabulary is closed, KV-TIER-STANDARD 5.1), and give the reference back, so the runtime,
+        the state file and the alerts all say the tier is off. A runtime whose host checks already failed is off with a better reason and is left
+        alone. Never raises."""
         if runtime is not None:
+            if manager is not None:
+                try:
+                    runtime.detach_manager(manager)         # it must not stay the runtime's manager (mark_bad would call into it)
+                except Exception:
+                    logger.exception('ttkvp2p: detaching the refused manager failed')
+            try:
+                if getattr(runtime, 'host_ok', True):
+                    runtime.latch('internal error: the scheduler role has no usable manager (%s)' % (reason,), 'op_throw')
+            except Exception:
+                logger.exception('ttkvp2p: latching the tier after a refused manager failed')
             # The reference taken above must not leak: the runtime is reference counted, and a leaked 'scheduler' reference
             # would keep it (and the drive claim) open for the life of the process.
             try:
@@ -372,6 +394,10 @@ class TTP2PNvmeSpec(OffloadingSpec):
         """Build the worker for the registered TT KV tensors. Raises TierRefused when the tier cannot start."""
         if self.refusal is not None:
             raise TierRefused(self.refusal)
+        try:
+            registry = with_shard_bdf(registry)       # amendment A3: the plugin fills the map; a registry that arrives without one is completed here, from the mesh alone
+        except ShardMapError as error:
+            raise TierRefused('the card map of the mesh cannot be resolved: %s' % (error,))
         problems = registry.problems(self.layout_geometry)
         if problems:
             raise TierRefused('the registered KV tensors do not match the layout: ' + '; '.join(problems))

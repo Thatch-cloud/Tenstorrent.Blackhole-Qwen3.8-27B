@@ -52,6 +52,7 @@ from ttkvp2p.worker import BAD_KEY_REASONS, TTTransferResult
 logger = logging.getLogger(__name__)
 
 TOMBSTONE_LIMIT = 65536              # I1: the last 64k job ids the connector worker has reported
+RETENTION_ALIGN_TOKENS = 128         # prefix_cache_retention_interval must be 0 or a multiple of the 128-token block (INTERFACE.md 3.1)
 
 
 def blake2b8(salt: str) -> bytes:
@@ -60,8 +61,9 @@ def blake2b8(salt: str) -> bytes:
 
 
 def topology_refusal(vllm_config: VllmConfig) -> Optional[str]:
-    """Why the tier will not run on this engine, or None. It needs the ``uni`` executor, exactly one worker, and the recompute
-    policy for failed loads (any other policy would turn a failed restore into a failed request)."""
+    """Why the tier will not run on this engine, or None. It needs the ``uni`` executor, exactly one worker, the recompute
+    policy for failed loads (any other policy would turn a failed restore into a failed request), and a prefix-cache retention interval the
+    manager can size a boundary for (review M-cfg: the plugin's platform check is the only other guard)."""
     parallel = vllm_config.parallel_config
     if parallel.world_size != 1:
         return 'world_size %d (the tier needs exactly one worker)' % parallel.world_size
@@ -71,6 +73,14 @@ def topology_refusal(vllm_config: VllmConfig) -> Optional[str]:
     policy = getattr(vllm_config.kv_transfer_config, 'kv_load_failure_policy', 'recompute')
     if policy != 'recompute':
         return 'kv_load_failure_policy %r (the tier needs "recompute": a failure must become a miss, not a failed request)' % (policy,)
+    cache_config = getattr(vllm_config, 'cache_config', None)
+    if cache_config is not None and hasattr(cache_config, 'prefix_cache_retention_interval'):
+        interval = cache_config.prefix_cache_retention_interval
+        if interval is None:
+            return ('prefix_cache_retention_interval None (vLLM would retain every sliding-window block, 12,288 objects for a 262k session, and the admission '
+                    'could not size a request\'s boundary: the tier needs 0, or a multiple of %d)' % RETENTION_ALIGN_TOKENS)
+        if isinstance(interval, bool) or not isinstance(interval, int) or interval < 0 or interval % RETENTION_ALIGN_TOKENS:
+            return 'prefix_cache_retention_interval %r (the tier needs 0, or a multiple of %d)' % (interval, RETENTION_ALIGN_TOKENS)
     return None
 
 

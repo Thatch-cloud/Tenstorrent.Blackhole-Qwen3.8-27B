@@ -474,6 +474,8 @@ class FakeRuntime:
         self.host_ok = self.host_ok_default
         self.host_reason = '' if self.host_ok else 'the status file is stale'
         self.latch_reason: Optional[str] = None
+        self.latch_code: Optional[str] = None
+        self.detached: List[object] = []
         self.roles: List[str] = []
         self.released: List[str] = []
         self.closed = False
@@ -485,10 +487,17 @@ class FakeRuntime:
         self.faults: collections.Counter = collections.Counter()
 
     # --- what the worker needs
-    def latch(self, reason: str) -> None:
+    def latch(self, reason: str, code: Optional[str] = None) -> None:
         if self.state != STATE_LATCHED:
             self.state = STATE_LATCHED
             self.latch_reason = reason
+            self.latch_code = code
+
+    def attach_manager(self, manager) -> None:
+        pass
+
+    def detach_manager(self, manager) -> None:
+        self.detached.append(manager)
 
     def set_available(self) -> None:
         if self.state == STATE_UNAVAILABLE:

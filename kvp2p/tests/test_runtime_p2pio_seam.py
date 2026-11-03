@@ -79,8 +79,10 @@ class RealRuntimeBehindP2PIO(tier_kit.TierCase):
         self.addCleanup(lambda: setattr(cl, 'SYSFS_CLASS', saved[0]) or setattr(cl, 'SYSFS_PCI', saved[1]) or setattr(cl, 'default_ops', saved[2]))
         qwen = types.ModuleType('qwen_kv_read')
         info = self.rig.staging_info()
-        qwen.qwen_p2p_staging_alloc = lambda mesh, size: object()
+        self.calls = []
+        qwen.qwen_p2p_staging_alloc = lambda mesh, size: self.calls.append('alloc') or object()
         qwen.qwen_p2p_staging_info = lambda staging: info
+        qwen.qwen_p2p_mesh_devices = lambda mesh: self.calls.append('mesh_devices') or [dict(entry, mesh_index=position) for position, entry in enumerate(info['devices'])]
         qwen.qwen_p2p_warm = lambda staging, tensors, null_block=0: None
         qwen.qwen_p2p_freeze = lambda staging: None
         saved_module = sys.modules.get('qwen_kv_read')
@@ -179,6 +181,35 @@ class RealRuntimeBehindP2PIO(tier_kit.TierCase):
             self.assertEqual(self.runtime.latch_reason, reason)
         finally:
             backend.close()
+
+    def test_a_registry_without_its_shard_map_boots_the_real_tier_through_the_production_factory_and_ends_filled(self):
+        """B1 of the integration review, with nothing stubbed but the card and the drive: the spec completes a registry that arrives with shard_bdf=() from
+        the mesh alone (before the first allocation), the REAL runtime passes its host checks, the production factory builds the REAL CardLinks and P2PIO
+        on the filled map, the worker is built on the completed registry, and only then is the tier AVAILABLE."""
+        from ttkvp2p.registry import TTKVRegistry
+        from ttkvp2p.spec import TTP2PNvmeSpec
+
+        registry = TTKVRegistry(mesh_device=object(), tensors=tuple(range(10)), layer_to_tensor_idx={}, group_layers=(), num_blocks=19305,
+                                pages_per_block=64, row_bytes_per_chip=69632, shard_bdf=())
+        self.assertEqual(registry.num_shards, 0)
+        spec = types.SimpleNamespace(refusal=None, p2p_config=self.cfg, layout_geometry=LAYOUTS[LAYOUT])
+        saved_factory = worker_module.BACKEND_FACTORY
+        worker_module.BACKEND_FACTORY = None                  # the production factory
+        self.addCleanup(setattr, worker_module, 'BACKEND_FACTORY', saved_factory)
+        self.runtime.state = runtime_module.STATE_UNAVAILABLE      # (the setUp opened and flipped it; this test is about the flip)
+        self.runtime._device_ready = False
+        worker = TTP2PNvmeSpec.get_tt_worker(spec, registry)
+        try:
+            self.assertEqual(self.calls[:2], ['mesh_devices', 'alloc'], 'the map came from the mesh before anything was allocated on a card')
+            self.assertEqual(worker.registry.shard_bdf, tuple(fc.BDFS))
+            self.assertEqual((worker.registry.num_shards, worker.registry.object_bytes), (4, LAYOUTS[LAYOUT].object_bytes))
+            self.assertEqual(registry.shard_bdf, (), 'the caller\'s registry is frozen and untouched')
+            self.assertIsInstance(worker.be.io, pio.P2PIO)
+            self.assertEqual(self.runtime.state, STATE_AVAILABLE)
+            self.assertGreater(self.rig.kmd.open_fds, 0, 'the four cards\' windows are open while the worker lives')
+        finally:
+            worker.shutdown()
+        self.assertEqual(self.rig.kmd.open_fds, 0, 'shutting the worker down closed every window')
 
     def test_closing_the_backend_releases_every_descriptor_and_window_and_the_runtime_still_owns_the_drive(self):
         backend = self.build()

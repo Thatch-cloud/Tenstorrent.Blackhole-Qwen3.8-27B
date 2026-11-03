@@ -127,32 +127,48 @@ class _Reservation:
 
 
 class _StoreLedger:
-    """The ``prepare_store`` calls of ONE request whose jobs have not reported yet, oldest first: ``(batch number, keys in prepare order)``.
+    """The ``prepare_store`` calls of ONE request whose jobs have not reported yet, oldest first: ``(batch number, keys in prepare order, reset count)``.
 
     It lives in the request's ``ReqContext`` (``set_state``), the object vLLM hands to ``complete_store`` too, so it outlives
     ``on_request_finished``: a completion that arrives after the request finished still finds it. ``take`` names the batch a completion
     belongs to, which is how a late completion is told from the entries a LATER ``prepare_store`` made for the same keys (after a wipe or
     the reap of a stuck store). Jobs of one request report in the order they were issued (the worker serves them first in first out), so
-    the oldest ledger entry with these keys is the one reporting."""
+    the oldest ledger entry with these keys is the one reporting.
+
+    A ``reset_cache`` ends that: vLLM discards the reports of every job that was in flight at the reset (its stale-job threshold), so those
+    entries are never taken, and the request, still decoding, offers the same keys again from chunk 0. Left in place, the oldest entry with those keys
+    would be the dead one and the new job's report would be filed as stale: its entries would stay ALLOCATED until the reap (review P2). Each entry
+    therefore carries the manager's RESET count (``reset_cache`` only; a ``wipe`` does not discard the reports) and ``take`` / ``add`` drop the entries
+    of earlier resets first."""
 
     __slots__ = ('batches',)
 
     def __init__(self) -> None:
-        self.batches: 'collections.deque[Tuple[int, Tuple[bytes, ...]]]' = collections.deque()
+        self.batches: 'collections.deque[Tuple[int, Tuple[bytes, ...], int]]' = collections.deque()
 
-    def add(self, batch: int, keys: Sequence[bytes]) -> None:
-        self.batches.append((batch, tuple(keys)))
+    def add(self, batch: int, keys: Sequence[bytes], resets: int = 0) -> None:
+        self.drop_before(resets)
+        self.batches.append((batch, tuple(keys), resets))
+
+    def drop_before(self, resets: int) -> int:
+        """Forget the batches made before the ``resets``-th reset: their jobs will never report. Returns how many went."""
+        dropped = 0
+        while self.batches and self.batches[0][2] < resets:      # (oldest first, and the reset count never decreases)
+            self.batches.popleft()
+            dropped += 1
+        return dropped
 
     def discard(self, batch: int) -> None:
-        for index, (number, _keys) in enumerate(self.batches):
+        for index, (number, _keys, _resets) in enumerate(self.batches):
             if number == batch:
                 del self.batches[index]
                 return
 
-    def take(self, keys: Sequence[bytes]) -> Optional[int]:
+    def take(self, keys: Sequence[bytes], resets: int = 0) -> Optional[int]:
         """Remove and return the batch number of the oldest entry holding exactly these keys (in this order, or as a set), or None."""
+        self.drop_before(resets)
         listed = tuple(keys)
-        for index, (number, held) in enumerate(self.batches):
+        for index, (number, held, _resets) in enumerate(self.batches):
             if len(held) == len(listed) and (held == listed or set(held) == set(listed)):
                 del self.batches[index]
                 return number
@@ -178,7 +194,8 @@ class NvmeKVManager(OffloadingManager):
         self._clock = clock or runtime.env.monotonic
         self.tokens_per_object = int(tokens_per_object)
         self.groups: Optional[Tuple[Optional[int], ...]] = tuple(groups) if groups is not None else LAYOUT_GROUPS.get(cfg.layout)
-        self.epoch = 0
+        self.epoch = 0                          # bumped by reset_cache and by wipe: what a verdict or a state-file reader may rely on
+        self._resets = 0                        # bumped by reset_cache ONLY: vLLM discards the reports of the jobs in flight at a reset (_StoreLedger)
         self._now = self._clock()
         self._now_valid = False
         # the index and the LRU (our own: see the module docstring)
@@ -523,7 +540,13 @@ class NvmeKVManager(OffloadingManager):
         if not todo:
             return PrepareStoreOutput(keys_to_store=[], store_spec=NvmeLoadStoreSpec([], []), evicted_keys=[])
         req_id = req_context.req_id
-        cached = tag.admitted if tag is not None else self._verdicts.get(req_id)
+        if tag is not None:
+            # A verdict is the whole-boundary decision of ONE epoch: a reset or a wipe cleared the reservation behind it, and a request that is still
+            # decoding offers its prompt again from chunk 0, so it gets a fresh whole-boundary admission (review P3). ``admitted_epoch`` None = a tag that
+            # never went through this manager (a test's preset verdict) and counts as current.
+            cached = tag.admitted if tag.admitted_epoch in (None, self.epoch) else None
+        else:
+            cached = self._verdicts.get(req_id)
         reservation = self._reservations.get(req_id)
         if cached is False:
             return self._drop_reason('denied')
@@ -584,7 +607,7 @@ class NvmeKVManager(OffloadingManager):
         if ledger is None:
             ledger = _StoreLedger()
             req_context.set_state(ledger)
-        ledger.add(batch, todo)
+        ledger.add(batch, todo, self._resets)
         output = PrepareStoreOutput(keys_to_store=todo, store_spec=NvmeLoadStoreSpec(list(slots), gens), evicted_keys=[])
         try:
             self._check_pairing(output)
@@ -620,6 +643,7 @@ class NvmeKVManager(OffloadingManager):
     def _remember_verdict(self, req_id: str, tag: Optional[ReqTag], admit: bool) -> None:
         if tag is not None:
             tag.admitted = admit
+            tag.admitted_epoch = self.epoch
             return
         self._verdicts[req_id] = admit
         while len(self._verdicts) > VERDICT_CACHE_MAX:
@@ -669,7 +693,7 @@ class NvmeKVManager(OffloadingManager):
         keys = list(keys)
         count = len(keys)
         ledger = req_context.get_state(_StoreLedger) if req_context is not None else None
-        job_batch = ledger.take(keys) if ledger is not None else None          # this report settles the job's record, whatever is left of its entries
+        job_batch = ledger.take(keys, self._resets) if ledger is not None else None          # this report settles the job's record, whatever is left of its entries
         rows = None
         if success:
             rows = self._digest_rows(digests, count)
@@ -857,6 +881,7 @@ class NvmeKVManager(OffloadingManager):
         TRIM under I5. Never a wipe of the drive."""
         self.invalidate_all('reset')
         self.epoch += 1
+        self._resets += 1
 
     def wipe(self) -> None:
         """The control verb ``wipe``: invalidate the index and bump the epoch (the runtime then sends every slot back through TRIM)."""
@@ -874,6 +899,12 @@ class NvmeKVManager(OffloadingManager):
             self._slot_key[array] = None
         self._n_state = [0, 0, 0, 0]
         self._pending.clear()
+        # The reservations go with the index. What an admitted request had reserved and not yet used was charged against the daily write cap at
+        # admission; give it back, as ``on_request_finished`` does (what was already written stays charged: those bytes did go to the drive).
+        now = self._clock()
+        for reservation in self._reservations.values():
+            if reservation.slots or reservation.nbytes:
+                self._bytes.refund(now, reservation.hour, reservation.nbytes)
         self._reservations.clear()
         self._reserved_total = 0
         self._verdicts.clear()

@@ -298,6 +298,75 @@ class ResetWithSlotReuse(RealTierCase):
         self.assertEqual(rig.manager.written(), OBJECTS)
 
 
+class ResetAfterAdmission(RealTierCase):
+    """Review P2 and P3 of the integration review (probes through the real scheduler): ``reset_connector_cache`` while a request is admitted and storing."""
+
+    def test_a_store_in_flight_at_a_reset_does_not_make_the_reoffered_job_look_stale(self):
+        """P2. vLLM discards the report of every job in flight at a reset, and the request (still decoding) offers the same keys again. The new job's
+        report used to be matched with the dead job's ledger entry and filed as stale: every entry stayed ALLOCATED until the 300 s reap, and a
+        returning request with the same prompt waited on HIT_PENDING."""
+        rig = self.rig(num_slots=200)
+        mgr = rig.manager
+        prompt = tokens(PROMPT, 'conv')                        # one prefill chunk, so one store job
+        hold, = rig.io.hold_next()                             # the store job's drive write stays in flight
+        rig.add('a', prompt, max_tokens=60)
+        rig.run_until(lambda: any(call[0] == 'write' for call in rig.io.calls), what='the store write issued')
+        self.assertEqual((mgr._n_state[1], mgr.written()), (OBJECTS, 0), 'the first job is allocated and in flight')
+        self.assertTrue(rig.scheduler.reset_connector_cache())
+        hold.set()
+        rig.finish('a', limit=2000)
+        rig.drain()
+        self.assertEqual(mgr.store_completion_stale, 0, 'the second job\'s report was taken for its own')
+        self.assertEqual((mgr._n_state[1], mgr.written()), (0, OBJECTS), 'nothing is left ALLOCATED: the re-offered session is WRITTEN')
+        self.assertEqual(rig.allocated_keys(), [])
+        rig.reset_device_cache()
+        rig.add('b', prompt)
+        rig.finish('b')
+        self.assertEqual(len(rig.loads), 1, 'a returning request with the same prompt restores it at once, not after the reap')
+        self.assertEqual(rig.worker.stats['done_load'], 1)
+
+    def test_a_wipe_does_not_discard_the_reports_a_reset_would(self):
+        """The control verb ``wipe`` is not vLLM's reset: the scheduler still expects the reports of the jobs in flight, so their ledger entries stay
+        (only ``reset_cache`` bumps the count that retires them)."""
+        rig = self.rig(num_slots=200)
+        mgr = rig.manager
+        hold, = rig.io.hold_next()
+        rig.add('a', tokens(PROMPT, 'wipe'), max_tokens=20)
+        rig.run_until(lambda: any(call[0] == 'write' for call in rig.io.calls), what='the store write issued')
+        before = mgr._resets
+        mgr.wipe()
+        self.assertEqual(mgr._resets, before, 'a wipe retires no ledger entry')
+        hold.set()
+        rig.finish('a', limit=2000)
+        rig.drain()
+        mgr.check_invariants()
+
+    def test_the_reservation_a_reset_clears_is_refunded_and_the_reoffer_is_a_fresh_whole_boundary_admission(self):
+        """P3. Admission at the first chunk of a three-chunk prompt, a reset before the rest: the reservation (and its charge against the daily cap)
+        goes with the index, and the request's next stores must be judged as a whole again, not call by call."""
+        rig = self.rig(num_slots=400, max_batched=1024)
+        mgr = rig.manager
+        rig.add('a', tokens(PROMPT, 'p3'), max_tokens=40)
+        rig.run_until(lambda: mgr._reserved_total > 0, what='admitted')
+        admitted = mgr.admitted_objects
+        reserved = mgr._reserved_total
+        self.assertEqual(admitted, OBJECTS, 'the whole boundary was reserved at the first chunk')
+        written_before = mgr.snapshot()['bytes_written_today'] // OBJ
+        self.assertEqual(written_before, OBJECTS, 'the boundary is charged at admission')
+        self.assertTrue(rig.scheduler.reset_connector_cache())
+        self.assertEqual(mgr._reserved_total, 0)
+        refunded = mgr.snapshot()['bytes_written_today'] // OBJ
+        self.assertLessEqual(refunded, written_before - reserved, 'what the request had reserved and not used is given back')
+        rig.finish('a', limit=2000)
+        rig.drain()
+        snapshot = mgr.snapshot()
+        self.assertGreater(mgr.admitted_objects, admitted, 'the re-offer after the reset was admitted afresh, as a whole boundary')
+        self.assertEqual(mgr.written(), OBJECTS)
+        self.assertEqual(mgr.admission_overrun, 0, 'no call was judged on its own')
+        self.assertLessEqual(snapshot['bytes_written_today'] // OBJ, OBJECTS + refunded, 'charged once more for the second offer, never for a reservation twice')
+        mgr.check_invariants()
+
+
 class TtlAndControl(RealTierCase):
     def test_a_session_older_than_the_ttl_is_not_restored(self):
         rig, prompt = self.stored_rig(tier_extra={'ttl_s': 3600})

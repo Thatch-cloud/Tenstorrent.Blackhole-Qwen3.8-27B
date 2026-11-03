@@ -9,7 +9,7 @@ import tempfile
 import types
 import unittest
 
-from fakes import BANKS, CHIPS, LEAD, SHARD_OBJ, FakeIO, FakeOps, FakeStaging
+from fakes import BANKS, CHIPS, LEAD, SHARD_OBJ, FakeIO, FakeOps, FakeRuntime, FakeStaging
 from harness import SHARDS, RigCase, tokens
 from ttkvp2p import worker as worker_module
 
@@ -19,8 +19,9 @@ class StartupSequence(RigCase):
     # test_runtime and test_tier_rig cover the same start-up on the real runtime.
     FAKE_TIER = True
 
-    def stand_ins(self, rig, log, fail_at=None, kmd_index=True):
-        """Install the three modules; every call is appended to ``log`` as it happens."""
+    def stand_ins(self, rig, log, fail_at=None, kmd_index=True, mesh_map=True):
+        """Install the three modules; every call is appended to ``log`` as it happens. ``mesh_map=False`` is an extension that predates
+        ``qwen_p2p_mesh_devices``."""
         card, drive = rig.card, rig.drive
         ops = FakeOps(card, rig.slot_objects)
 
@@ -52,6 +53,10 @@ class StartupSequence(RigCase):
                     entry['pcie_device'] = None            # the host could not resolve the kmd index
             return info
 
+        def mesh_devices(mesh):
+            step('mesh_devices')
+            return [dict(entry, mesh_index=position) for position, entry in enumerate(staging_info(None)['devices'])]
+
         def warm(staging, tensors, null_block=0):
             step('warm')
             assert null_block == 0 and len(tensors) == 10
@@ -61,6 +66,8 @@ class StartupSequence(RigCase):
 
         qwen.qwen_p2p_staging_alloc, qwen.qwen_p2p_staging_info = staging_alloc, staging_info
         qwen.qwen_p2p_warm, qwen.qwen_p2p_freeze = warm, freeze
+        if mesh_map:
+            qwen.qwen_p2p_mesh_devices = mesh_devices
 
         class CardLink:
             instances = []
@@ -154,6 +161,80 @@ class StartupSequence(RigCase):
         self.assertEqual(log.count('flush') % CHIPS, 0, 'the advisory read goes through every card')
         rig.worker_conn.shutdown()
         self.assertEqual(log[-CHIPS - 1:], ['p2pio_close'] + ['close:%s' % b for b in SHARDS])
+
+    def test_a_registry_without_its_shard_map_boots_through_the_production_factory_and_ends_with_a_filled_one(self):
+        """B1 of the integration review. The plugin's registry used to arrive with shard_bdf=() and the spec refused it ("registry has 0 shards"), so a
+        real engine always booted with the tier off. The map is now read from the mesh BEFORE anything is allocated on a card (the op allocates
+        nothing), and the production factory runs on the completed registry."""
+        import dataclasses
+        rig = self.rig(start_worker=False, extra={'p2pmem_glob': self.allocate_files()})
+        log = []
+        CardLink = self.stand_ins(rig, log)
+        worker_module.BACKEND_FACTORY = None                          # the production factory
+        bare = dataclasses.replace(rig.registry, shard_bdf=())
+        self.assertEqual((bare.shard_bdf, bare.num_shards), ((), 0), 'the registry as the plugin builds it')
+        rig.worker_conn.register_kv_caches(bare)
+        self.assertIsNotNone(rig.worker, rig.worker_conn.connector_worker.unavailable_reason)
+        self.assertEqual(log[:2], ['mesh_devices', 'staging_alloc'], 'the map is read before the first allocation on a card')
+        self.assertEqual(log.count('mesh_devices'), 1)
+        self.assertEqual(rig.worker.registry.shard_bdf, tuple(SHARDS), 'the worker runs on the completed registry')
+        self.assertEqual((rig.worker.registry.num_shards, rig.worker.registry.object_bytes), (CHIPS, rig.registry.object_bytes))
+        self.assertEqual(bare.shard_bdf, (), 'the registry is frozen: the caller\'s copy is untouched, a completed copy is used')
+        self.assertEqual(rig.runtime.state, 'AVAILABLE')
+        self.assertEqual([link.bdf for link in CardLink.instances], list(SHARDS))
+        self.assertTrue(all(link.bdf in link.allocate_path for link in CardLink.instances), 'each card is matched to its own p2pmem file by the filled map')
+
+    def test_a_registry_that_arrives_with_its_shard_map_is_not_asked_again(self):
+        rig = self.rig(start_worker=False, extra={'p2pmem_glob': self.allocate_files()})
+        log = []
+        self.stand_ins(rig, log)
+        worker_module.BACKEND_FACTORY = None
+        rig.worker_conn.register_kv_caches(rig.registry)              # the plugin's build_registry filled it
+        self.assertIsNotNone(rig.worker, rig.worker_conn.connector_worker.unavailable_reason)
+        self.assertNotIn('mesh_devices', log)
+
+    def test_an_extension_without_the_mesh_map_op_leaves_the_tier_off_with_nothing_allocated(self):
+        import dataclasses
+        rig = self.rig(start_worker=False, extra={'p2pmem_glob': self.allocate_files()})
+        log = []
+        self.stand_ins(rig, log, mesh_map=False)
+        worker_module.BACKEND_FACTORY = None
+        rig.worker_conn.register_kv_caches(dataclasses.replace(rig.registry, shard_bdf=()))
+        self.assertIsNone(rig.worker)
+        reason = rig.worker_conn.connector_worker.unavailable_reason
+        self.assertIn('qwen_p2p_mesh_devices', reason)
+        self.assertEqual(log, [], 'nothing was allocated or opened on a card')
+        self.assertEqual(rig.card.log, [])
+        self.assertNotIn(('/dev/test-kv', 'worker'), FakeRuntime.acquire_log, 'the worker role never opened the runtime: the refusal came first, as for any registry that does not fit the layout')
+
+    def test_a_card_the_host_cannot_name_leaves_the_tier_off_with_nothing_allocated(self):
+        import dataclasses
+        for what, damage in (('no PCI address', {'pci_bus_id': None}), ('no tt-kmd number', {'pcie_device': None}),
+                             ('a sysfs disagreement', {'pci_bus_id_agrees': False}), ('a duplicate card', {'pci_bus_id': SHARDS[0]})):
+            with self.subTest(what):
+                rig = self.rig(start_worker=False, extra={'p2pmem_glob': self.allocate_files()})
+                log = []
+                self.stand_ins(rig, log)
+                real = sys.modules['qwen_kv_read'].qwen_p2p_mesh_devices
+                sys.modules['qwen_kv_read'].qwen_p2p_mesh_devices = lambda mesh, real=real, damage=damage: [dict(r, **(damage if i == 1 else {})) for i, r in enumerate(real(mesh))]
+                worker_module.BACKEND_FACTORY = None
+                rig.worker_conn.register_kv_caches(dataclasses.replace(rig.registry, shard_bdf=()))
+                self.assertIsNone(rig.worker)
+                self.assertIn('card map', rig.worker_conn.connector_worker.unavailable_reason)
+                self.assertEqual(log, ['mesh_devices'], 'the map was read and refused; nothing was allocated')
+                rig.close()
+
+    def test_a_card_in_the_map_without_a_p2pmem_file_is_refused_after_the_map_and_before_any_allocation(self):
+        import dataclasses
+        rig = self.rig(start_worker=False, extra={'p2pmem_glob': tempfile.mkdtemp(prefix='ttkvp2p-none-') + '/*/allocate'})
+        log = []
+        self.stand_ins(rig, log)
+        worker_module.BACKEND_FACTORY = None
+        rig.worker_conn.register_kv_caches(dataclasses.replace(rig.registry, shard_bdf=()))
+        self.assertIsNone(rig.worker)
+        self.assertIn('p2pmem allocate file', rig.worker_conn.connector_worker.unavailable_reason)
+        self.assertEqual(log, ['mesh_devices'], 'the zero-device-footprint order holds with a map read from the mesh')
+        self.assertEqual(rig.card.log, [])
 
     def test_a_failure_at_any_step_leaves_the_tier_off_the_windows_closed_and_the_runtime_released(self):
         for fail_at in ('staging_alloc', 'open:card-2', 'aim:card-1:5', 'p2pio', 'dma_canary', 'warm', 'freeze'):
