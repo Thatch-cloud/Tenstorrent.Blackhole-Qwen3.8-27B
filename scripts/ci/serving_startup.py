@@ -265,6 +265,75 @@ def prefix_warm(worker, environ=None):
     return True
 
 
+def resident_kib(path='/proc/self/status'):
+    """This process's VmRSS in KiB from /proc, or None where there is no such file (the trim's log line only)."""
+    try:
+        with open(path, encoding='ascii', errors='replace') as handle:
+            for line in handle:
+                if line.startswith('VmRSS:'):
+                    return int(line.split()[1])
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
+def trim_host_heap(libc=None, say=None, rss=None, glibc=None):
+    """glibc's malloc_trim(0), ONCE, after the fast worker's warm (tp4/s6-notier, the owner's decision of 2026-11-17). -> what happened:
+    'trimmed' (glibc returned pages to the kernel), 'nothing' (it had none to return), 'unavailable' (not glibc, or no malloc_trim) or
+    'failed'. NEVER raises: the trim is a host-RAM courtesy and a worker that has just warmed is never stopped by it.
+
+    Why: the engine process keeps what the model load, the graft's state-dict remap, the trace captures and the attach freed in glibc's
+    arenas (nothing in the image calls malloc_trim, and the default trim threshold only returns the top of the main heap). One trim returns
+    the freed pages below the top of every arena too. Once only, never per step: malloc_trim walks every arena under its lock, so it is
+    taken here, before the scheduler exists and before any request can be waiting. What it returns is read from VmRSS and logged once.
+
+    `libc` (an object with malloc_trim), `say`, `rss` and `glibc` (the libc version string) are the test seams; unset, this loads
+    libc.so.6 only when os.confstr reports a GNU libc (a musl or any other libc is left alone)."""
+    import sys
+
+    if say is None:
+        def say(line):
+            print(line, file=sys.stderr, flush=True)
+    rss = resident_kib if rss is None else rss
+    try:
+        if libc is None:
+            if glibc is None:
+                try:
+                    glibc = os.confstr('CS_GNU_LIBC_VERSION')
+                except (AttributeError, OSError, ValueError):
+                    glibc = None
+            if not glibc or not str(glibc).startswith('glibc'):
+                say('[PINDIAG] host heap trim skipped: not glibc (%s)' % (glibc or sys.platform))
+                return 'unavailable'
+            import ctypes
+
+            libc = ctypes.CDLL('libc.so.6')
+            trim = getattr(libc, 'malloc_trim', None)
+            if trim is not None:
+                trim.argtypes = [ctypes.c_size_t]
+                trim.restype = ctypes.c_int
+        else:
+            trim = getattr(libc, 'malloc_trim', None)
+        if trim is None:
+            say('[PINDIAG] host heap trim skipped: the C library has no malloc_trim (%s)' % (glibc or 'unknown'))
+            return 'unavailable'
+        before = rss()
+        started = time.perf_counter()
+        released = trim(0)
+        millis = (time.perf_counter() - started) * 1000.0
+        after = rss()
+        freed = (before - after) if before is not None and after is not None else None
+        say('[PINDIAG] host heap trimmed after warmup: malloc_trim(0)=%s rss_kib=%s->%s freed_kib=%s ms=%.1f'
+            % (released, before, after, freed, millis))
+        return 'trimmed' if released else 'nothing'
+    except Exception as error:                  # never fatal: the worker has warmed and serves either way
+        try:
+            say('[PINDIAG] host heap trim failed (ignored): %s: %s' % (type(error).__name__, error))
+        except Exception:
+            pass
+        return 'failed'
+
+
 def warmup(worker):
     if os.environ.get('QWEN_FAST_FAULTHANDLER') == '1':
         # A device hang leaves the worker blocked inside a ttnn call; dumping the
@@ -280,4 +349,8 @@ def warmup(worker):
     # before start(), so before any fast-path allocation or trace.
     prefix_warm(worker)
     start(worker)
-    return CompilationTimes(language_model=time.perf_counter() - started, encoder=0.0)
+    elapsed = time.perf_counter() - started
+    # Once, after the warm and the attach and before the scheduler exists: hand the heap the load and the captures freed back to
+    # the kernel (trim_host_heap; glibc only, never fatal).
+    trim_host_heap()
+    return CompilationTimes(language_model=elapsed, encoder=0.0)

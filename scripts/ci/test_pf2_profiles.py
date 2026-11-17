@@ -149,7 +149,7 @@ class ProtectedTests(unittest.TestCase):
             if name not in twins.NAMES:
                 if name in make_s5_profiles.owned_names() or name in make_s6_profiles.owned_names():
                     # tp4/next-1: the ship-5 candidate carries the hand-off (under its owner traffic waiver, in words) and its audited twins carry the audit too; the audit is no traffic profile's
-                    self.assertEqual(profile['env'].get(AUDIT_FLAG), None if name in (make_s5_profiles.SHIP, make_s6_profiles.SHIP) else '1', name)
+                    self.assertEqual(profile['env'].get(AUDIT_FLAG), None if name in (make_s5_profiles.SHIP,) + make_s6_profiles.SHIPS else '1', name)      # (tp4/s6-notier: the ship-6 profile less its host tier is a traffic profile too)
                     self.assertEqual(profile['env'].get(FLAG), '1', name)
                     continue
                 self.assertNotIn(FLAG, profile['env'], name)

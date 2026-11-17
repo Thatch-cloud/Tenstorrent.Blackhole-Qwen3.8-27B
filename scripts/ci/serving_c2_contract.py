@@ -72,6 +72,11 @@ process match it:
    catalog lists and that differs from the base, move the profile's snapshot to that checkpoint's, key the converted-weight directory (TT_CACHE_PATH) by the pair so two
    checkpoints never share a cache, and refuse a snapshot whose config, tokenizer or chat template are not the base's byte for byte. Unset, the base is served exactly as before.
 
+10. the text-only boot (tp4/s6-notier, the owner's decision of 2026-11-17; default off): a profile that admits no image and no video (engine limit-mm-per-prompt
+   {"image": 0, "video": 0}) and sets QWEN_C2_TEXT_ONLY_BOOT=1 builds no vision tower. Every process wraps Qwen36Model.init_vision_model when the model module is imported
+   (skip_vision_init), so the serving wrapper's one default call (no arguments, no tower yet) returns None: no second from_pretrained of the whole checkpoint for its visual
+   half, no vision weights on the device, no shard kept mapped by the retained reference tower. text_only_problems refuses the switch on a profile that admits either modality.
+
 Nothing here changes a gate: every step is off unless QWEN_C2_SERVING=1.
 """
 
@@ -133,6 +138,14 @@ STICKY_SPECULATION = dict(method='dflash', num_speculative_tokens=15)
 PREFIX_HASH_ALGO = 'sha256'
 # The model entry every process logs the source of under a prefix profile (the bring-up check).
 MODEL_ENTRY = 'models.demos.blackhole.qwen36.tt.qwen36_vllm'
+# The text-only boot (item 10; tp4/s6-notier): the profile's own switch (dropped when inherited, apply_environment), honoured only beside an engine that admits
+# no image and no video (text_only_problems). The serving wrapper (MODEL_ENTRY's initialize_vllm_model) calls VISION_CLASS.VISION_METHOD() with no arguments
+# right after create_tt_model; that one call is what the switch skips (skip_vision_init). Any call with arguments, or on a model that already has a tower, runs the original.
+TEXT_ONLY_FLAG = 'QWEN_C2_TEXT_ONLY_BOOT'
+VISION_MODULE = 'models.demos.blackhole.qwen36.tt.model'
+VISION_CLASS = 'Qwen36Model'
+VISION_METHOD = 'init_vision_model'
+TEXT_ONLY_MARKER = '[PINDIAG] text-only boot: vision tower skipped'
 # A profile with gate_only: true boots only with this set to 1.
 GATE_SWITCH = 'QWEN_C2_GATE'
 # Lever N at TP4 (levern_policy.FLAG and ALL_FLAGS, pinned equal by test_levern_contract): chunked prefill interleaved with the packed
@@ -547,7 +560,73 @@ def apply_environment(profile, environ=None):
     for name in EXACT_RESUME_NAMES:
         if name not in profile['env']:
             environ.pop(name, None)
+    # ...and the text-only boot (item 10): an inherited switch must not drop the vision tower under a profile that never said it admits no image.
+    if TEXT_ONLY_FLAG not in profile['env']:
+        environ.pop(TEXT_ONLY_FLAG, None)
     return environ
+
+
+def text_only_problems(profile):
+    """Every way the profile sets the text-only boot wrongly, [] when none (or when it does not name it): the switch is 0 or 1, and 1 only beside an engine
+    whose limit-mm-per-prompt is exactly {"image": 0, "video": 0} (a profile that may take an image needs the tower the switch skips)."""
+    env = profile.get('env') or {}
+    if TEXT_ONLY_FLAG not in env:
+        return []
+    value = str(env[TEXT_ONLY_FLAG])
+    if value not in ('0', '1'):
+        return ['%s=%r is not 0 or 1' % (TEXT_ONLY_FLAG, value)]
+    if value == '0':
+        return []
+    limits = (profile.get('engine') or {}).get('limit-mm-per-prompt')
+    if not (isinstance(limits, dict) and set(limits) == {'image', 'video'} and all(type(count) is int and count == 0 for count in limits.values())):
+        return ['%s=1 builds no vision tower, so the profile must admit no image and no video (engine limit-mm-per-prompt {"image": 0, "video": 0}), not %r'
+                % (TEXT_ONLY_FLAG, limits)]
+    return []
+
+
+def skip_vision_init(module):
+    """The text-only boot's post-import hook on VISION_MODULE: wrap VISION_CLASS.VISION_METHOD so that the default call (no arguments, on a model with no tower yet: the
+    serving wrapper's) builds nothing, logs TEXT_ONLY_MARKER and returns None, leaving vision_model None; every other call runs the original. A module without the class or
+    the method is refused (the boot would otherwise claim a skip it cannot make). Idempotent. -> the installed method."""
+    cls = getattr(module, VISION_CLASS, None)
+    original = getattr(cls, VISION_METHOD, None) if cls is not None else None
+    if not callable(original):
+        raise ValueError('%s=1 but %s has no %s.%s: the text-only boot cannot skip the vision tower of this model tree'
+                         % (TEXT_ONLY_FLAG, getattr(module, '__name__', VISION_MODULE), VISION_CLASS, VISION_METHOD))
+    if getattr(original, '_qwen_c2_text_only', False):
+        return original
+
+    def init_vision_model(self, *args, **kwargs):
+        if args or kwargs or getattr(self, 'vision_model', None) is not None:
+            return original(self, *args, **kwargs)
+        log_pindiag(TEXT_ONLY_MARKER + ' ({}=1): no reference vision load, no vision weights on the device', TEXT_ONLY_FLAG)
+        return None
+
+    init_vision_model._qwen_c2_text_only = True
+    init_vision_model.__wrapped__ = original
+    init_vision_model.__doc__ = original.__doc__
+    setattr(cls, VISION_METHOD, init_vision_model)
+    return init_vision_model
+
+
+def install_text_only_boot(profile_name, environ=None, on_import=None):
+    """Under a profile that sets QWEN_C2_TEXT_ONLY_BOOT=1 (text_only_problems has admitted it), in every process: arm skip_vision_init on the model module, or run it at
+    once when the module is already imported. -> whether it was armed."""
+    environ = os.environ if environ is None else environ
+    if environ.get(TEXT_ONLY_FLAG) != '1':
+        return False
+    if on_import is None:
+        def on_import(name, callback):
+            loaded = sys.modules.get(name)
+            if loaded is not None:
+                # Already imported: a post-import hook would never fire.
+                callback(loaded)
+                return
+            sys.meta_path.insert(0, PostImportHook(name, callback))
+    on_import(VISION_MODULE, skip_vision_init)
+    log('profile %s: text-only boot armed (%s=1): %s.%s.%s() with no arguments builds no vision tower (the profile admits no image and no video)',
+        profile_name, TEXT_ONLY_FLAG, VISION_MODULE, VISION_CLASS, VISION_METHOD)
+    return True
 
 
 def prefix_reuse(profile):
@@ -1945,6 +2024,9 @@ def boot(environ=None, orig_argv=None):
     problems = mesh_problems(profile)
     if problems:
         raise ValueError('profile %s cannot open its mesh: %s' % (profile['name'], '; '.join(problems)))
+    problems = text_only_problems(profile)
+    if problems:
+        raise ValueError('profile %s misuses the text-only boot: %s' % (profile['name'], '; '.join(problems)))
     levers = waived_levers(profile)
     if levers:
         waiver = profile[TRAFFIC_WAIVER]
@@ -1954,6 +2036,7 @@ def boot(environ=None, orig_argv=None):
     armed = install_upload_levers(environ)
     if armed:
         log('profile %s: engine-start upload levers armed: %s (default off; each logs engaged or refused at its first use)', profile['name'], ' '.join(armed))
+    install_text_only_boot(profile['name'], environ)
     if DRAFTER_CHECKPOINT_FLAG in profile['env']:
         # A candidate drafter: its baked bytes must be the pinned ones (docs/tp4-combined-window.md), or the attach is refused before an engine starts.
         import drafter_checkpoint

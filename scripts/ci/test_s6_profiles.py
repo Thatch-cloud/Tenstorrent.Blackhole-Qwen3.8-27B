@@ -107,7 +107,7 @@ class CandidateTests(unittest.TestCase):
         for name, body in parent.items():
             self.assertEqual(PROFILES[name], body, name)
         added = [name for name in PROFILES if name not in parent]
-        self.assertEqual(sorted(added), sorted([SHIP, AUDIT]))
+        self.assertEqual(sorted(added), sorted([SHIP, AUDIT, twins.NOTIER]))      # (tp4/s6-notier: the ship-6 profile without the host tier, test_s6nt_profiles)
         self.assertEqual(PROFILES[SHIP5][contract.TRAFFIC_WAIVER]['id'], 'ship5-fx-262k-2026-10-19')
         self.assertTrue(PROFILES[SHIP5][contract.TRAFFIC_WAIVER]['decision'].startswith('APPROVED'))
         self.assertNotIn('QWEN_FAST_LEVERN_ADAPTIVE', PROFILES[SHIP5]['env'])
@@ -235,7 +235,7 @@ class TwinTests(unittest.TestCase):
         self.assertEqual(boot_problems(dict(PROFILES[AUDIT], name=AUDIT)), [])
         self.assertIn(AUDIT, profile_twins.twin_names())
         self.assertEqual(twins.twin_names(), (AUDIT,))
-        self.assertEqual(twins.owned_names(), (AUDIT, SHIP))
+        self.assertEqual(twins.owned_names(), (AUDIT, SHIP, twins.NOTIER))        # (tp4/s6-notier's traffic profile is the candidate's env less the tier: the census tests exempt it with the candidate)
         self.assertEqual(twins.generate(DATA), DATA, 'the file is what the generator makes')
         self.assertEqual(twins.main(['--check']), 0)
 
@@ -279,7 +279,9 @@ class TwinTests(unittest.TestCase):
 
     def test_the_twins_need_no_owner_waiver_and_there_is_no_timed_twin(self):
         names = [name for name in PROFILES if name.startswith(NS) and 's6' in name]
-        self.assertEqual(sorted(names), sorted([SHIP, AUDIT]), 'the timed arm is the candidate itself, its control the ship-5 profile')
+        # (tp4/s6-notier adds one more TRAFFIC profile, the candidate less its host tier, under its own waiver: test_s6nt_profiles; still no gate-only timed twin)
+        self.assertEqual(sorted(names), sorted([SHIP, AUDIT, twins.NOTIER]), 'the timed arm is the candidate itself, its control the ship-5 profile')
+        self.assertNotIn('gate_only', PROFILES[twins.NOTIER])
 
     def test_a_twin_is_refused_when_its_parent_moves(self):
         data = copy.deepcopy(DATA)
