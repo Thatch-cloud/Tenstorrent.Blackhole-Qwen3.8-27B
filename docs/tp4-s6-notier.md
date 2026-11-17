@@ -32,15 +32,18 @@ tier frees 32 GiB, and the measured cost is at most the one returning session wh
 
 | Item | Where | Default | In the new profile |
 | --- | --- | --- | --- |
-| New traffic profile `c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-traffic-s6-nt` (63 characters; a baked default may have 64) | `scripts/ci/fusion-wp/S6NT.json`, generated into `qwen_c2_profiles.json` by `make_fusion_profiles.py` | - | - |
+| New traffic profile `c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-traffic-s6-nt` (62 characters; a baked default may have 64) | `scripts/ci/fusion-wp/S6NT.json`, generated into `qwen_c2_profiles.json` by `make_fusion_profiles.py` | - | - |
 | Host KV tier removed: `QWEN_PREFIX_HOST_TIER_GIB`, `_AUDIT`, `_VERIFY`, `_SPILL_MODE`, `QWEN_PREFIX_TIER_RESTORE_SLICE`, `_MS` | the ship entry's env | tier off is the registry default | absent |
 | Checkpoint store | the ship entry's env | - | `QWEN_PREFIX_STORE_GIB=16` (unchanged) |
 | Owner traffic waiver `ship6-notier-2026-11-17` | the ship entry's waiver | - | the ship-6 levers less `QWEN_PREFIX_HOST_TIER_GIB` and `QWEN_PREFIX_HOST_TIER_SPILL_MODE`; the ship-6 text and evidence verbatim, then (S) and (T) |
 | Text-only boot, `QWEN_C2_TEXT_ONLY_BOOT=1` | `serving_c2_contract.py` item 10 (`text_only_problems`, `skip_vision_init`, `install_text_only_boot`) | **off** | on |
 | `malloc_trim(0)` once after the fast worker's warm | `serving_startup.trim_host_heap`, called from `warmup` after `start` | on in every profile of the image, glibc only, never fatal | on |
 
-Nothing else of ship 6 moves. The ship-6 profile and its waiver are untouched: they are the rollback. The file's own default (`c2-packed-tp4`) is
-untouched; the build bakes the profile (`C2_BAKE_DEFAULT_PROFILE`).
+Nothing else of ship 6 moves. The ship-6 profile and its waiver are untouched. The rollback is the image that serves them now, not that profile on
+this branch's image (section 4). The file's own default (`c2-packed-tp4`) is untouched; the build bakes the profile (`C2_BAKE_DEFAULT_PROFILE`).
+
+The ship entry also names the checkpoint production serves beside the profile (`"model"`: Swift, `ukisai/Swift-1.5-Qwen3.8-27b` at `b4c84d42`). It
+changes no profile. It puts the checkpoint selection on the pack's smoke and prefix gates (section 4).
 
 ### The contract
 
@@ -100,17 +103,64 @@ The text-only boot changes host RSS by about 0-1 GiB. Its gain is a faster, ligh
 The generated pack is `scripts/ci/references/fusion-jobs/ship-traffic-s6-nt/`. It holds B0, G1, GX0, GX1, G2 and SR on the placeholder image
 `tp4-s6nt-1`. The control of GX0 is the ship-6 profile.
 
-* **Minimum before placement:** B0 (the build), then SR (the platform replay of the thin layer built on it).
-* **Exactness:** GX0 then GX1, the same prompts on both profiles.
-* **Fuller:** G1 (the eight-seat 262k gate) and G2 (the salted prefix hit).
+### Which checkpoint each job serves
 
-B0 is refused while the waiver's decision is PENDING, by `c2_serving_job.read_bake` and `build-c2-serving-image.sh`.
+Production serves Swift. Three ENV lines of the production thin layer select it: `QWEN_C2_MODEL_REPO`, `QWEN_C2_MODEL_REVISION` and the alias
+`THATCH_SERVING_MODEL_ALIAS=ukisai/Swift-1.5-Qwen3.8-27b:tt`. The node agent forwards no environment into the container.
 
-The approval is a sentence starting APPROVED:
+| Job | Checkpoint | Why |
+| --- | --- | --- |
+| B0 | none | A build. |
+| G1, GX0, GX1, G2 | Swift, by `C2_MODEL_REPO` and `C2_MODEL_REVISION` | They run the profile as production boots it: Swift's own converted-weight directory, and Swift's catalog request numbers laid over the profile's (`checkpoint_limits`: a default answer of 16,384 and an output ceiling of 32,768, ship-6 waiver item K). Both GX arms carry the same keys, so the pair differs by the profile alone, as in the S6 window. |
+| SR | the base | The replay step cannot carry a selection: the job reader refuses the keys beside it (`MODEL_ACTIONS`), the workflow passes no `--model`, and the replay's served-name check defaults to the base's alias. On the production layer the contract refuses the base model at every load (`check_platform_model`, exit 78). |
+
+So SR runs on a **base variant** of the thin layer:
+
+* the same build as the production layer, without the three Swift lines;
+* build the production layer as the base variant plus one layer of exactly those three lines, so the sorted `Config.Env` of the two images differ by
+  exactly them;
+* SR qualifies the platform sequence and the B0 bytes on the base checkpoint, not the production bytes;
+* the replay copies the tracked record of the base's placement (`references/c2-serving`), so the source image that record names must be on the rig
+  host first;
+* the base's own converted weights must be on the hub; a cold cache is converted at the first load and can outlast the replay's startup wait.
+
+The production layer is first served by the library deploy (`release_first`). Read after the deploy:
+
+* `/v1/models` names `ukisai/Swift-1.5-Qwen3.8-27b:tt`;
+* a tool call comes back as `tool_calls`, and the reasoning is split from the answer;
+* the no-tier read below holds in the engine log.
+
+### What must pass
+
+The pass rule is in the pack's `ORDER.txt`. Before any publish, placement or `:latest` move, all of these must pass:
+
+* B0;
+* G1 (the eight-seat 262k gate);
+* GX0 then GX1 (exactness: the same prompts on both profiles). This pair is the only exactness evidence for the text-only boot and the changed DRAM
+  layout;
+* G2 (the salted prefix hit; soft, or the owner's recorded override against its control);
+* SR, which needs G1 and GX1.
+
+A smaller gate depth is the owner's decision. Record it in `ORDER.txt` before B0.
+
+### The decision
+
+The waiver's decision is **PENDING**. The owner's decision of 2026-11-17 reached this branch through another session, so the sentence records it as
+relayed and waits for the owner. B0 is refused while the decision is PENDING, by `c2_serving_job.read_bake` and `build-c2-serving-image.sh`.
+
+The owner approves with one sentence starting APPROVED. Commit it, run the CPU suite on that commit, and push the B0 tag on that commit:
 
 ```
 python3 scripts/ci/make_fusion_profiles.py --approve-ship "APPROVED ..." --ship traffic-s6-nt
 ```
+
+### Rolling back
+
+Roll back by image, never by profile. The rollback is the image that served before this one.
+
+* Selecting the ship-6 profile on this branch's image is not ship 6. The post-warm `malloc_trim` runs in every profile of the image, and it has no
+  switch. The GX0 control trims too. The trim cannot change an answer, but its effect on host RSS cannot be measured A/B on one image.
+* The rollback image must be in the registry before the deploy. Check its manifest. A tag that exists only on the card host dies in the next prune.
 
 Read rules beyond the pack's own:
 

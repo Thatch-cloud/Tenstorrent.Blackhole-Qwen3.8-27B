@@ -328,8 +328,12 @@ SHIP_GRAFTS = ('K64j-OQ',)
 # `memory_plan` of a ship entry: the third block's memory plan of the octo shape (make_octo_profiles.MEMORY: the KV pool lowered, the trace region raised, QWEN36_MAX_TOKENS_ALL_USERS
 # following the pool), applied to the generated traffic profile. `image` overrides the placeholder tag of the ship pack, `read_note` adds a sentence to its G1 and GX1 read rules.
 # `pack` names the folder of the ship's gate pack when ANOTHER generator owns it whole (tp4/ship-4: references/fusion-jobs/ship4, make_ship4_jobs.py, which builds its gate rows from ship_rows): this
-# generator then writes no pack for the entry and leaves the folder alone.
+# generator then writes no pack for the entry and leaves the folder alone. `model` ({"repo", "revision"}: a pair of qwen_c2_checkpoints.json, not the base) is the checkpoint production serves
+# beside the profile (its thin layer selects it): the ship pack's smoke and prefix gates then carry C2_MODEL_REPO / C2_MODEL_REVISION, so they qualify the profile on the checkpoint it will serve,
+# and its replay runs on the base variant of the thin layer (the replay step cannot forward a selection). It changes no profile.
 SHIP_MEMORY_PLANS = ('octo',)
+SHIP_MODEL_REPO = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*')
+SHIP_MODEL_REVISION = re.compile(r'[0-9a-f]{40}')
 SHIP_DECISIONS = ('PENDING', 'APPROVED')
 SHIP_ID = re.compile(r'[a-z0-9][a-z0-9.-]{2,62}')
 SHIP_FORBIDDEN = ('thatch' + '.local', '192' + '.168.', 'sha256' + ':', '/' + 'home' + '/', '@')       # the decision sentence is public text: no host, registry, digest, path or address
@@ -350,8 +354,8 @@ def decision_problem(decision):
 def ship_of(wp, raw, where):
     """One ship spec: a TRAFFIC profile `<namespace><name>` = the production profile plus exactly the env of the combined twin `from`, carrying an owner traffic waiver of its own
     (the four waivable levers the production profile's waiver names, and the fields below). The decision is PENDING until the owner's sentence replaces it."""
-    if not isinstance(raw, dict) or set(raw) - {'name', 'from', 'reason', 'waiver', 'env', 'bake_graft', 'control', 'memory_plan', 'image', 'read_note', 'pack'}:
-        raise ManifestError('%s: a ship entry is {"name", "from", "reason", "waiver"} and, for a ship candidate built on another one, {"env", "bake_graft", "control", "memory_plan", "image", "read_note", "pack"}' % where)
+    if not isinstance(raw, dict) or set(raw) - {'name', 'from', 'reason', 'waiver', 'env', 'bake_graft', 'control', 'memory_plan', 'image', 'read_note', 'pack', 'model'}:
+        raise ManifestError('%s: a ship entry is {"name", "from", "reason", "waiver"} and, for a ship candidate built on another one, {"env", "bake_graft", "control", "memory_plan", "image", "read_note", "pack", "model"}' % where)
     name = text_of(raw.get('name'), where, 'name')
     if not ID.match(name):
         raise ManifestError('%s: ship name %r must be lower-case letters, digits and single dashes' % (where, name))
@@ -386,9 +390,14 @@ def ship_of(wp, raw, where):
     pack = raw.get('pack')
     if pack is not None and not (isinstance(pack, str) and re.fullmatch(r'[A-Za-z][A-Za-z0-9]{1,20}', pack) and pack.lower() != 'ship'):
         raise ManifestError('%s: ship %s pack is the name of a folder under references/fusion-jobs that another generator owns (letters and digits, not "ship"), got %r' % (where, name, pack))
+    model = raw.get('model')
+    if model is not None and not (isinstance(model, dict) and set(model) == {'repo', 'revision'} and isinstance(model['repo'], str) and SHIP_MODEL_REPO.fullmatch(model['repo'])
+                                  and isinstance(model['revision'], str) and SHIP_MODEL_REVISION.fullmatch(model['revision'])):
+        raise ManifestError('%s: ship %s model is {"repo": "<org>/<name>", "revision": "<the 40-hex commit>"}, the checkpoint its gates serve, got %r' % (where, name, model))
     return dict(name=name, source=text_of(raw.get('from'), where, 'from'), reason=text_of(raw.get('reason', 'the ship candidate'), where, 'reason'),
                 waiver=dict((field, waiver[field]) for field in SHIP_FIELDS + (('levers',) if 'levers' in waiver else ())), env=env_of(raw.get('env'), where, 'env'),
-                bake_graft=bake_graft, control=control, memory_plan=memory_plan, image=image, read_note=(text_of(raw['read_note'], where, 'read_note') if raw.get('read_note') else None), pack=pack)
+                bake_graft=bake_graft, control=control, memory_plan=memory_plan, image=image, read_note=(text_of(raw['read_note'], where, 'read_note') if raw.get('read_note') else None), pack=pack,
+                model=(dict(repo=model['repo'], revision=model['revision']) if model else None))
 
 
 def tests_of(wp, value, where):

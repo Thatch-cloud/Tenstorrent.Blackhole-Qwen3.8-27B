@@ -293,6 +293,46 @@ def ship_rows(plan, spec):
                  'and reads only.')
     levers = ', '.join(sorted(spec['env_flags']))
     note = (' ' + spec['read_note']) if spec.get('read_note') else ''
+    model = spec.get('model')
+    # the ship entry's `model` (make_fusion_profiles.ship_of): the checkpoint production serves beside the profile. The smoke and prefix gates carry the same selection keys (so GX0 and GX1 differ by
+    # the profile alone); the build and the replay cannot (c2_serving_job.MODEL_ACTIONS), so SR replays the base variant of the thin layer (sr_why).
+    selection = ['C2_MODEL_REPO=%s' % model['repo'], 'C2_MODEL_REVISION=%s' % model['revision']] if model else []
+    checkpoint = ((" CHECKPOINT (C2_MODEL_REPO and C2_MODEL_REVISION, qwen_c2_checkpoint.py): the job serves %s at %s, the checkpoint production serves beside this profile, from its own converted-weight "
+                   "directory and with its catalog entry's request numbers laid over the profile's (serving_c2_contract.checkpoint_limits: the default answer and the output ceiling), as a production boot "
+                   "runs; the keys are the same in G1, GX0, GX1 and G2, so GX0 and GX1 differ by the profile alone. READ: the container log holds \"[QWEN-C2] checkpoint %s@%s key=...\" once, a \"weight "
+                   "cache ...: found\" line and the worker's \"[QWEN-C2] checkpoint bound ...\" line (the smoke step passes c2_smoke_check.py --expect-checkpoint; the prefix gate checks every arm's log)."
+                   % (model['repo'], model['revision'][:12], model['repo'], model['revision'])) if model else '')
+    sr_why = ("SR (STOP): the four-card platform replay of the PRODUCTION image: the node agent's serving sequence in a copy of its container running the THIN LAYER built on the B0 image "
+              "(C2_PLATFORM_IMAGE=local:thin-layer: the step reads the image name from a file the operator writes on the runner; it is never committed). The replay sets no profile, so it boots "
+              "the ship profile BY THE IMAGE DEFAULT, which is why it needs the baked B0 image and so the APPROVED decision. THE RECORDED SOURCE IMAGE: the replay copies the node agent's container "
+              "from a tracked record (scripts/ci/references/c2-serving, the step's --source) and, to subtract the source image's own ENV from the recorded one, needs that image present on the rig host "
+              "(c2_platform_replay.source_problem); when the step reports 'the source image ... is not on this host', the operator pulls it first (the w2-er SR needed this after the daemon had "
+              "dropped it) - the image name stays out of this file. READ the vLLM subprocess log: '[QWEN-C2] profile %s: vLLM argv', the OWNER TRAFFIC WAIVER line, the P150x4 mesh, admission passed "
+              "with no UNQUALIFIED admission line and no 262k evidence waiver, prefix installed, the Lever N install and warm lines, the parked build line, every op-fusion lever's engaged line, the :tt "
+              "alias before and after the restart, and no kill-switch line (no levern.off, prefix-reuse.off or parked.off left on the hub). PASS: 'PLATFORM_REPLAY passed=True'. The replay turns the "
+              "session cap off; the cap is read live after the deploy. The replay step has no telemetry sidecar. Measured basis: 25 minutes.%s" % (ship, note))
+    if model:
+        sr_why = ("SR (STOP) RUNS ON THE BASE VARIANT OF THE THIN LAYER, NEVER ON THE PRODUCTION LAYER: the four-card platform replay, the node agent's serving sequence (c2_platform_replay.py) in a copy "
+                  "of its container, running the thin layer built on the B0 image WITHOUT the production layer's checkpoint lines: no QWEN_C2_MODEL_REPO, no QWEN_C2_MODEL_REVISION, and the Dockerfile's "
+                  "own alias Qwen/Qwen3.8-27B:tt in place of %s:tt (C2_PLATFORM_IMAGE=local:thin-layer: the step reads the image name from a file the operator writes on the runner; it is never committed). "
+                  "WHY: the replay step loads the checkpoint the replay names (serving.manage --model, the base's: the workflow passes no other and this reader refuses C2_MODEL_REPO and C2_MODEL_REVISION "
+                  "beside a replay), and on a layer that selects %s the contract refuses a platform model naming the base (check_platform_model: the API server exits 78 at every load); the replay's "
+                  "served-name check defaults to the base's alias, and the runtime's compiled per-model kwargs (the reasoning and tool-call parsers) name the base only (production's checkpoint takes "
+                  "its parsers from its library entry at the deploy). BUILD the production layer as the base variant plus ONE layer of those "
+                  "three ENV lines and nothing else, and compare the sorted Config.Env of the two images: they differ by exactly those three lines. SR therefore qualifies the platform sequence "
+                  "(release-first load, warm-up, coding, four concurrent requests, a tool call, the traffic steps, the in-place reload, the stop and start) and the B0 image's bytes ON THE BASE CHECKPOINT, "
+                  "not the production bytes: the production layer is first served by the library deploy (release_first), and its post-deploy read is /v1/models naming %s:tt, a tool call answered as "
+                  "tool_calls, the reasoning split, and this pack's no-tier read in the engine log. The replay hands its container no profile: C2_REPLAY_PROFILE (required on four cards) is the profile the "
+                  "image must boot BY ITS DEFAULT, and every boot must log it, which is why SR needs the baked B0 image and so the APPROVED decision. THE RECORDED SOURCE: the step looks for the base's "
+                  "placement container by name and, with production unserved, falls back to the tracked record of the base's placement (scripts/ci/references/c2-serving: its checkpoint is the base's, as "
+                  "the base variant serves); to subtract that record's source image ENV it needs the source image present on the rig host (c2_platform_replay.source_problem): when the step reports 'the "
+                  "source image ... is not on this host', the operator pulls it first - the image name stays out of this file. The base's own converted weights are read at the first load (the base's "
+                  "unkeyed weight cache, which the base's placements built); a cold one is converted at that load, an ESTIMATED 8 to 25 minutes (docs/tp4-swift.md) that can outlast the replay's startup "
+                  "wait, so the operator confirms it is on the hub before the window. READ the vLLM subprocess log: '[QWEN-C2] profile %s: vLLM argv', the OWNER TRAFFIC WAIVER "
+                  "line, the P150x4 mesh, admission passed with no UNQUALIFIED admission line and no 262k evidence waiver, prefix installed, the Lever N install and warm lines, the parked build line, every "
+                  "op-fusion lever's engaged line, the Qwen/Qwen3.8-27B:tt alias before and after the restart, and no kill-switch line (no levern.off, prefix-reuse.off or parked.off left on the hub). PASS: "
+                  "'PLATFORM_REPLAY passed=True'. The replay turns the session cap off; the cap is read live after the deploy. The replay step has no telemetry sidecar. Measured basis: 25 minutes.%s"
+                  % (model['repo'], model['repo'], model['repo'], ship, note))
     return [
         dict(name='B0-ship-build', mode='stop', minutes=SHIP_MINUTES['B0'], actions='build', profile=None, bake=ship, tests=None, telemetry=False, extra=list(graft), needs=(),
              why=("B0 (STOP): build the SHIP image from the commit that records the owner's approval, with %s baked as the image's serving default (ENV QWEN_C2_PROFILE) and THATCH_SERVING_SESSION_CAP baked "
@@ -303,7 +343,7 @@ def ship_rows(plan, spec):
                   % (ship, waiver['id'], ship, (" THE IMAGE BAKES THE %s OP GRAFT (C2_BAKE_GRAFT=%s): its _ttnncpp.so is the one this profile's lever needs, and a TRAFFIC boot on it is admitted only on packed-any records "
                                                 "made on that binary (record_packed_any_evidence_tp4.py --binary k64j-oq: the RQ1 and RQ2 jobs of references/fusion-jobs/WPP), so G1, GX1, G2 and SR need those records "
                                                 "committed first." % (spec['bake_graft'], spec['bake_graft'])) if spec.get('bake_graft') else ''))),
-        dict(name='G1-ship-gate', mode='stop', minutes=SHIP_MINUTES['G1'], actions='reset smoke', profile=ship, tests=G1_TESTS, telemetry=True, extra=['C2_BOX_MINUTES=90'],
+        dict(name='G1-ship-gate', mode='stop', minutes=SHIP_MINUTES['G1'], actions='reset smoke', profile=ship, tests=G1_TESTS, telemetry=True, extra=selection + ['C2_BOX_MINUTES=90'],
              needs=('G1 <- B0',),
              why=("G1 (STOP): the card re-test of the SHIP image, unaudited (an audited 8x262k profile costs about 8.4 minutes per request): the ship profile with W2, engine reuse and the op-fusion levers "
                   "together for the first time on the traffic profile. Warmup, a coding answer, eight-seat steady and skew (the deadline rule: slowest first token under 238 s), the cold 262k stall "
@@ -311,34 +351,26 @@ def ship_rows(plan, spec):
                   "(c2_smoke_check, every rule clean, including the smoke's concurrent8_steady list rule and the fusion rules): '[QWEN-C2] profile %s: OWNER TRAFFIC WAIVER', 'lever N governor: ttft=180 "
                   "gap_floor=8', the tp4 sdpa multi engaged line and its UNQUALIFIED line (expected at 262,144), the conv-gates spread engaged line, EVERY op-fusion lever's engaged line and no "
                   "fell-back line (%s), the round-host engaged line with select and read taken on at least 95 percent of the drafting steps, the parked build of 8 engines at 0.41-0.51 GB each (parked_judge's "
-                  "lever band; 0.418 measured) and every rebind clean, no stall, 0 crashes, skew under 238 s, the DRAM-after-attach lines (record the free DRAM per chip). %s%s" % (ship, levers, telemetry, note))),
+                  "lever band; 0.418 measured) and every rebind clean, no stall, 0 crashes, skew under 238 s, the DRAM-after-attach lines (record the free DRAM per chip). %s%s%s" % (ship, levers, telemetry, checkpoint, note))),
         dict(name='GX0-exact-control', mode='stop', minutes=SHIP_MINUTES['GX0'], actions='reset smoke', profile=control, tests=GX_TESTS, telemetry=True,
-             extra=['C2_SMOKE_PARTIAL=exactness control arm: its test list is fixed by the protocol, so concurrent8_steady is not run', 'C2_BOX_MINUTES=40'], needs=('GX0 <- B0',),
+             extra=selection + ['C2_SMOKE_PARTIAL=exactness control arm: its test list is fixed by the protocol, so concurrent8_steady is not run', 'C2_BOX_MINUTES=40'], needs=('GX0 <- B0',),
              why=("GX0 (STOP): the CONTROL of the exactness pair, on the same image as GX1: the %s profile %s over the exactness test list (the parked and Lever N equal-answer tests: the same "
                   "prompts, exact-length completions, content hashes), unaudited. The smoke ends red only by the concurrent8_steady list rule (C2_SMOKE_PARTIAL names the omission). Its logs are the reference "
-                  "of GX1. %s" % ('ship candidate' if spec.get('control') else 'production', control, telemetry))),
+                  "of GX1. %s%s" % ('ship candidate' if spec.get('control') else 'production', control, telemetry, checkpoint))),
         dict(name='GX1-exact-ship', mode='stop', minutes=SHIP_MINUTES['GX1'], actions='reset smoke', profile=ship, tests=GX_TESTS, telemetry=True,
-             extra=['C2_SMOKE_PARTIAL=exactness ship arm: its test list is fixed by the protocol, so concurrent8_steady is not run', 'C2_BOX_MINUTES=40'], needs=('GX1 <- GX0',),
+             extra=selection + ['C2_SMOKE_PARTIAL=exactness ship arm: its test list is fixed by the protocol, so concurrent8_steady is not run', 'C2_BOX_MINUTES=40'], needs=('GX1 <- GX0',),
              why=("GX1 (STOP): EXACTNESS of the ship profile %s against its control GX0 on the same image: the same prompts, unaudited. READ: python3 scripts/ci/parked_compare.py --control <GX0 smoke log> "
                   "--parked <GX1 smoke log> --control-container <GX0 container log> --parked-container <GX1 container log> --profile %s: every levern_equal, levern_equal_busy and parked_equal content hash "
-                  "EQUAL (the last w2-er GX: 37 of 37), compared above 0, the parked judge with 0 problems under the lever band. Any difference is NO-GO for shipping. %s%s" % (ship, ship, telemetry, note))),
+                  "EQUAL (the last w2-er GX: 37 of 37), compared above 0, the parked judge with 0 problems under the lever band. Any difference is NO-GO for shipping. %s%s%s" % (ship, ship, telemetry, checkpoint, note))),
         dict(name='G2-prefix-hit', mode='soft', minutes=SHIP_MINUTES['G2'], actions='reset prefix', profile=None, tests=None, telemetry=False,
-             extra=['C2_PREFIX_PLAN=levern-hit', 'C2_PREFIX_PROFILE=%s' % ship, 'C2_PREFIX_BASELINE=none', 'C2_BOX_MINUTES=45'], needs=('G2 <- B0',),
+             extra=selection + ['C2_PREFIX_PLAN=levern-hit', 'C2_PREFIX_PROFILE=%s' % ship, 'C2_PREFIX_BASELINE=none', 'C2_BOX_MINUTES=45'], needs=('G2 <- B0',),
              why=("G2 (SOFT): the salted prefix hit on the SHIP image beside six decoding seats (c2_prefix_gate.py --plan levern-hit, no baseline): a returning turn reuses its prefix (cached tokens above 0) while "
                   "a cold 254k prompt is in prefill, through Lever N's merged route, with engine reuse, W2 and the op-fusion levers on. READ: the plan verdict PASS (INCONCLUSIVE only for the 16,384-token "
                   "step case the plan names), reused tokens above 0 on the hit, no program compiled by the hit after its cold twin. SOFT because the w2-er G2 failed on stale prefix-gate readers, identically "
-                  "on its Lever-N-only control, and the owner overrode it: read a failure against that control before calling it a regression. The prefix step has no telemetry sidecar. Estimate 35 minutes.")),
+                  "on its Lever-N-only control, and the owner overrode it: read a failure against that control before calling it a regression. The prefix step has no telemetry sidecar. Estimate 35 minutes.") + checkpoint),
         dict(name='SR-platform-replay', mode='stop', minutes=SHIP_MINUTES['SR'], actions='reset replay', profile=None, tests=None, telemetry=False,
              extra=['C2_PLATFORM_IMAGE=local:thin-layer', 'C2_REPLAY_PROFILE=%s' % ship, 'C2_BOX_MINUTES=60'], needs=('SR <- G1 GX1',),
-             why=("SR (STOP): the four-card platform replay of the PRODUCTION image: the node agent's serving sequence in a copy of its container running the THIN LAYER built on the B0 image "
-                  "(C2_PLATFORM_IMAGE=local:thin-layer: the step reads the image name from a file the operator writes on the runner; it is never committed). The replay sets no profile, so it boots "
-                  "the ship profile BY THE IMAGE DEFAULT, which is why it needs the baked B0 image and so the APPROVED decision. THE RECORDED SOURCE IMAGE: the replay copies the node agent's container "
-                  "from a tracked record (scripts/ci/references/c2-serving, the step's --source) and, to subtract the source image's own ENV from the recorded one, needs that image present on the rig host "
-                  "(c2_platform_replay.source_problem); when the step reports 'the source image ... is not on this host', the operator pulls it first (the w2-er SR needed this after the daemon had "
-                  "dropped it) - the image name stays out of this file. READ the vLLM subprocess log: '[QWEN-C2] profile %s: vLLM argv', the OWNER TRAFFIC WAIVER line, the P150x4 mesh, admission passed "
-                  "with no UNQUALIFIED admission line and no 262k evidence waiver, prefix installed, the Lever N install and warm lines, the parked build line, every op-fusion lever's engaged line, the :tt "
-                  "alias before and after the restart, and no kill-switch line (no levern.off, prefix-reuse.off or parked.off left on the hub). PASS: 'PLATFORM_REPLAY passed=True'. The replay turns the "
-                  "session cap off; the cap is read live after the deploy. The replay step has no telemetry sidecar. Measured basis: 25 minutes.%s" % (ship, note))),
+             why=sr_why),
     ]
 
 
@@ -373,6 +405,25 @@ def render_ship_order(rows, plan, spec):
     several = len(plan.get('ship', ())) > 1
     approve = 'make_fusion_profiles.py --approve-ship \"APPROVED ...\"' + (' --ship %s' % spec['name'] if several else '')
     extra = (' plus the extra env %s' % ', '.join('%s=%s' % pair for pair in sorted(spec['env'].items()))) if spec.get('env') else ''
+    model = spec.get('model')
+    layers = ("# B0 builds; the operator builds the production thin layer on the B0 image between B0 and G1 (no card job may run during that build); G1, GX0, GX1 and G2 gate the base on the cards; SR replays the agent's "
+              "serving sequence on the thin layer itself (the bytes production will run). C2_TELEMETRY=1 is on every job whose action supports it (the smoke and gate steps: G1, GX0, GX1); the prefix, replay and build steps have none.")
+    passed = ("# PASS (all needed before any publish or :latest move): B0 built and its provenance clean; G1 every smoke rule clean, skew under 238 s, 0 crashes, parked judge 0 problems; GX1 every hash equal to GX0's; "
+              "G2 PASS (or the owner's recorded override against its control); SR 'PLATFORM_REPLAY passed=True'. Any failure: production is restored from the rollback image instead (no retry on the cards without the owner).")
+    if model:
+        layers = ("# B0 builds; between B0 and G1 the operator builds TWO thin layers on the B0 image (no card job may run during those builds): the BASE VARIANT (the thin-layer build without the checkpoint lines) "
+                  "and the PRODUCTION LAYER (the base variant plus ONE layer of exactly three ENV lines: QWEN_C2_MODEL_REPO=%s, QWEN_C2_MODEL_REVISION=%s and the alias THATCH_SERVING_MODEL_ALIAS=%s:tt; the "
+                  "sorted Config.Env of the two images differ by exactly those lines). G1, GX0, GX1 and G2 gate the B0 image on the cards serving %s, the checkpoint production serves beside this profile "
+                  "(C2_MODEL_REPO and C2_MODEL_REVISION, the same keys in every smoke and prefix job, so GX0 and GX1 differ by the profile alone). SR replays the agent's serving sequence on the BASE VARIANT, "
+                  "on the base checkpoint: the replay step cannot forward a checkpoint selection, and on the production layer the contract refuses the replay's base model at every load "
+                  "(SR-platform-replay.env says why). SR qualifies the platform sequence and the B0 bytes, not the production bytes: the production layer is first served by the library deploy "
+                  "(release_first). C2_TELEMETRY=1 is on every job whose action supports it (the smoke and gate steps: G1, GX0, GX1); the prefix, replay and build steps have none."
+                  % (model['repo'], model['revision'], model['repo'], model['repo']))
+        passed = ("# PASS (all needed before any publish, placement or :latest move; a smaller gate depth is the owner's to choose and to record in this file before B0): B0 built and its provenance clean; G1 "
+                  "every smoke rule clean, skew under 238 s, 0 crashes, parked judge 0 problems; GX1 every hash equal to GX0's; G2 PASS (or the owner's recorded override against its control); every smoke "
+                  "and prefix job's checkpoint read clean; SR 'PLATFORM_REPLAY passed=True' on the base variant. AFTER THE DEPLOY (the production layer's first serving): /v1/models names %s:tt, a tool "
+                  "call comes back as tool_calls, the reasoning is split from the answer, and the no-tier read holds in the engine log. Any failure: production is restored from the rollback IMAGE (the "
+                  "image that served before, never the control profile on this image), with no retry on the cards without the owner." % model['repo'])
     lines = [
         "# The order of the op-fusion SHIP gates (docs/tp4-fusion.md, modelled on references/tp4-ship-ln-w2-er-jobs): the profile %s = the production profile plus exactly the env of the combined gate arm "
         "%s%s%s, a TRAFFIC profile under the owner traffic waiver %s. ONE image (%s, a placeholder: B0 builds it from the approved commit)." % (ship, fusion.NAMESPACE, spec['source'], extra, spec['waiver']['id'], image),
@@ -386,15 +437,13 @@ def render_ship_order(rows, plan, spec):
         "Never cancel a running card job. The cards are 13x10: read the grid from the run.",
         "# READ NOTE: card jobs run in a container with a CPU quota and no core pinning, while the production serving container is pinned and unthrottled, so host-bound gains (the round-host and the host-gap levers) measured in "
         "a card job are likely PESSIMISTIC against production.",
-        "# B0 builds; the operator builds the production thin layer on the B0 image between B0 and G1 (no card job may run during that build); G1, GX0, GX1 and G2 gate the base on the cards; SR replays the agent's "
-        "serving sequence on the thin layer itself (the bytes production will run). C2_TELEMETRY=1 is on every job whose action supports it (the smoke and gate steps: G1, GX0, GX1); the prefix, replay and build steps have none.",
+        layers,
         "# DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every job on the right completed and passed its READ rule; otherwise the driver skips them.",
     ]
     for row in rows:
         lines.extend('# NEEDS ' + need for need in row['needs'])
     lines += [
-        "# PASS (all needed before any publish or :latest move): B0 built and its provenance clean; G1 every smoke rule clean, skew under 238 s, 0 crashes, parked judge 0 problems; GX1 every hash equal to GX0's; "
-        "G2 PASS (or the owner's recorded override against its control); SR 'PLATFORM_REPLAY passed=True'. Any failure: production is restored from the rollback image instead (no retry on the cards without the owner).",
+        passed,
         "# Time (estimate, minutes): %s: %d minutes (%d h %d min), plus the thin layer (about 10) and about 3 minutes of queue per tag." % (
             ', '.join('%s %d' % (row['name'].split('-')[0], row['minutes']) for row in rows), total, total // 60, total % 60),
     ]

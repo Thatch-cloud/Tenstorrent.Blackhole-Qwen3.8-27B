@@ -4,7 +4,8 @@ boot and the fast worker's one malloc_trim after the warm (docs/tp4-s6-notier.md
   -fx-traffic-s6-nt   the ship-6 profile that serves production (-fx-traffic-s6) less exactly its six host-tier lines (QWEN_PREFIX_HOST_TIER_GIB, _AUDIT, _VERIFY,
                       _SPILL_MODE, QWEN_PREFIX_TIER_RESTORE_SLICE, _MS) plus QWEN_C2_TEXT_ONLY_BOOT=1, under ONE owner traffic waiver of its own (decision PENDING or
                       APPROVED: these tests read neither);
-  ship-traffic-s6-nt  its generated ship pack (B0 G1 GX0 GX1 G2 SR); the exactness control is the ship-6 profile.
+  ship-traffic-s6-nt  its generated ship pack (B0 G1 GX0 GX1 G2 SR); the exactness control is the ship-6 profile; the card gates serve Swift (the ship entry's
+                      model, what production serves) and SR replays the base variant of the thin layer.
 
 The ship-6 profile, its waiver and every profile that existed on tp4/s6 stay byte-identical (checked against the commit this branch was cut from)."""
 
@@ -47,6 +48,10 @@ TIER_LEVERS = ('QWEN_PREFIX_HOST_TIER_GIB', 'QWEN_PREFIX_HOST_TIER_SPILL_MODE')
 PACK = HERE / 'references' / 'fusion-jobs' / 'ship-traffic-s6-nt'
 READER = HERE / 'c2_serving_job.py'
 PACK_JOBS = ('B0-ship-build', 'G1-ship-gate', 'GX0-exact-control', 'GX1-exact-ship', 'G2-prefix-hit', 'SR-platform-replay')
+CATALOG = json.loads((HERE / 'qwen_c2_checkpoints.json').read_text(encoding='utf-8'))
+SWIFT = CATALOG['checkpoints'][0]               # the checkpoint production serves (its thin layer selects it)
+CARD_GATES = ('G1-ship-gate', 'GX0-exact-control', 'GX1-exact-ship', 'G2-prefix-hit')
+S6_WINDOW = HERE / 'references' / 'fusion-jobs' / 'S6'
 
 
 def boot_problems(profile):
@@ -82,6 +87,8 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(regenerated[NOTIER], PROFILES[NOTIER])
         self.assertNotIn('gate_only', PROFILES[NOTIER])
         self.assertEqual((SPEC['pack'], SPEC['image'], SPEC['control'], SPEC['bake_graft'], SPEC['memory_plan']), (None, 'tp4-s6nt-1', 'traffic-s6', 'K64j-OQ', 'octo'))
+        self.assertEqual(SPEC['model'], {'repo': SWIFT['repo'], 'revision': SWIFT['revision']}, 'the gates serve the checkpoint production serves')
+        self.assertIsNone(SPEC6.get('model'))
         self.assertEqual(DATA['default'], 'c2-packed-tp4', 'the file default is untouched: a build bakes its own (C2_BAKE_DEFAULT_PROFILE)')
 
     def test_the_name_fits_what_a_baked_default_may_be(self):
@@ -210,6 +217,21 @@ class ManifestTests(unittest.TestCase):
         for key in ('from', 'memory_plan', 'bake_graft'):
             self.assertEqual(new[key], old[key], key)
         self.assertEqual(new['control'], 'traffic-s6')
+
+    def test_the_model_key_is_checked_and_changes_no_profile(self):
+        raw = json.loads((fusion.MANIFESTS / 'S6NT.json').read_text(encoding='utf-8'))['ship'][0]
+        self.assertEqual(fusion.ship_of('S6NT', raw, 'S6NT')['model'], {'repo': SWIFT['repo'], 'revision': SWIFT['revision']})
+        self.assertIsNone(fusion.ship_of('S6NT', {key: value for key, value in raw.items() if key != 'model'}, 'S6NT')['model'])
+        for bad in ({'repo': SWIFT['repo']}, {'repo': SWIFT['repo'], 'revision': SWIFT['revision'][:12]}, {'repo': 'no-slash', 'revision': SWIFT['revision']},
+                    {'repo': SWIFT['repo'], 'revision': SWIFT['revision'], 'served': 'x'}, 'ukisai/Swift-1.5-Qwen3.8-27b', {'repo': SWIFT['repo'], 'revision': SWIFT['revision'].upper()}):
+            with self.assertRaises(fusion.ManifestError, msg=repr(bad)):
+                fusion.ship_of('S6NT', dict(raw, model=bad), 'S6NT')
+        plan = copy.deepcopy(PLAN)
+        for item in plan['ship']:
+            item['model'] = None
+        generated = fusion.generate_profiles(json.loads(PROFILES_PATH.read_text(encoding='utf-8')), plan)['profiles']
+        for name in fusion.ship_names():
+            self.assertEqual(generated[name], PROFILES[name], name)
 
 
 class TextOnlyBootTests(unittest.TestCase):
@@ -369,7 +391,8 @@ def raising_say(line):
 
 
 class PackTests(unittest.TestCase):
-    """The ship pack make_fusion_jobs.py generates for the entry: B0 bakes this profile, GX0 is the ship-6 control, SR replays this profile by the image default."""
+    """The ship pack make_fusion_jobs.py generates for the entry: B0 bakes this profile, GX0 is the ship-6 control, the smoke and prefix gates serve the checkpoint production
+    serves (the entry's model), and SR replays this profile by the image default on the base variant of the thin layer (the replay step cannot carry a selection)."""
 
     def values(self, name):
         return job.parse_env((PACK / (name + '.env')).read_text(encoding='utf-8'))
@@ -399,6 +422,41 @@ class PackTests(unittest.TestCase):
                     self.assertNotEqual(result.returncode, 0, 'a PENDING decision is never baked')
                 else:
                     self.assertEqual(result.returncode, 0, result.stderr.decode('utf-8', 'replace'))
+
+    def test_the_card_gates_serve_the_checkpoint_production_serves_and_the_window_qualified(self):
+        window = job.parse_env((S6_WINDOW / 'T1B-s6-candidate.env').read_text(encoding='utf-8'))
+        for name in CARD_GATES:
+            with self.subTest(name):
+                found = self.values(name)
+                self.assertEqual((found['C2_MODEL_REPO'], found['C2_MODEL_REVISION']), (SWIFT['repo'], SWIFT['revision']))
+                self.assertEqual((found['C2_MODEL_REPO'], found['C2_MODEL_REVISION']), (window['C2_MODEL_REPO'], window['C2_MODEL_REVISION']), 'the S6 window ran Swift')
+                self.assertFalse(set(found['C2_ACTIONS'].split()) - set(job.MODEL_ACTIONS))
+                self.assertIn('CHECKPOINT (C2_MODEL_REPO and C2_MODEL_REVISION', (PACK / (name + '.env')).read_text(encoding='utf-8').replace('\n# ', ' '))
+        for name in ('B0-ship-build', 'SR-platform-replay'):
+            self.assertNotIn('C2_MODEL_REPO', self.values(name), name)
+            self.assertNotIn('C2_MODEL_REVISION', self.values(name), name)
+
+    def test_the_exactness_pair_differs_by_the_profile_alone(self):
+        control, arm = self.values('GX0-exact-control'), self.values('GX1-exact-ship')
+        self.assertEqual(sorted(set(control) ^ set(arm)), [])
+        self.assertEqual(sorted(key for key in control if control[key] != arm[key]), ['C2_PROFILE', 'C2_SMOKE_PARTIAL'])
+        self.assertEqual((control['C2_PROFILE'], arm['C2_PROFILE']), (SHIP, NOTIER))
+
+    def test_the_replay_runs_the_base_variant_of_the_thin_layer(self):
+        found = self.values('SR-platform-replay')
+        self.assertNotIn('replay', job.MODEL_ACTIONS, 'the replay step cannot carry a checkpoint selection')
+        self.assertNotIn('C2_REPLAY_SERVED_MODEL', found, 'the base variant advertises the base alias, the replay default')
+        text = (PACK / 'SR-platform-replay.env').read_text(encoding='utf-8').replace('\n# ', ' ')
+        for phrase in ('RUNS ON THE BASE VARIANT OF THE THIN LAYER, NEVER ON THE PRODUCTION LAYER', 'check_platform_model', 'three ENV lines',
+                       '%s:tt' % SWIFT['repo'], 'C2_REPLAY_PROFILE (required on four cards) is the profile the image must boot BY ITS DEFAULT'):
+            self.assertIn(phrase, text)
+        self.assertNotIn('The replay sets no profile', text)
+        order = (PACK / 'ORDER.txt').read_text(encoding='utf-8')
+        self.assertIn('TWO thin layers', order)
+        self.assertIn("SR 'PLATFORM_REPLAY passed=True' on the base variant", order)
+        self.assertIn('# PASS (all needed before any publish, placement or :latest move', order)
+        self.assertIn('# NEEDS SR <- G1 GX1', order)
+        self.assertIn('the rollback IMAGE', order)
 
 
 if __name__ == '__main__':
