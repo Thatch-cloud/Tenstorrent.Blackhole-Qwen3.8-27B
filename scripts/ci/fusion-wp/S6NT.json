@@ -80,7 +80,7 @@
      "the host memory read of 2026-11-17 (the code against the engine process's measured maps): the 32 GiB shared anonymous mapping is the tier's slab (TierStore.configure, QWEN_PREFIX_HOST_TIER_GIB 48 less QWEN_PREFIX_STORE_GIB 16; 15,420 slots of 2,228,224 B = 31.9995 GiB, the measured size); it never shrinks, the kill switches free nothing, and lowering the store alone would grow it; about 16 GiB of the heap is the checkpoint store, which this profile keeps",
      "tp4/s6-notier (CPU): the profile is the ship-6 profile less exactly the six tier lines plus the text-only switch and its own waiver id; the contract boots it clean and refuses the text-only switch on a profile that admits an image (test_s6nt_profiles). What has NOT run: this profile on a card, the tier-off path beside the ship-6 stack, the text-only boot and the post-warm malloc_trim; B0, GX0/GX1 and SR of references/fusion-jobs/ship-traffic-s6-nt are the first"
     ],
-    "decision": "PENDING: the owner decided on 2026-11-17 to take the host KV tier off production (checkpoint store kept at 16 GiB, malloc_trim after warm-up, text-only boot); the approval is recorded with make_fusion_profiles.py --approve-ship --ship traffic-s6-nt"
+    "decision": "APPROVED 2026-11-17 by the owner: the host KV tier off production with the checkpoint store kept at 16 GiB, malloc_trim once after the warm and the text-only boot, to give the card host about 32 GiB of RAM back for CI. Conditional on the ship gates of references/fusion-jobs/ship-traffic-s6-nt: B0 builds the image, SR replays the platform's serving sequence on its thin layer and is read before placement (GX0 and GX1 when the window has the minutes). The text-only boot is the one switchable line."
    }
   }
  ]
